@@ -1,0 +1,8 @@
+resources:
+- service_account.yaml
+- role.yaml
+- role_binding.yaml
+- leader_election_role.yaml
+- leader_election_role_binding.yaml
+# runner_role.yaml lives in the mcp-evals target namespace and is applied
+# directly by `make deploy` so kustomize's namespace/namePrefix do not rewrite it.

@@ -1,0 +1,138 @@
+apiVersion: security.eval.io/v1alpha1
+kind: OpenCodeAgent
+metadata:
+  name: mcp-synthesizer
+  namespace: mcp-evals
+  labels:
+    security.eval.io/stage: synthesis
+spec:
+  role: "SynthesisScorer"
+  model:
+    providerID: "anthropic"
+    modelID: "claude-sonnet-4-6"
+  config:
+    timeoutMs: 180000
+    retryCount: 3
+  systemPrompt: |
+    You are the lead security reviewer producing the final verdict for an MCP
+    server evaluation. The user message contains the structured JSON outputs
+    of three prior agents — StaticSecurityAuditor (SAST), DynamicProtocolFuzzer
+    (DAST/resilience) and RogueBehaviorProbe (adversarial) — plus the harness
+    telemetry (crashes, latency, agent failures). Some agents may have failed;
+    if so their section says so and you must score conservatively (treat a
+    failed static or rogue pass as "Unknown" evidence and cap the safety score
+    at 60; a failed dynamic pass caps reliability at 60).
+
+    Compute:
+
+    * safetyScore (0–100): weighted combination — 45% static score, 45% rogue
+      score, 10% dynamic information-disclosure/validation quality. Any
+      confirmed Critical from the rogue agent forces safetyScore ≤ 10. Any
+      confirmed Critical from the static agent forces safetyScore ≤ 30.
+    * reliabilityScore (0–100): the dynamic agent's reliabilityScore adjusted
+      by ±10 for corroborating or contradicting evidence (e.g. crashes seen
+      during adversarial probes).
+    * riskCategory:
+        Malicious  — rogue agent isMalicious=true, or a confirmed injection /
+                     exfiltration / host-read vector.
+        Untrusted  — safetyScore < 40, or any confirmed Critical static
+                     finding, or the static/rogue evidence is missing.
+        Caution    — safetyScore 40–74, or reliabilityScore < 50, or any High
+                     finding.
+        Safe       — safetyScore ≥ 75 and reliabilityScore ≥ 50 and no
+                     Critical/High findings.
+    * findings: the de-duplicated union of all agents' findings, normalised to
+      {agent, severity, title, description, remediation}, ordered by severity
+      then agent. Keep at most 40; summarise the rest in `summary`.
+    * remediationPlan: prioritised, code-level guidance. Each item names the
+      file/tool, the concrete change (e.g. "normalise and prefix-check
+      `path` against the allowed root before fs.readFile"), and which
+      finding IDs it closes. Include a short code snippet in `codeGuidance`
+      when the fix is local.
+
+    Be decisive and consistent: the same evidence must always yield the same
+    category. Respond ONLY with JSON matching the required schema.
+  outputFormat:
+    type: "json_schema"
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        safetyScore:
+          type: number
+          minimum: 0
+          maximum: 100
+        reliabilityScore:
+          type: number
+          minimum: 0
+          maximum: 100
+        riskCategory:
+          type: string
+          enum: ["Safe", "Caution", "Untrusted", "Malicious"]
+        confidence:
+          type: string
+          enum: ["High", "Medium", "Low"]
+        agentCoverage:
+          type: object
+          additionalProperties: false
+          properties:
+            static:
+              type: boolean
+            dynamic:
+              type: boolean
+            adversarial:
+              type: boolean
+          required: ["static", "dynamic", "adversarial"]
+        findings:
+          type: array
+          maxItems: 40
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              agent:
+                type: string
+              severity:
+                type: string
+                enum: ["Critical", "High", "Medium", "Low", "Info"]
+              title:
+                type: string
+              description:
+                type: string
+              remediation:
+                type: string
+            required: ["agent", "severity", "title", "description", "remediation"]
+        remediationPlan:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              priority:
+                type: integer
+                minimum: 1
+              title:
+                type: string
+              severity:
+                type: string
+                enum: ["Critical", "High", "Medium", "Low"]
+              description:
+                type: string
+              codeGuidance:
+                type: string
+              closesFindings:
+                type: array
+                items:
+                  type: string
+            required: ["priority", "title", "severity", "description", "codeGuidance", "closesFindings"]
+        summary:
+          type: string
+      required:
+        - safetyScore
+        - reliabilityScore
+        - riskCategory
+        - confidence
+        - agentCoverage
+        - findings
+        - remediationPlan
+        - summary

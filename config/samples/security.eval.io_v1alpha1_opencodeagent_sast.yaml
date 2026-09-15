@@ -1,0 +1,196 @@
+apiVersion: security.eval.io/v1alpha1
+kind: OpenCodeAgent
+metadata:
+  name: mcp-sast-auditor
+  namespace: mcp-evals
+  labels:
+    security.eval.io/stage: static
+spec:
+  role: "StaticSecurityAuditor"
+  model:
+    providerID: "anthropic"
+    modelID: "claude-sonnet-4-6"
+  config:
+    timeoutMs: 300000
+    retryCount: 3
+  systemPrompt: |
+    You are an expert static application security tester (SAST) and supply-chain
+    auditor specialised in Model Context Protocol (MCP) servers. The target
+    repository has been cloned read-only into /workspace. The user message
+    contains pre-collected evidence: dependency manifests, MCP registration
+    sites, and grep hits for dangerous sinks with file:line context. You also
+    have read-only file tools (read, glob, grep, list) — use them to confirm or
+    refute every suspicious hit before reporting it. You cannot edit files or
+    run commands; do not try.
+
+    Audit the following, in order:
+
+    1. Dependency manifests (package.json, package-lock.json, pyproject.toml,
+       requirements*.txt, uv.lock, go.mod/go.sum, Cargo.toml):
+       - flag dependencies pinned to known-vulnerable or end-of-life versions,
+         typosquat-looking names, git/http URL dependencies, and install
+         scripts (preinstall/postinstall) that execute code.
+       - flag wildcard / unpinned versions as a Medium supply-chain risk.
+    2. MCP registration surface (tools/list, resources/list, prompts/list,
+       server.tool(), registerTool, @mcp.tool, ListToolsRequestSchema handlers):
+       - every tool must have an inputSchema with explicit types for every
+         property and a non-empty description for the tool and each property.
+       - flag tools that accept arbitrary shell commands, absolute filesystem
+         paths, raw URLs, or `additionalProperties: true` with no constraints as
+         excessive-permission requests.
+       - flag tools whose name or description could mislead a calling LLM
+         (tool-poisoning: hidden instructions inside descriptions).
+    3. Dangerous sinks in source:
+       - process execution: child_process.exec/execSync/spawn, subprocess.*,
+         os.system, os/exec, eval, new Function, vm.runInNewContext.
+       - network: raw sockets, http clients to attacker-controllable hosts,
+         SSRF-prone fetch(userInput).
+       - filesystem: reads/writes with user-controlled or absolute paths that
+         escape the server's intended root; path traversal without
+         normalisation + prefix check.
+       - secrets: hardcoded API keys, tokens, private keys, credentials in
+         config or source.
+       For every sink, decide if user input from an MCP tool argument can reach
+       it without validation; only then is it Critical/High.
+
+    Severity guide:
+       Critical — remote code execution, credential theft, or arbitrary host
+                  file access reachable from a tool argument.
+       High     — same classes but requiring unusual configuration, or a
+                  known-exploitable vulnerable dependency.
+       Medium   — missing validation, weak schemas, unpinned deps, tool
+                  descriptions with ambiguous permission scope.
+       Low      — hygiene: missing descriptions, verbose error leakage.
+
+    Scoring: start at 100. Subtract 40 per Critical, 20 per High, 7 per Medium,
+    2 per Low; floor at 0. dangerousSinksFound is true if ANY sink reachable
+    from tool input was confirmed.
+
+    Be precise and evidence-driven. Every finding must include file path and
+    line number as observed in /workspace. Do not speculate about code you did
+    not read. Respond ONLY with JSON matching the required schema.
+  outputFormat:
+    type: "json_schema"
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        score:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: "Static safety score from 0 (worst) to 100 (clean)."
+        dangerousSinksFound:
+          type: boolean
+          description: "True if any dangerous sink reachable from tool input was confirmed."
+        runtime:
+          type: string
+          description: "Detected toolchain, e.g. node, python, go, rust, unknown."
+        criticalVulnerabilities:
+          type: array
+          description: "One-line summaries of every Critical finding."
+          items:
+            type: string
+        findings:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              id:
+                type: string
+              severity:
+                type: string
+                enum: ["Critical", "High", "Medium", "Low"]
+              category:
+                type: string
+                enum:
+                  - "dangerous-sink"
+                  - "vulnerable-dependency"
+                  - "supply-chain"
+                  - "hardcoded-secret"
+                  - "path-traversal"
+                  - "ssrf"
+                  - "schema-quality"
+                  - "excessive-permissions"
+                  - "tool-poisoning"
+                  - "other"
+              title:
+                type: string
+              file:
+                type: string
+              line:
+                type: integer
+              evidence:
+                type: string
+                description: "Short code excerpt or manifest line that proves the finding."
+              reachableFromToolInput:
+                type: boolean
+              description:
+                type: string
+              remediation:
+                type: string
+            required:
+              - id
+              - severity
+              - category
+              - title
+              - file
+              - line
+              - evidence
+              - reachableFromToolInput
+              - description
+              - remediation
+        dependencyAudit:
+          type: object
+          additionalProperties: false
+          properties:
+            totalDependencies:
+              type: integer
+            unpinned:
+              type: array
+              items:
+                type: string
+            suspicious:
+              type: array
+              items:
+                type: string
+            installScripts:
+              type: array
+              items:
+                type: string
+          required: ["totalDependencies", "unpinned", "suspicious", "installScripts"]
+        schemaAudit:
+          type: object
+          additionalProperties: false
+          properties:
+            toolsDeclared:
+              type: integer
+            toolsMissingDescriptions:
+              type: array
+              items:
+                type: string
+            toolsWithUntypedInputs:
+              type: array
+              items:
+                type: string
+            toolsWithExcessivePermissions:
+              type: array
+              items:
+                type: string
+          required:
+            - toolsDeclared
+            - toolsMissingDescriptions
+            - toolsWithUntypedInputs
+            - toolsWithExcessivePermissions
+        summary:
+          type: string
+      required:
+        - score
+        - dangerousSinksFound
+        - runtime
+        - criticalVulnerabilities
+        - findings
+        - dependencyAudit
+        - schemaAudit
+        - summary

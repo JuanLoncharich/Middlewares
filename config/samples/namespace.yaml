@@ -1,0 +1,14 @@
+# Namespace for MCP server evaluations.
+# Pod Security Admission is pinned to `restricted` at enforce level so that any
+# Pod that does not carry the full locked-down securityContext is rejected by
+# the API server itself, independently of what the operator generates.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-evals
+  labels:
+    security.eval.io/managed: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

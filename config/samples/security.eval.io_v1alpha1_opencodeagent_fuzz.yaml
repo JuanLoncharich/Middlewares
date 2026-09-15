@@ -1,0 +1,185 @@
+apiVersion: security.eval.io/v1alpha1
+kind: OpenCodeAgent
+metadata:
+  name: mcp-fuzz-tester
+  namespace: mcp-evals
+  labels:
+    security.eval.io/stage: dynamic
+spec:
+  role: "DynamicProtocolFuzzer"
+  model:
+    providerID: "anthropic"
+    modelID: "claude-sonnet-4-6"
+  config:
+    timeoutMs: 240000
+    retryCount: 3
+  systemPrompt: |
+    You are a dynamic protocol analyst (DAST) for Model Context Protocol
+    servers. The evaluator harness has ALREADY executed the live session
+    against the sandboxed target and hands you the raw telemetry in the user
+    message:
+
+      * the `initialize` handshake request/response (or its failure),
+      * the full enumeration of tools, prompts and resources,
+      * every fuzz case sent (boundary values, type mismatches, oversized
+        payloads, nulls for required fields, prototype-pollution keys,
+        malformed JSON-RPC frames, unknown methods, batch requests) with the
+        response, latency and classification,
+      * crash events (process exits recorded by the supervisor), hang events
+        (requests that exceeded the timeout), malformed frames emitted by the
+        server, and latency percentiles.
+
+    You have no tools; analyse only what you are given and never invent
+    results. Your job is to interpret the telemetry:
+
+    1. Handshake: did the server complete `initialize` with a valid
+       protocolVersion and serverInfo, and accept `notifications/initialized`?
+    2. Protocol conformance: are JSON-RPC errors returned with correct codes
+       (-32700 parse, -32600 invalid request, -32601 method not found,
+       -32602 invalid params) rather than crashes, hangs, or success responses
+       to invalid input? Does the server validate tool arguments against its
+       own inputSchema?
+    3. Resilience: any crash is a Critical resilience defect; any hang is
+       High; error responses that leak stack traces, absolute paths or
+       environment variables are Medium (information disclosure).
+    4. Performance: report avg/p95/max latency and call out tools whose p95
+       exceeds 5s.
+
+    reliabilityScore: start at 100; -35 per distinct crashing input class,
+    -20 per hang class, -10 per input class the server accepted without
+    validation when it should have rejected it, -5 per information-leaking
+    error, -5 if the handshake needed a protocolVersion fallback; floor 0.
+
+    Respond ONLY with JSON matching the required schema.
+  outputFormat:
+    type: "json_schema"
+    schema:
+      type: object
+      additionalProperties: false
+      properties:
+        reliabilityScore:
+          type: number
+          minimum: 0
+          maximum: 100
+        handshake:
+          type: object
+          additionalProperties: false
+          properties:
+            succeeded:
+              type: boolean
+            protocolVersion:
+              type: string
+            serverName:
+              type: string
+            serverVersion:
+              type: string
+            usedFallbackVersion:
+              type: boolean
+            notes:
+              type: string
+          required: ["succeeded", "protocolVersion", "serverName", "serverVersion", "usedFallbackVersion", "notes"]
+        surface:
+          type: object
+          additionalProperties: false
+          properties:
+            tools:
+              type: integer
+            prompts:
+              type: integer
+            resources:
+              type: integer
+            toolNames:
+              type: array
+              items:
+                type: string
+          required: ["tools", "prompts", "resources", "toolNames"]
+        fuzzing:
+          type: object
+          additionalProperties: false
+          properties:
+            casesExecuted:
+              type: integer
+            crashes:
+              type: integer
+            hangs:
+              type: integer
+            malformedResponses:
+              type: integer
+            acceptedInvalidInputs:
+              type: integer
+            informationLeaks:
+              type: integer
+          required:
+            - casesExecuted
+            - crashes
+            - hangs
+            - malformedResponses
+            - acceptedInvalidInputs
+            - informationLeaks
+        latency:
+          type: object
+          additionalProperties: false
+          properties:
+            avgMs:
+              type: number
+            p95Ms:
+              type: number
+            maxMs:
+              type: number
+            slowTools:
+              type: array
+              items:
+                type: string
+          required: ["avgMs", "p95Ms", "maxMs", "slowTools"]
+        findings:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              id:
+                type: string
+              severity:
+                type: string
+                enum: ["Critical", "High", "Medium", "Low"]
+              category:
+                type: string
+                enum:
+                  - "crash"
+                  - "hang"
+                  - "protocol-nonconformance"
+                  - "missing-input-validation"
+                  - "information-disclosure"
+                  - "performance"
+                  - "other"
+              tool:
+                type: string
+                description: "Tool or method name, or 'protocol' for frame-level issues."
+              triggeringInput:
+                type: string
+                description: "Compact description of the input that triggered it."
+              observed:
+                type: string
+              description:
+                type: string
+              remediation:
+                type: string
+            required:
+              - id
+              - severity
+              - category
+              - tool
+              - triggeringInput
+              - observed
+              - description
+              - remediation
+        summary:
+          type: string
+      required:
+        - reliabilityScore
+        - handshake
+        - surface
+        - fuzzing
+        - latency
+        - findings
+        - summary

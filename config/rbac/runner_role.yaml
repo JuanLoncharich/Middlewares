@@ -1,0 +1,54 @@
+# Identity used by the evaluator container inside evaluation Jobs.
+# The token is projected ONLY into the evaluator container (never the target).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-eval-runner
+  namespace: mcp-evals
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+    app.kubernetes.io/component: runner
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-eval-runner
+  namespace: mcp-evals
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+    app.kubernetes.io/component: runner
+rules:
+- apiGroups:
+  - security.eval.io
+  resources:
+  - opencodeagents
+  - mcpservers
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - security.eval.io
+  resources:
+  - mcpevaluationruns
+  - mcpevaluationruns/status
+  verbs:
+  - get
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-eval-runner
+  namespace: mcp-evals
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+    app.kubernetes.io/component: runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-eval-runner
+subjects:
+- kind: ServiceAccount
+  name: mcp-eval-runner
+  namespace: mcp-evals

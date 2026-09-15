@@ -1,0 +1,233 @@
+# ---------------------------------------------------------------------------
+# Reference Pod for the evaluation sandbox.
+#
+# This is the exact Pod shape the MCPEvaluationRun controller generates inside
+# its batch/v1 Job (see internal/controller/mcpevaluationrun_controller.go).
+# It is provided so the security posture can be reviewed, diffed and applied
+# standalone (e.g. `kubectl apply -f pod-security.yaml` to smoke-test the
+# namespace's PodSecurity `restricted` enforcement and NetworkPolicies).
+#
+# Hard invariants:
+#   * every container: runAsNonRoot, readOnlyRootFilesystem,
+#     allowPrivilegeEscalation=false, capabilities.drop=[ALL],
+#     seccompProfile=RuntimeDefault
+#   * pod: automountServiceAccountToken=false; the evaluator gets a projected,
+#     short-lived token explicitly; the target gets NOTHING (no token, no
+#     secrets, no credentials in env)
+#   * target runs as a different UID (10002) than the evaluator (10001)
+#   * target's /workspace mount is read-only; the only writable paths are
+#     /tmp and /ipc (memory-backed emptyDir)
+#   * hostNetwork/hostPID/hostIPC are false (defaults, stated explicitly)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mcp-eval-sandbox-reference
+  namespace: mcp-evals
+  labels:
+    security.eval.io/role: evaluation-pod
+    security.eval.io/net-phase: clone
+    security.eval.io/run: reference
+    security.eval.io/server: reference
+spec:
+  restartPolicy: Never
+  serviceAccountName: mcp-eval-runner
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  shareProcessNamespace: false
+  enableServiceLinks: false
+  terminationGracePeriodSeconds: 30
+  activeDeadlineSeconds: 900
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    - name: cloner
+      image: ghcr.io/security-eval/mcp-cloner:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: REPO_URL
+          value: "https://github.com/modelcontextprotocol/servers.git"
+        - name: REPO_REF
+          value: "main"
+        - name: REPO_PATH
+          value: "src/filesystem"
+        - name: TRANSPORT
+          value: "stdio"
+        - name: TARGET_PORT
+          value: "8080"
+        - name: HOME
+          value: /tmp
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        privileged: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: ipc
+          mountPath: /ipc
+        - name: tmp
+          mountPath: /tmp
+  containers:
+    # ---------------------------------------------------------------- target
+    - name: target
+      image: ghcr.io/security-eval/mcp-target-sandbox:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: MCP_TRANSPORT
+          value: "stdio"
+        - name: MCP_PORT
+          value: "8080"
+        - name: LAUNCH_FILE
+          value: /workspace/.mcp-launch.json
+        - name: IPC_DIR
+          value: /ipc
+        - name: HOME
+          value: /tmp
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10001
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        privileged: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 250m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+          ephemeral-storage: 1Gi
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        - name: ipc
+          mountPath: /ipc
+        - name: tmp
+          mountPath: /tmp
+    # ------------------------------------------------------------- evaluator
+    - name: evaluator
+      image: ghcr.io/security-eval/mcp-evaluator:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: RUN_NAME
+          value: reference
+        - name: RUN_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: SERVER_NAME
+          value: reference
+        - name: AGENT_NAMES
+          value: "mcp-sast-auditor,mcp-fuzz-tester,mcp-rogue-detector,mcp-synthesizer"
+        - name: TRANSPORT
+          value: "stdio"
+        - name: TARGET_PORT
+          value: "8080"
+        - name: WORKSPACE_DIR
+          value: /workspace
+        - name: IPC_DIR
+          value: /ipc
+        - name: OUTPUT_DIR
+          value: /output
+        - name: OPENCODE_PORT
+          value: "4096"
+        - name: HOME
+          value: /tmp
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-provider-credentials
+              key: ANTHROPIC_API_KEY
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: File
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        privileged: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+          ephemeral-storage: 2Gi
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        - name: ipc
+          mountPath: /ipc
+        - name: tmp
+          mountPath: /tmp
+        - name: output
+          mountPath: /output
+        - name: sa-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+  volumes:
+    - name: workspace
+      emptyDir:
+        sizeLimit: 2Gi
+    - name: ipc
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: output
+      emptyDir:
+        sizeLimit: 256Mi
+    - name: sa-token
+      projected:
+        defaultMode: 0440
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+                - key: ca.crt
+                  path: ca.crt
+          - downwardAPI:
+              items:
+                - path: namespace
+                  fieldRef:
+                    fieldPath: metadata.namespace

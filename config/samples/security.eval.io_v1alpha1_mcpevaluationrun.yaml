@@ -1,0 +1,18 @@
+# A manually created run (the operator normally creates these from the
+# MCPServer schedule; you can also annotate an MCPServer with
+# security.eval.io/trigger-now: "true" instead).
+apiVersion: security.eval.io/v1alpha1
+kind: MCPEvaluationRun
+metadata:
+  name: filesystem-mcp-run-manual
+  namespace: mcp-evals
+  labels:
+    security.eval.io/server: filesystem-mcp
+spec:
+  serverRef: filesystem-mcp
+  agents:
+    - mcp-sast-auditor
+    - mcp-fuzz-tester
+    - mcp-rogue-detector
+    - mcp-synthesizer
+  timeoutSeconds: 900

@@ -1,0 +1,21 @@
+apiVersion: security.eval.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: filesystem-mcp
+  namespace: mcp-evals
+spec:
+  repositoryUrl: "https://github.com/modelcontextprotocol/servers.git"
+  ref: "main"
+  path: "src/filesystem"
+  transport: "stdio"
+  targetPort: 8080
+  schedule: "0 3 * * *"
+  active: true
+  credentialsSecretRef: ""
+  timeoutSeconds: 900
+  runHistoryLimit: 5
+  agentSuite:
+    - name: mcp-sast-auditor
+    - name: mcp-fuzz-tester
+    - name: mcp-rogue-detector
+    - name: mcp-synthesizer

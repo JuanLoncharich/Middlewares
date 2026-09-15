@@ -1,0 +1,16 @@
+# Adds namespace to all resources.
+namespace: mcp-eval-system
+
+# Value of this field is prepended to the names of all resources.
+namePrefix: mcp-eval-
+
+# Labels to add to all resources and selectors.
+labels:
+- includeSelectors: true
+  pairs:
+    app.kubernetes.io/part-of: mcp-eval-operator
+
+resources:
+- ../crd
+- ../rbac
+- ../manager

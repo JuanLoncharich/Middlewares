@@ -1,0 +1,160 @@
+# ---------------------------------------------------------------------------
+# Network isolation for the mcp-evals namespace.
+#
+# Kubernetes NetworkPolicy is Pod-scoped. The evaluation Pod is a single Pod
+# with three containers (cloner init, untrusted target, evaluator) that share
+# one network namespace, so policy is applied to the Pod and *phased* by the
+# operator through the label `security.eval.io/net-phase`:
+#
+#   clone    -> only while init containers run: egress to VCS + package
+#               registries (443) so the repository and its dependencies can be
+#               fetched. The untrusted server is NOT running in this phase.
+#   evaluate -> flipped by the MCPEvaluationRun controller the moment all init
+#               containers terminate, before the target container's process is
+#               reachable: egress ONLY to DNS, the Kubernetes API server, and
+#               the LLM provider endpoints. Nothing else.
+#
+# The target container additionally has: no ServiceAccount token, no secrets,
+# no CA bundle in its image, a distinct UID from the evaluator, and its stdio is
+# bound to FIFOs on a memory-backed emptyDir. Its only "ingress" is that IPC
+# channel (or 127.0.0.1:<port> for SSE), which is intra-Pod and never routed.
+#
+# For pods labelled security.eval.io/role=target (the optional split-Pod
+# deployment mode) an unconditional deny-all is applied.
+#
+# `api.anthropic.com` is fronted by an anycast CDN whose IP ranges change; the
+# ipBlock list below therefore allows public 443 while explicitly EXCLUDING
+# every private, link-local and cloud-metadata range. If your CNI supports
+# FQDN policies (Cilium, Calico Enterprise, Antrea) apply
+# networkpolicy-cilium.yaml instead, which pins egress to the exact hostnames.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: mcp-evals
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: target-deny-all
+  namespace: mcp-evals
+  annotations:
+    security.eval.io/invariant: "untrusted MCP target never has ingress or egress"
+spec:
+  podSelector:
+    matchLabels:
+      security.eval.io/role: target
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: evaluation-pod-dns
+  namespace: mcp-evals
+spec:
+  podSelector:
+    matchLabels:
+      security.eval.io/role: evaluation-pod
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: evaluation-pod-clone-phase
+  namespace: mcp-evals
+spec:
+  podSelector:
+    matchLabels:
+      security.eval.io/role: evaluation-pod
+      security.eval.io/net-phase: clone
+  policyTypes:
+    - Egress
+  egress:
+    # Git hosting + package registries (github.com, registry.npmjs.org,
+    # pypi.org, files.pythonhosted.org, proxy.golang.org, sum.golang.org).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+              - 0.0.0.0/8
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: evaluation-pod-evaluate-phase
+  namespace: mcp-evals
+spec:
+  podSelector:
+    matchLabels:
+      security.eval.io/role: evaluation-pod
+      security.eval.io/net-phase: evaluate
+  policyTypes:
+    - Egress
+  egress:
+    # Kubernetes API server (evaluator patches MCPEvaluationRun status).
+    # The `default/kubernetes` endpoint is not selectable by podSelector; most
+    # CNIs require its ClusterIP or the control-plane node CIDR here.
+    # Replace 10.96.0.1/32 with `kubectl get svc kubernetes -n default -o
+    # jsonpath='{.spec.clusterIP}'` and the control-plane CIDR for your cluster.
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # LLM provider endpoint (api.anthropic.com) — public 443 only, with every
+    # private / link-local / metadata range denied. Tighten to exact hosts with
+    # networkpolicy-cilium.yaml when an FQDN-aware CNI is available.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+              - 0.0.0.0/8
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 443

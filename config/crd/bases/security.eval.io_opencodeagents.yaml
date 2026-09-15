@@ -1,0 +1,148 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.15.0
+  name: opencodeagents.security.eval.io
+spec:
+  group: security.eval.io
+  names:
+    kind: OpenCodeAgent
+    listKind: OpenCodeAgentList
+    plural: opencodeagents
+    shortNames:
+    - oca
+    singular: opencodeagent
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.role
+      name: Role
+      type: string
+    - jsonPath: .spec.model.providerID
+      name: Provider
+      type: string
+    - jsonPath: .spec.model.modelID
+      name: Model
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OpenCodeAgent is the Schema for the opencodeagents API.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OpenCodeAgentSpec defines the desired state of OpenCodeAgent.
+            properties:
+              config:
+                description: Config tunes timeouts and retries.
+                properties:
+                  retryCount:
+                    default: 2
+                    format: int32
+                    maximum: 10
+                    minimum: 0
+                    type: integer
+                  timeoutMs:
+                    default: 30000
+                    format: int32
+                    minimum: 1000
+                    type: integer
+                type: object
+              model:
+                description: Model selects the provider/model the agent runs on.
+                properties:
+                  modelID:
+                    minLength: 1
+                    type: string
+                  providerID:
+                    minLength: 1
+                    type: string
+                required:
+                - modelID
+                - providerID
+                type: object
+              outputFormat:
+                description: OutputFormat declares the JSON schema the agent must answer with.
+                properties:
+                  schema:
+                    description: Schema is an arbitrary JSON Schema document the agent's answer must satisfy.
+                    x-kubernetes-preserve-unknown-fields: true
+                  type:
+                    enum:
+                    - json_schema
+                    type: string
+                required:
+                - schema
+                - type
+                type: object
+              role:
+                minLength: 1
+                type: string
+              systemPrompt:
+                minLength: 1
+                type: string
+            required:
+            - model
+            - outputFormat
+            - role
+            - systemPrompt
+            type: object
+          status:
+            description: OpenCodeAgentStatus defines the observed state of OpenCodeAgent.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
