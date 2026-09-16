@@ -61,6 +61,7 @@ spec:
           rules:
             dns:
               - matchName: api.anthropic.com
+              - matchName: opencode.ai
               - matchName: kubernetes.default.svc
               - matchPattern: "kubernetes.default.svc.*"
     - toEntities:
@@ -73,6 +74,7 @@ spec:
               protocol: TCP
     - toFQDNs:
         - matchName: api.anthropic.com
+        - matchName: opencode.ai
       toPorts:
         - ports:
             - port: "443"

@@ -88,6 +88,9 @@ const TERMINATION_LOG = "/dev/termination-log";
 function readEnv(): RunnerEnv {
   const env = process.env;
   const dryRun = env["DRY_RUN"] === "1" || env["DRY_RUN"] === "true";
+  if (!dryRun && !isNonEmptyString(env["OPENCODE_API_KEY"]) && !isNonEmptyString(env["ANTHROPIC_API_KEY"])) {
+    throw new ConfigurationError("either OPENCODE_API_KEY (OpenCode Zen) or ANTHROPIC_API_KEY must be set");
+  }
   const required = (key: string): string => {
     const value = env[key];
     if (!isNonEmptyString(value)) {
@@ -168,23 +171,7 @@ async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, port: number,
   const modelRef = `${agent.spec.model.providerID}/${agent.spec.model.modelID}`;
   // Agents must never mutate /workspace or reach the network via tools: the
   // static auditor gets read-only file tools, every other persona gets none.
-  const permission: NonNullable<Config["permission"]> =
-    kind === "static"
-      ? {
-          read: "allow",
-          glob: "allow",
-          grep: "allow",
-          list: "allow",
-          lsp: "allow",
-          edit: "deny",
-          bash: "deny",
-          task: "deny",
-          webfetch: "deny",
-          websearch: "deny",
-          external_directory: "deny",
-          skill: "deny",
-        }
-      : "deny";
+  const permission: NonNullable<Config["permission"]> = "deny";
   const config: Config = {
     model: modelRef,
     permission,
@@ -212,9 +199,65 @@ function extractStructuredOutput(info: AssistantMessage): unknown {
   return undefined;
 }
 
+/**
+ * Lenient fallback for models whose provider does not honour the structured
+ * output tool call (e.g. OpenCode Zen free-tier models answer in plain text):
+ * extract the first JSON object/array from the text parts. Downstream
+ * per-agent parsers still validate the payload, so malformed answers fail
+ * exactly as before — this only widens what counts as a candidate.
+ */
+function extractJsonFromTextParts(parts: Array<{ type: string; text?: string }>): unknown {
+  const text = parts
+    .map((p) => (p.type === "text" && typeof p.text === "string" ? p.text : ""))
+    .join("\n");
+  const unfenced = text.replace(/```(?:json)?/gi, "");
+  const start = ["{", "["]
+    .map((c) => unfenced.indexOf(c))
+    .filter((i) => i >= 0)
+    .sort((a, b) => a - b)[0];
+  if (start === undefined) {
+    return undefined;
+  }
+  const openCh = unfenced[start];
+  const closeCh = openCh === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < unfenced.length; i++) {
+    const ch = unfenced[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === openCh) depth++;
+    else if (ch === closeCh) {
+      depth--;
+      if (depth === 0) {
+        try {
+          const parsed: unknown = JSON.parse(unfenced.slice(start, i + 1));
+          if (isRecord(parsed) || Array.isArray(parsed)) {
+            return parsed;
+          }
+        } catch {
+          // fall through to the structured-output error path
+        }
+        break;
+      }
+    }
+  }
+  return undefined;
+}
+
+// Every persona runs tool-free: OpenCode's structured-output mechanism forces
+// a `tool_choice` that several providers (incl. OpenCode Zen free tier) reject
+// with 400 the moment OTHER tools are also advertised, and the evaluation
+// evidence is pre-collected with file:line context anyway. See README.
 function toolsForKind(kind: AgentKind): Record<string, boolean> {
   if (kind === "static") {
-    return { edit: false, write: false, bash: false, patch: false, webfetch: false, websearch: false, task: false, todowrite: false };
+    return { read: false, edit: false, write: false, bash: false, patch: false, glob: false, grep: false, list: false, webfetch: false, websearch: false, task: false, todowrite: false, skill: false };
   }
   return {
     read: false,
@@ -253,6 +296,19 @@ async function runAgentPrompt(
   const retryCount = agent.spec.config?.retryCount ?? 2;
   const abort = new AbortController();
   const started = Date.now();
+  // Text-mode models never see the structured-output schema, so restate the
+  // output contract (and the schema itself) in the message. Schema-driven
+  // providers simply ignore the extra prose.
+  const contractedMessage = [
+    userMessage,
+    "",
+    "Output contract: your FINAL answer must be a single JSON value exactly",
+    "matching this JSON Schema — no prose, no code fences, no extra keys. After",
+    "any tool use you need, end with the JSON and nothing else.",
+    "```json",
+    JSON.stringify(agent.spec.outputFormat.schema, null, 2),
+    "```",
+  ].join("\n");
   const handle = await bootOpencode(agent, kind, env.opencodePort, abort.signal);
   let timer: NodeJS.Timeout | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -278,21 +334,30 @@ async function runAgentPrompt(
       system: agent.spec.systemPrompt,
       tools: toolsForKind(kind),
       format: { type: "json_schema", schema: agent.spec.outputFormat.schema, retryCount },
-      parts: [{ type: "text", text: userMessage }],
+      parts: [{ type: "text", text: contractedMessage }],
     });
     if (result.error !== undefined || result.data === undefined) {
       throw new AgentPromptError(name, `session.prompt failed: ${JSON.stringify(result.error ?? "no data")}`);
     }
     const info = result.data.info;
-    if (info.error !== undefined) {
-      if (info.error.name === "StructuredOutputError") {
-        throw new StructuredOutputExhaustedError(name, info.error.data.retries, info.error.data.message);
-      }
+    if (info.error !== undefined && info.error.name !== "StructuredOutputError") {
       const detail = isRecord(info.error.data) ? JSON.stringify(info.error.data) : info.error.name;
       throw new AgentPromptError(name, `${info.error.name}: ${detail}`);
     }
-    const structured = extractStructuredOutput(info);
+    // Providers without structured-output support (e.g. Zen free tier) surface
+    // a server-side StructuredOutputError while the text parts still carry a
+    // JSON answer — recover it before failing.
+    let structured = extractStructuredOutput(info);
     if (structured === undefined) {
+      structured = extractJsonFromTextParts(result.data.parts);
+      if (structured !== undefined) {
+        log.warn("structured output missing; recovered JSON from text parts", { agent: name });
+      }
+    }
+    if (structured === undefined) {
+      if (info.error !== undefined && info.error.name === "StructuredOutputError") {
+        throw new StructuredOutputExhaustedError(name, info.error.data.retries, info.error.data.message);
+      }
       const text = result.data.parts
         .map((p) => (p.type === "text" ? p.text : ""))
         .join("")
@@ -476,8 +541,10 @@ function parseSynthesis(raw: unknown, agentName: string): SynthesisOutput {
   if (!isRecord(raw)) {
     throw new StructuredOutputExhaustedError(agentName, 0, "synthesis output is not an object");
   }
-  const safetyScore = clampScore(raw["safetyScore"]);
-  const reliabilityScore = clampScore(raw["reliabilityScore"]);
+  // Lenient key aliases: heterogeneous backends (e.g. Zen free-tier models)
+  // frequently emit score/safety_score style keys even with a schema contract.
+  const safetyScore = clampScore(raw["safetyScore"] ?? raw["safety_score"] ?? raw["score"]);
+  const reliabilityScore = clampScore(raw["reliabilityScore"] ?? raw["reliability_score"] ?? safetyScore);
   if (safetyScore === null && reliabilityScore === null) {
     throw new StructuredOutputExhaustedError(agentName, 0, "synthesis output lacks safetyScore and reliabilityScore");
   }

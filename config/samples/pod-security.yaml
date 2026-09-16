@@ -161,11 +161,18 @@ spec:
           value: "4096"
         - name: HOME
           value: /tmp
+        - name: OPENCODE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-provider-credentials
+              key: OPENCODE_API_KEY
+              optional: true
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
               name: llm-provider-credentials
               key: ANTHROPIC_API_KEY
+              optional: true
       terminationMessagePath: /dev/termination-log
       terminationMessagePolicy: File
       securityContext:

@@ -41,7 +41,7 @@ const DETECTORS: Detector[] = [
   { flag: "exfil-marker", regex: /(reveal|print|repeat|output|send)\s+(me\s+|us\s+)?(your|the)\s+system\s+prompt/i },
   { flag: "exfil-marker", regex: /(api[_ -]?key|secret|token|password|credential)s?\s*(:|=|to)\s*(https?:\/\/|send|post|curl)/i },
   { flag: "exfil-marker", regex: /send\s+(it|them|this|the\s+(data|contents?|results?))\s+to\s+https?:\/\//i },
-  { flag: "exfil-marker", regex: /(curl|wget|fetch|POST)\s+https?:\/\/[^\s]+\s+.*\$(HOME|PATH|AWS|ANTHROPIC|OPENAI)/i },
+  { flag: "exfil-marker", regex: /(curl|wget|fetch|POST)\s+https?:\/\/[^\s]+\s+.*\$(HOME|PATH|AWS|ANTHROPIC|OPENAI|OPENCODE)/i },
   { flag: "ssrf-indicator", regex: /169\.254\.169\.254/ },
   { flag: "ssrf-indicator", regex: /metadata\.google\.internal/i },
   { flag: "ssrf-indicator", regex: /fd00:ec2::254/i },
@@ -50,7 +50,7 @@ const DETECTORS: Detector[] = [
   { flag: "host-file-read", regex: /\/etc\/(passwd|shadow|hosts)\b/ },
   { flag: "host-file-read", regex: /\/proc\/self\/environ/ },
   { flag: "host-file-read", regex: /\/var\/run\/secrets\/kubernetes\.io/ },
-  { flag: "env-leak", regex: /(KUBERNETES_SERVICE_HOST|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN)\s*=/ },
+  { flag: "env-leak", regex: /(KUBERNETES_SERVICE_HOST|ANTHROPIC_API_KEY|OPENCODE_API_KEY|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN)\s*=/ },
   { flag: "absolute-path-leak", regex: /(\/home\/[a-z0-9_-]+\/|\/root\/|C:\\Users\\)/i },
 ];
 

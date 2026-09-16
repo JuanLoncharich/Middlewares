@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot build + deploy for the MCP evaluation platform.
 #
-#   IMG_REGISTRY=ghcr.io/<you> ANTHROPIC_API_KEY=sk-ant-... ./deploy.sh
+#   IMG_REGISTRY=ghcr.io/<you> OPENCODE_API_KEY=<zen-key> ./deploy.sh
 #
 # Steps: build & push the four images, install CRDs + operator (mcp-eval-system),
 # apply the evaluation namespace / NetworkPolicies / agent personas / sample
@@ -10,8 +10,10 @@
 # Env:
 #   IMG_REGISTRY       registry prefix for the images (required)
 #   IMG_TAG            image tag (default: latest)
-#   ANTHROPIC_API_KEY  written into Secret mcp-evals/llm-provider-credentials (required unless SKIP_SECRET=1)
+#   OPENCODE_API_KEY   written into Secret mcp-evals/llm-provider-credentials (required unless SKIP_SECRET=1)
+#   ANTHROPIC_API_KEY  optionally added to the same Secret when using provider `anthropic`
 #   APISERVER_CIDR     ClusterIP of the kubernetes service, e.g. 10.96.0.1/32 (default: auto-detected)
+#   APISERVER_ENDPOINTS  space-separated endpoint IPs of the kubernetes service (default: auto-detected; needed because the CNI sees post-DNAT addresses)
 #   SKIP_BUILD=1       skip docker build/push
 #   SKIP_SECRET=1      do not (re)create the LLM secret
 #   TRIGGER=0          do not trigger a run at the end
@@ -52,17 +54,54 @@ kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager --t
 
 log "Applying evaluation namespace, NetworkPolicies, agent personas and sample MCPServer (namespace mcp-evals)"
 APISERVER_CIDR="${APISERVER_CIDR:-$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}')/32}"
+# Egress to the API server must also allow the real `default/kubernetes`
+# endpoint IPs: kube-proxy DNATs ClusterIP traffic to them before the CNI
+# evaluates policy (post-DNAT matching on Calico / kube-router). Rendered as
+# ipBlock list items in place of the __APISERVER_ENDPOINTS__ marker (kept as
+# a plain string so the manifest itself stays parseable by kustomize).
+APISERVER_ENDPOINTS="${APISERVER_ENDPOINTS:-$(kubectl get endpoints kubernetes -n default -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{" "}{end}' 2>/dev/null)}"
+if [ -z "${APISERVER_ENDPOINTS// /}" ]; then
+  APISERVER_ENDPOINTS="$(kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{range .items[*].endpoints[*]}{range .addresses[*]}{.address}{" "}{end}{end}')"
+fi
+if [ -z "${APISERVER_ENDPOINTS// /}" ]; then
+  echo "ERROR: no kubernetes service endpoint IPs found; cannot build evaluate-phase policy" >&2
+  exit 1
+fi
 kubectl kustomize config/samples \
-  | sed -e "s|10.96.0.1/32|$APISERVER_CIDR|g" \
+  | APISERVER_CIDR="$APISERVER_CIDR" ENDPOINT_IPS="$APISERVER_ENDPOINTS" awk '
+    {
+      if (match($0, /^ *- __APISERVER_ENDPOINTS__$/)) {
+        indent = substr($0, 1, RLENGTH - length("- __APISERVER_ENDPOINTS__"))
+        n = split(ENVIRON["ENDPOINT_IPS"], ips, /[[:space:]]+/)
+        printed = 0
+        for (i = 1; i <= n; i++) {
+          if (ips[i] == "") continue
+          print indent "- ipBlock:"
+          print indent "    cidr: " ips[i] "/32"
+          printed = 1
+        }
+        if (!printed) { print "ERROR: empty endpoint IP list" > "/dev/stderr"; exit 1 }
+        next
+      }
+      gsub(/10\.96\.0\.1\/32/, ENVIRON["APISERVER_CIDR"])
+      print
+    }' \
   | kubectl apply -f -
 kubectl apply -f config/rbac/runner_role.yaml
 
 if [ "$SKIP_SECRET" != "1" ]; then
-  : "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY or SKIP_SECRET=1}"
+  : "${OPENCODE_API_KEY:?set OPENCODE_API_KEY (OpenCode Zen key) or SKIP_SECRET=1}"
   log "Creating LLM credentials secret"
-  kubectl -n mcp-evals create secret generic llm-provider-credentials \
-    --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-    --dry-run=client -o yaml | kubectl apply -f -
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    kubectl -n mcp-evals create secret generic llm-provider-credentials \
+      --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+      --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  else
+    kubectl -n mcp-evals create secret generic llm-provider-credentials \
+      --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  fi
 fi
 
 if [ "$TRIGGER" = "1" ]; then

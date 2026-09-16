@@ -8,7 +8,7 @@
 #   * non-root uid 10002 (distinct from the evaluator), gid 10001 (shares the
 #     Pod fsGroup so it can read /workspace and the FIFOs in /ipc)
 #   * the only entrypoint is the supervisor, which binds stdio to the IPC FIFOs
-FROM node:20-bookworm-slim AS node
+FROM node:22-bookworm-slim AS node
 
 FROM debian:bookworm-slim
 RUN apt-get update \

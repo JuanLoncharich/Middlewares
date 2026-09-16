@@ -347,7 +347,7 @@ export function generateProtocolCases(): ProtocolCase[] {
 const LEAK_PATTERNS: { reason: string; regex: RegExp }[] = [
   { reason: "stack trace leaked", regex: /(at\s+\S+\s+\(.*:\d+:\d+\))|Traceback \(most recent call last\)|goroutine \d+ \[/ },
   { reason: "absolute filesystem path leaked", regex: /(\/home\/[a-z0-9_-]+\/|\/usr\/(lib|local)\/|\/workspace\/|C:\\Users\\)/i },
-  { reason: "environment variable content leaked", regex: /(PATH=|HOME=|KUBERNETES_SERVICE_HOST|AWS_SECRET_ACCESS_KEY|ANTHROPIC_API_KEY)/ },
+  { reason: "environment variable content leaked", regex: /(PATH=|HOME=|KUBERNETES_SERVICE_HOST|AWS_SECRET_ACCESS_KEY|ANTHROPIC_API_KEY|OPENCODE_API_KEY)/ },
   { reason: "command injection payload executed (uid output)", regex: /uid=\d+\(\w+\)\s+gid=\d+/ },
   { reason: "/etc/passwd content returned", regex: /root:x:0:0:/ },
   { reason: "internal error details leaked", regex: /(ECONNREFUSED|ENOENT: no such file|SyntaxError: Unexpected token|TypeError: Cannot read)/ },

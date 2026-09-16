@@ -127,13 +127,19 @@ spec:
     - Egress
   egress:
     # Kubernetes API server (evaluator patches MCPEvaluationRun status).
-    # The `default/kubernetes` endpoint is not selectable by podSelector; most
-    # CNIs require its ClusterIP or the control-plane node CIDR here.
-    # Replace 10.96.0.1/32 with `kubectl get svc kubernetes -n default -o
-    # jsonpath='{.spec.clusterIP}'` and the control-plane CIDR for your cluster.
+    # kube-proxy DNATs traffic to the ClusterIP into the `default/kubernetes`
+    # endpoint (the control-plane node IP) BEFORE the CNI evaluates egress
+    # policy — Calico and kube-router match the post-DNAT destination, so a
+    # ClusterIP-only rule never matches and connections time out. Allow both
+    # the ClusterIP (CNIs that match pre-DNAT) and the endpoint IPs. The
+    # string list item below is a deploy.sh marker: it is replaced with one
+    # `ipBlock` per `kubectl get endpoints kubernetes -n default` address, so
+    # apply this file through deploy.sh — an unrendered copy is rejected by
+    # the API server's schema validation (by design, loudly).
     - to:
         - ipBlock:
             cidr: 10.96.0.1/32
+        - __APISERVER_ENDPOINTS__
       ports:
         - protocol: TCP
           port: 443

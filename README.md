@@ -38,7 +38,7 @@ cluster), `docker` with push access to a registry the cluster can pull from.
 
 ```bash
 git clone <this repo> && cd Middlewares
-IMG_REGISTRY=ghcr.io/<you> ANTHROPIC_API_KEY=sk-ant-... ./deploy.sh
+IMG_REGISTRY=ghcr.io/<you> OPENCODE_API_KEY=<zen-key> ./deploy.sh
 kubectl -n mcp-evals get mcprun -w
 ```
 
@@ -70,7 +70,7 @@ make deploy            # = kubectl kustomize config/default | kubectl apply -f -
 # 3. Evaluation namespace, NetworkPolicies, agent personas, sample server
 #    (edit the 10.96.0.1/32 API-server CIDR in config/samples/networkpolicy.yaml first)
 make samples           # = kubectl apply -k config/samples
-kubectl -n mcp-evals create secret generic llm-provider-credentials --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+kubectl -n mcp-evals create secret generic llm-provider-credentials --from-literal=OPENCODE_API_KEY=<zen-key>
 
 # 4. Trigger a run immediately instead of waiting for the cron schedule
 kubectl -n mcp-evals annotate mcpserver filesystem-mcp security.eval.io/trigger-now=true
@@ -81,7 +81,18 @@ The operator's Deployment reads the image names from `CLONER_IMAGE`,
 `TARGET_IMAGE`, `EVALUATOR_IMAGE`, the runner ServiceAccount from
 `RUNNER_SERVICE_ACCOUNT` (`mcp-eval-runner`), and the LLM credential secret
 from `LLM_SECRET_NAME` / `LLM_SECRET_KEY` (`llm-provider-credentials` /
-`ANTHROPIC_API_KEY`).
+`ANTHROPIC_API_KEY`), plus the `OPENCODE_API_KEY` key of the same secret for
+OpenCode Zen (`opencode/*` models).
+
+**Models / billing:** any model id from `https://opencode.ai/zen/v1/models` can be
+used. Paid models (e.g. `claude-sonnet-4-6`) require Zen credits; `*-free` models
+work without billing. All personas run tool-free (their providers reject the
+`tool_choice` OpenCode's structured-output mechanism emits once other tools are
+advertised), and the evaluator restates the JSON schema in the message and
+recovers JSON from plain-text replies when a model does not honour the
+structured-output tool call — so both paid and free tiers produce results.
+Switch models by editing the four
+`config/samples/security.eval.io_v1alpha1_opencodeagent_*.yaml` files.
 
 ## Run lifecycle
 

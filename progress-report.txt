@@ -1,0 +1,98 @@
+Progress report - Middlewares deploy to k0s - ALL GREEN
+Date: 2026-09-16
+Workdir: /home/diegoforni/Desktop/sist_d/midd
+Repo: https://github.com/JuanLoncharich/Middlewares
+Cluster: k0s (3 nodes, v1.35.4+k0s, Calico) via /home/diegoforni/.kube/cluster-k0s.yaml
+
+HEADLINE
+- End-to-end evaluation run COMPLETED in-cluster:
+    filesystem-mcp-run-268hx  phase=Completed  score=41  risk=Caution
+  All 4 OpenCode agents ok (sast/fuzz/rogue/synthesizer), 8 real findings
+  (e.g. hangs on invalid JSON-RPC frames, absolute path disclosure, unpinned
+  deps). The untrusted target (filesystem-mcp) ran jailed over FIFO IPC and
+  survived 61/61 adversarial payloads (its verdict, confirmed by probes).
+- Host-side dry-run e2e also Completed: a deliberately vulnerable dummy MCP
+  server (eval-RCE + path traversal) was correctly scored 27 / Malicious.
+
+ROOT CAUSE FIXED (the blocker from the previous session)
+1. API-server egress from evaluate-phase pods: Calico enforces egress policy
+   on the POST-DNAT destination. kube-proxy DNATs 10.96.0.1:443 -> the
+   kubernetes endpoint (control-plane node IP 10.66.50.194:6443) BEFORE the
+   policy sees it, so the old ipBlock 10.96.0.1/32 rule never matched.
+   FIX: networkpolicy.yaml now allows ClusterIP + endpoint IPs; deploy.sh
+   substitutes the __APISERVER_ENDPOINTS__ marker (awk, indent-aware) with
+   kubectl get endpoints kubernetes. Verified: 401 from both ClusterIP and
+   endpoint IP inside the evaluate phase. Apply samples ONLY via deploy.sh.
+
+ALSO FIXED THIS SESSION
+2. Image drift: previous session had set -v2 image refs via `kubectl set
+   env` (stale canonical :24h tags still held the broken node:20 build).
+   All 4 images rebuilt (node:22) and repushed under canonical tags;
+   imagePullPolicy switched to ALWAYS (job containers in
+   mcpevaluationrun_controller.go + manager deployment) so mutable ttl.sh
+   tags always resolve to what was pushed. Operator env is canonical again.
+3. Zen credits: the OPENCODE_API_KEY is valid but has NO balance
+   (claude-sonnet-4-6 -> CreditsError 401, billing: opencode.ai/workspace/
+   wrk_01KV1DC404JG9T13VX0DRA88QV/billing). Personas switched to the free
+   tier model muse-spark-1.3-contributor-free (7 free models exist; free
+   tier only works through the OpenCode client - raw API calls get
+   MissingSessionID). To go back to sonnet after topping up: change
+   modelID in the 4 config/samples/security.eval.io_v1alpha1_opencodeagent_*.yaml.
+4. Free-tier model limits -> runner made robust (runner/src/evaluator.ts):
+   a. tool_choice 400: Zen free models reject tool_choice!=auto, which
+      OpenCode emits when other tools are advertised -> ALL personas now run
+      tool-free (static audits from the pre-collected evidence, prompt
+      updated accordingly; bootOpencode permission unified to deny).
+   b. Structured output: free models answer in plain text (server reports
+      StructuredOutputError, retries 0). Evaluator now restates the JSON
+      schema in the user message and RECOVERS JSON from text parts before
+      failing (covers both the missing-structured and the StructuredOutput-
+      Error branches). Downstream per-agent parsers still validate.
+   c. Synthesis key aliasing: accepts score/safety_score/safetyScore and
+      reliability_score variants.
+5. Run budget: timeoutSeconds 900 -> 1800 in MCPServer + MCPEvaluationRun
+   samples (4 free-model passes + 4min fuzz + 3min probes did not fit 15min).
+6. README: models/billing paragraph (free vs paid tiers, tool-free personas,
+   text-JSON fallback). netdebug pod and failed runs cleaned up.
+
+VERIFICATION (this session)
+- go: make test (fmt+vet), go build ./..., bash -n deploy.sh
+- runner: tsc typecheck + build (fallback fix confirmed in dist)
+- cluster invariants: NetworkPolicy matrix (evaluate/clone/target/bare pods
+  vs API/LLM/metadata/private/DNS), RBAC can-i checks for the runner SA
+  (no secrets, no pods list; status patch yes), operator log error scan.
+  (results appended below by the verify workflow)
+- NOTE: repo has NO unit tests (make test = fmt+vet only). Adding go/TS unit
+  tests is the main remaining quality gap.
+
+STATE
+- Operator mcp-eval-controller-manager 1/1 Running (mcp-eval-system), env:
+  ttl.sh/midd-1789504434-de043d0c/{operator,cloner,target-sandbox,evaluator}:24h
+- mcp-evals: 5 NetworkPolicies (with endpoint IPs), 4 personas
+  (muse-spark-1.3-contributor-free), MCPServer filesystem-mcp
+  (schedule 0 3 * * *), runner SA/RBAC, llm-provider-credentials secret.
+- ttl.sh images expire ~24h after push (pushed 2026-09-16 ~00:00 UTC).
+  Refresh anytime with:
+    IMG_REGISTRY=ttl.sh/midd-1789504434-de043d0c IMG_TAG=24h SKIP_SECRET=1 \
+    ./deploy.sh
+- Trigger a run: kubectl -n mcp-evals annotate mcpserver filesystem-mcp \
+    security.eval.io/trigger-now=true --overwrite ; watch:
+    kubectl -n mcp-evals get mcprun -w
+- Known enhancement ideas: persist /output/evaluation-report.json to a
+  ConfigMap (currently lost when the pod TTLs); unit tests; FQDN policies
+  if Cilium is ever installed.
+
+VERIFY WORKFLOW RESULTS (2026-09-16, all suites passed)
+- go suite: make test (fmt+vet) pass, go build ./... pass, bash -n deploy.sh
+  pass. WARN: repo contains zero *_test.go files.
+- runner suite: tsc typecheck + build pass; text-JSON fallback confirmed
+  present in dist/evaluator.js. WARN: no TS unit test runner configured.
+- cluster invariants 14/14 PASS:
+    evaluate pod: API 401 (post-DNAT fix verified), opencode.ai 200,
+      metadata IP blocked, worker node IP blocked, DNS resolves
+    clone pod: github.com 200, API server blocked
+    target pod: ALL egress blocked incl. DNS
+    bare pod: default-deny holds
+    RBAC runner SA: get secrets=no, list pods=no, patch run status=yes
+    operator logs: zero errors; run 268hx Completed score=41 confirmed;
+    all nettest pods cleaned up.

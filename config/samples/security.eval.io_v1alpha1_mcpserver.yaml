@@ -12,7 +12,7 @@ spec:
   schedule: "0 3 * * *"
   active: true
   credentialsSecretRef: ""
-  timeoutSeconds: 900
+  timeoutSeconds: 1800
   runHistoryLimit: 5
   agentSuite:
     - name: mcp-sast-auditor

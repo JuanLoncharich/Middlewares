@@ -44,7 +44,7 @@ spec:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8443
         image: ghcr.io/security-eval/mcp-eval-operator:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         name: manager
         env:
         - name: CLONER_IMAGE

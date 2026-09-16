@@ -15,4 +15,4 @@ spec:
     - mcp-fuzz-tester
     - mcp-rogue-detector
     - mcp-synthesizer
-  timeoutSeconds: 900
+  timeoutSeconds: 1800

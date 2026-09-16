@@ -755,7 +755,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	cloner := corev1.Container{
 		Name:            containerCloner,
 		Image:           r.Images.ClonerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: corev1.PullAlways,
 		Env:             clonerEnv,
 		VolumeMounts:    clonerMounts,
 		SecurityContext: lockedSecurityContext(evaluatorUID),
@@ -775,7 +775,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	target := corev1.Container{
 		Name:            containerTarget,
 		Image:           r.Images.TargetImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: corev1.PullAlways,
 		Env: []corev1.EnvVar{
 			{Name: "MCP_TRANSPORT", Value: transport},
 			{Name: "MCP_PORT", Value: fmt.Sprintf("%d", targetPort)},
@@ -811,7 +811,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	evaluator := corev1.Container{
 		Name:            containerEvaluator,
 		Image:           r.Images.EvaluatorImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: corev1.PullAlways,
 		Env: []corev1.EnvVar{
 			{Name: "RUN_NAME", Value: run.Name},
 			{
@@ -836,6 +836,18 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: r.Images.LLMSecretName},
 						Key:                  r.Images.LLMSecretKey,
+						Optional:             ptr.To(true),
+					},
+				},
+			},
+			{
+				// OpenCode Zen API key for provider `opencode` (e.g. opencode/claude-sonnet-4-6).
+				Name: "OPENCODE_API_KEY",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: r.Images.LLMSecretName},
+						Key:                  "OPENCODE_API_KEY",
+						Optional:             ptr.To(true),
 					},
 				},
 			},
