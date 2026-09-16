@@ -20,18 +20,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -53,18 +58,21 @@ const (
 	containerCloner    = "cloner"
 	containerTarget    = "target"
 	containerEvaluator = "evaluator"
+	containerNetBird   = "netbird"
 
-	volumeWorkspace = "workspace"
-	volumeIPC       = "ipc"
-	volumeTmp       = "tmp"
-	volumeOutput    = "output"
-	volumeSAToken   = "sa-token"
+	volumeWorkspace   = "workspace"
+	volumeIPC         = "ipc"
+	volumeTmp         = "tmp"
+	volumeOutput      = "output"
+	volumeSAToken     = "sa-token"
+	volumeNetBirdStat = "netbird-state"
 
-	mountWorkspace = "/workspace"
-	mountIPC       = "/ipc"
-	mountTmp       = "/tmp"
-	mountOutput    = "/output"
-	mountSAToken   = "/var/run/secrets/kubernetes.io/serviceaccount"
+	mountWorkspace   = "/workspace"
+	mountIPC         = "/ipc"
+	mountTmp         = "/tmp"
+	mountOutput      = "/output"
+	mountSAToken     = "/var/run/secrets/kubernetes.io/serviceaccount"
+	mountNetBirdStat = "/var/lib/netbird"
 
 	evaluatorUID int64 = 10001
 	targetUID    int64 = 10002
@@ -72,10 +80,15 @@ const (
 	jobTTLSeconds int32 = 600
 	openCodePort        = "4096"
 
+	// meshBridgePortDefault is the local HTTP-proxy bridge port the evaluator
+	// exposes for the OpenCode child process (see runner/src/meshhttp.ts).
+	meshBridgePortDefault int32 = 18080
+
 	runRequeueInterval = 15 * time.Second
 )
 
-// ImageConfig carries the images and secrets injected into evaluation Jobs.
+// ImageConfig carries the images, secrets and security-layer wiring injected
+// into evaluation Jobs.
 type ImageConfig struct {
 	ClonerImage          string
 	TargetImage          string
@@ -83,10 +96,70 @@ type ImageConfig struct {
 	RunnerServiceAccount string
 	LLMSecretName        string
 	LLMSecretKey         string
+
+	// MeshEnforce enables the NetBird zero-trust wiring: a userspace netbird
+	// sidecar per evaluation pod, mesh env vars on the evaluator, and a
+	// per-run NetworkPolicy whose only egress is DNS, the API server and the
+	// NetBird control/data planes. MESH_ENFORCE=false restores the legacy
+	// direct-to-provider mode (no sidecar, no per-run policy).
+	MeshEnforce          bool
+	NetBirdImage         string
+	NetBirdManagementURL string
+	NetBirdSecretName    string
+	NetBirdSecretKey     string
+	// NetBirdEgressCIDRs are the destinations the per-run policy allows for
+	// NetBird control plane (management/signal/relay) and WireGuard data
+	// plane traffic.
+	NetBirdEgressCIDRs []string
+	// MeshProxyURL is passed to the evaluator as MESH_PROXY (the netbird
+	// userspace SOCKS5 endpoint inside the pod).
+	MeshProxyURL   string
+	MeshBridgePort int32
+	// VigilURL / OccludraBaseURL are the security-layer endpoints the
+	// evaluator scans against and points its LLM providers at. When not set
+	// explicitly they are DERIVED from the mode: mesh peer DNS names under
+	// NetBirdDNSDomain in mesh mode, cluster-local service names otherwise.
+	VigilURL        string
+	OccludraBaseURL string
+	// NetBirdDNSDomain is the DNS domain the NetBird management server hands
+	// out for peer names (vigil / occludra — pinned via NETBIRD_HOSTNAME).
+	NetBirdDNSDomain string
 }
+
+// Security-layer endpoint defaults. The cluster-local service names are the
+// only reachable path with MESH_ENFORCE=false (and for operator smoke tests);
+// in mesh mode the per-run NetworkPolicy BLOCKS that path and the NetBird
+// SOCKS proxy cannot dial ClusterIPs, so the defaults become the mesh peer
+// DNS names — which is why they are derived, not hardcoded.
+const (
+	vigilServiceLocal    = "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze"
+	occludraServiceLocal = "http://occludra-service.security-gateways.svc.cluster.local:8080/v1"
+	defaultNetBirdDomain = "netbird.selfhosted"
+)
 
 // FromEnv reads ImageConfig from environment variables with production defaults.
 func ImageConfigFromEnv() ImageConfig {
+	meshEnforce := envFlag("MESH_ENFORCE", true)
+	dnsDomain := envOr("NETBIRD_DNS_DOMAIN", defaultNetBirdDomain)
+
+	// Explicit settings always win; otherwise derive from the mode.
+	vigilURL := os.Getenv("VIGIL_URL")
+	if strings.TrimSpace(vigilURL) == "" {
+		if meshEnforce {
+			vigilURL = "http://vigil." + dnsDomain + ":5000/analyze"
+		} else {
+			vigilURL = vigilServiceLocal
+		}
+	}
+	occludraURL := os.Getenv("OCCLUDRA_BASE_URL")
+	if strings.TrimSpace(occludraURL) == "" {
+		if meshEnforce {
+			occludraURL = "http://occludra." + dnsDomain + ":8080/v1"
+		} else {
+			occludraURL = occludraServiceLocal
+		}
+	}
+
 	return ImageConfig{
 		ClonerImage:          envOr("CLONER_IMAGE", "ghcr.io/security-eval/mcp-cloner:latest"),
 		TargetImage:          envOr("TARGET_IMAGE", "ghcr.io/security-eval/mcp-target-sandbox:latest"),
@@ -94,6 +167,18 @@ func ImageConfigFromEnv() ImageConfig {
 		RunnerServiceAccount: envOr("RUNNER_SERVICE_ACCOUNT", "mcp-eval-runner"),
 		LLMSecretName:        envOr("LLM_SECRET_NAME", "llm-provider-credentials"),
 		LLMSecretKey:         envOr("LLM_SECRET_KEY", "ANTHROPIC_API_KEY"),
+
+		MeshEnforce:          meshEnforce,
+		NetBirdImage:         envOr("NETBIRD_IMAGE", "netbirdio/netbird:latest"),
+		NetBirdManagementURL: envOr("NETBIRD_MANAGEMENT_URL", "https://netbird.example.com:443"),
+		NetBirdSecretName:    envOr("NETBIRD_SECRET_NAME", "netbird-auth"),
+		NetBirdSecretKey:     envOr("NETBIRD_SECRET_KEY", "setup-key"),
+		NetBirdEgressCIDRs:   envCIDRs("NETBIRD_EGRESS_CIDRS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"),
+		MeshProxyURL:         envOr("MESH_PROXY_URL", "socks5://127.0.0.1:1080"),
+		MeshBridgePort:       envInt32("MESH_BRIDGE_PORT", meshBridgePortDefault),
+		VigilURL:             vigilURL,
+		OccludraBaseURL:      occludraURL,
+		NetBirdDNSDomain:     dnsDomain,
 	}
 }
 
@@ -102,6 +187,52 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envFlag parses a boolean env var; unparsable values keep the default.
+func envFlag(key string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+func envInt32(key string, def int32) int32 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	var v int32
+	if _, err := fmt.Sscanf(raw, "%d", &v); err != nil || v <= 0 || v > 65535 {
+		return def
+	}
+	return v
+}
+
+// envCIDRs parses a comma-separated CIDR list; invalid entries are dropped
+// (the manager startup log prints the effective list).
+func envCIDRs(key, def string) []string {
+	raw := envOr(key, def)
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		cidr := strings.TrimSpace(part)
+		if cidr == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			continue
+		}
+		out = append(out, cidr)
+	}
+	return out
 }
 
 // terminationMessage is the JSON contract the evaluator writes to /dev/termination-log.
@@ -126,6 +257,9 @@ type MCPEvaluationRunReconciler struct {
 // +kubebuilder:rbac:groups=security.eval.io,resources=mcpservers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=security.eval.io,resources=opencodeagents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -213,6 +347,11 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: jobName}, job)
 	switch {
 	case apierrors.IsNotFound(err):
+		// Mesh mode: the per-run egress policy exists BEFORE the pod so the
+		// net-phase flip never leaves an evaluate-phase pod without coverage.
+		if err := r.ensureEvaluateNetworkPolicy(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
 		job = r.buildJob(run, server)
 		if err := controllerutil.SetControllerReference(run, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("setting owner reference on Job: %w", err)
@@ -241,6 +380,11 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, fmt.Errorf("fetching Job %s: %w", jobName, err)
 	}
 	run.Status.JobName = job.Name
+
+	// Self-heal: recreate the mesh egress policy if someone deleted it.
+	if err := r.ensureEvaluateNetworkPolicy(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Locate the pod backing the job.
 	pod, err := r.findPod(ctx, run)
@@ -480,6 +624,8 @@ func derivePhaseFromPod(pod *corev1.Pod) securityv1alpha1.RunPhase {
 }
 
 // initContainersDone reports whether every init container has terminated.
+// Native sidecars (init containers with restartPolicy Always, e.g. the
+// userspace netbird client) never terminate; they count as done once Running.
 func initContainersDone(pod *corev1.Pod) bool {
 	if len(pod.Spec.InitContainers) == 0 {
 		return true
@@ -487,12 +633,23 @@ func initContainersDone(pod *corev1.Pod) bool {
 	if len(pod.Status.InitContainerStatuses) < len(pod.Spec.InitContainers) {
 		return false
 	}
-	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.State.Terminated == nil {
-			return false
+	for i := range pod.Status.InitContainerStatuses {
+		cs := &pod.Status.InitContainerStatuses[i]
+		if cs.State.Terminated != nil {
+			continue
 		}
+		if cs.State.Running != nil && i < len(pod.Spec.InitContainers) && isNativeSidecar(&pod.Spec.InitContainers[i]) {
+			continue
+		}
+		return false
 	}
 	return true
+}
+
+// isNativeSidecar reports whether the container is a native sidecar
+// (init container with restartPolicy: Always).
+func isNativeSidecar(c *corev1.Container) bool {
+	return c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways
 }
 
 // containerStatus returns the status entry for the named container.
@@ -668,6 +825,15 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{
 					SizeLimit: ptr.To(resource.MustParse("256Mi")),
+				},
+			},
+		},
+		{
+			// Writable state for the userspace netbird sidecar (ro rootfs).
+			Name: volumeNetBirdStat,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: ptr.To(resource.MustParse("128Mi")),
 				},
 			},
 		},
@@ -851,6 +1017,14 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 					},
 				},
 			},
+			// ---- security layer wiring (Vigil / Occludra / NetBird) ----
+			{
+				Name:  "MESH_PROXY",
+				Value: meshProxyEnv(r.Images),
+			},
+			{Name: "MESH_BRIDGE_PORT", Value: fmt.Sprintf("%d", r.Images.MeshBridgePort)},
+			{Name: "VIGIL_URL", Value: r.Images.VigilURL},
+			{Name: "OCCLUDRA_BASE_URL", Value: r.Images.OccludraBaseURL},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: volumeWorkspace, MountPath: mountWorkspace, ReadOnly: true},
@@ -910,13 +1084,287 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
-					InitContainers: []corev1.Container{cloner},
+					// The netbird sidecar is a NATIVE sidecar (init container
+					// with restartPolicy Always): it starts right after the
+					// cloner finishes and is Running before the target and
+					// evaluator containers boot, so the WireGuard overlay is
+					// up by the time the first Vigil/Occludra call is made.
+					InitContainers: append([]corev1.Container{cloner}, r.buildNetBirdSidecar(run)...),
 					Containers:     []corev1.Container{target, evaluator},
 					Volumes:        volumes,
 				},
 			},
 		},
 	}
+}
+
+// meshProxyEnv renders the evaluator's MESH_PROXY value. An empty value is
+// significant: it tells the runner the mesh is disabled (non-mesh fallback).
+func meshProxyEnv(images ImageConfig) string {
+	if !images.MeshEnforce {
+		return ""
+	}
+	return images.MeshProxyURL
+}
+
+// buildNetBirdSidecar renders the userspace NetBird client injected into every
+// evaluation pod. Userspace mode (NETBIRD_USERSPACE_HOSTWIRESOCK) terminates
+// WireGuard in a netstack inside the container and exposes a local SOCKS5
+// proxy on 127.0.0.1:1080 — no TUN device, no capabilities, PodSecurity
+// restricted-safe. The proxy is shared through the pod network namespace; the
+// evaluator reaches Vigil/Occludra through it (MESH_PROXY). Returns an empty
+// slice when the mesh is disabled.
+func (r *MCPEvaluationRunReconciler) buildNetBirdSidecar(run *securityv1alpha1.MCPEvaluationRun) []corev1.Container {
+	if !r.Images.MeshEnforce {
+		return nil
+	}
+	sidecar := corev1.Container{
+		// restartPolicy Always promotes this init container to a native
+		// sidecar: started before the main containers, never "completes".
+		RestartPolicy:   ptr.To(corev1.ContainerRestartPolicyAlways),
+		Name:            containerNetBird,
+		Image:           r.Images.NetBirdImage,
+		ImagePullPolicy: corev1.PullAlways,
+		Env: []corev1.EnvVar{
+			{Name: "NETBIRD_MANAGEMENT_URL", Value: r.Images.NetBirdManagementURL},
+			{
+				Name: "NETBIRD_SETUP_KEY",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: r.Images.NetBirdSecretName},
+						Key:                  r.Images.NetBirdSecretKey,
+					},
+				},
+			},
+			{
+				// Unique ephemeral mesh identity per evaluation pod.
+				Name: "NETBIRD_HOSTNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"},
+				},
+			},
+			// Userspace netstack + local SOCKS5 proxy (127.0.0.1:1080).
+			{Name: "NETBIRD_USERSPACE_HOSTWIRESOCK", Value: "yes"},
+			{Name: "HOME", Value: mountTmp},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: volumeNetBirdStat, MountPath: mountNetBirdStat},
+			{Name: volumeTmp, MountPath: mountTmp},
+		},
+		SecurityContext: lockedSecurityContext(evaluatorUID),
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("50m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}
+	return []corev1.Container{sidecar}
+}
+
+// evaluateNetworkPolicyName is the per-run NetworkPolicy that locks an
+// evaluation pod's evaluate phase to DNS + API server + NetBird traffic only.
+func evaluateNetworkPolicyName(run *securityv1alpha1.MCPEvaluationRun) string {
+	return run.Name + "-mesh-egress"
+}
+
+// ensureEvaluateNetworkPolicy creates (once) the per-run NetworkPolicy that
+// implements "all eth0 egress denied except the NetBird overlay": the only
+// allowed egress for pods in the evaluate phase is DNS, the Kubernetes API
+// server and the NetBird control/data planes. NetworkPolicy cannot match on
+// interfaces, so the WireGuard overlay is enforced by allowlisting exactly the
+// destinations the netbird sidecar needs — the evaluator's Vigil/Occludra
+// traffic has no permitted non-mesh path and must traverse wt0/SOCKS5.
+//
+// The policy carries an owner reference to the run (GC on deletion) and is
+// created BEFORE the Job so the net-phase label flip never has a window
+// without policy coverage. It is self-healing: recreated if deleted.
+func (r *MCPEvaluationRunReconciler) ensureEvaluateNetworkPolicy(ctx context.Context, run *securityv1alpha1.MCPEvaluationRun) error {
+	if !r.Images.MeshEnforce {
+		return nil
+	}
+	log := logf.FromContext(ctx)
+	key := types.NamespacedName{Namespace: run.Namespace, Name: evaluateNetworkPolicyName(run)}
+	existing := &networkingv1.NetworkPolicy{}
+	err := r.Get(ctx, key, existing)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("fetching NetworkPolicy %s: %w", key.String(), err)
+	}
+
+	apiserverAddresses, err := r.resolveAPIServerAddresses(ctx)
+	if err != nil {
+		// Fail closed is wrong here (the run would never progress); fail open
+		// to the ClusterIP rule and log loudly — DNS + ClusterIP still work
+		// on CNIs that match pre-DNAT.
+		log.Error(err, "cannot resolve apiserver endpoints; allowing ClusterIP only")
+		apiserverAddresses = nil
+	}
+
+	policy := buildEvaluateNetworkPolicy(run, r.Images, apiserverAddresses)
+	if err := controllerutil.SetControllerReference(run, policy, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference on NetworkPolicy: %w", err)
+	}
+	if err := r.Create(ctx, policy); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return fmt.Errorf("creating NetworkPolicy %s: %w", key.String(), err)
+	}
+	log.Info("created mesh-only egress NetworkPolicy", "policy", key.String(), "apiserverEndpoints", apiserverAddresses)
+	r.Recorder.Eventf(run, corev1.EventTypeNormal, "MeshPolicyCreated",
+		"evaluate-phase egress restricted to DNS, API server and NetBird (%s)", policy.Name)
+	return nil
+}
+
+// buildEvaluateNetworkPolicy renders the per-run mesh-only egress policy.
+func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images ImageConfig, apiserverAddresses []string) *networkingv1.NetworkPolicy {
+	labels := map[string]string{
+		securityv1alpha1.LabelRun:      run.Name,
+		securityv1alpha1.LabelRole:     securityv1alpha1.RoleEvaluationPod,
+		"app.kubernetes.io/managed-by": "mcp-eval-operator",
+	}
+
+	// DNS: kube-dns in kube-system.
+	dnsPort := intstr.FromInt32(53)
+	dnsRule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{
+			{
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+				},
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+				},
+			},
+		},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Protocol: ptr.To(corev1.ProtocolUDP), Port: &dnsPort},
+			{Protocol: ptr.To(corev1.ProtocolTCP), Port: &dnsPort},
+		},
+	}
+
+	// Kubernetes API server: ClusterIP + real endpoint IPs (Calico and other
+	// CNIs evaluate egress policy on the post-DNAT destination, so a
+	// ClusterIP-only rule never matches — mirror deploy.sh's concern).
+	apiPorts := []networkingv1.NetworkPolicyPort{
+		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(443))},
+		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(6443))},
+	}
+	var apiPeers []networkingv1.NetworkPolicyPeer
+	if clusterIP := envOr("APISERVER_CLUSTERIP", ""); clusterIP != "" {
+		apiPeers = append(apiPeers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: clusterIP}})
+	}
+	for _, addr := range apiserverAddresses {
+		apiPeers = append(apiPeers, networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{CIDR: addr},
+		})
+	}
+	apiServerRule := networkingv1.NetworkPolicyEgressRule{To: apiPeers, Ports: apiPorts}
+
+	// NetBird control plane (management 443/33073, signal 10000, relay 33080)
+	// and data plane (WireGuard 51820/UDP, STUN/TURN 3478/UDP, relay UDP range).
+	netbirdPorts := []networkingv1.NetworkPolicyPort{
+		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(443))},
+		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(33073))},
+		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(10000))},
+		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(33080))},
+		{Protocol: ptr.To(corev1.ProtocolUDP), Port: ptr.To(intstr.FromInt32(51820))},
+		{Protocol: ptr.To(corev1.ProtocolUDP), Port: ptr.To(intstr.FromInt32(3478))},
+		// TURN relay ephemeral range.
+		{Protocol: ptr.To(corev1.ProtocolUDP), Port: ptr.To(intstr.FromInt32(49152)), EndPort: ptr.To(int32(65535))},
+	}
+	var netbirdRule networkingv1.NetworkPolicyEgressRule
+	if len(images.NetBirdEgressCIDRs) > 0 {
+		peers := make([]networkingv1.NetworkPolicyPeer, 0, len(images.NetBirdEgressCIDRs))
+		for _, cidr := range images.NetBirdEgressCIDRs {
+			peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
+		}
+		netbirdRule = networkingv1.NetworkPolicyEgressRule{To: peers, Ports: netbirdPorts}
+	}
+
+	egress := []networkingv1.NetworkPolicyEgressRule{dnsRule, apiServerRule}
+	if netbirdRule.To != nil {
+		egress = append(egress, netbirdRule)
+	}
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      evaluateNetworkPolicyName(run),
+			Namespace: run.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"security.eval.io/invariant": "evaluation pods may only egress DNS, the API server and the NetBird overlay",
+			},
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					securityv1alpha1.LabelRun:      run.Name,
+					securityv1alpha1.LabelNetPhase: securityv1alpha1.NetPhaseEvaluate,
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress:      egress,
+		},
+	}
+}
+
+// resolveAPIServerAddresses returns the /32 CIDRs of the default/kubernetes
+// service endpoints (EndpointSlice API first, legacy Endpoints fallback) plus
+// the service ClusterIP, for use as NetworkPolicy ipBlocks.
+func (r *MCPEvaluationRunReconciler) resolveAPIServerAddresses(ctx context.Context) ([]string, error) {
+	seen := map[string]struct{}{}
+	add := func(ip string) {
+		if net.ParseIP(ip) != nil {
+			seen[ip+"/32"] = struct{}{}
+		}
+	}
+
+	slices := &discoveryv1.EndpointSliceList{}
+	if err := r.List(ctx, slices,
+		client.InNamespace("default"),
+		client.MatchingLabels{discoveryv1.LabelServiceName: "kubernetes"},
+	); err != nil {
+		return nil, fmt.Errorf("listing endpointslices for default/kubernetes: %w", err)
+	}
+	for i := range slices.Items {
+		for _, ep := range slices.Items[i].Endpoints {
+			for _, addr := range ep.Addresses {
+				add(addr)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		eps := &corev1.EndpointsList{}
+		if err := r.List(ctx, eps, client.InNamespace("default")); err == nil {
+			for i := range eps.Items {
+				if eps.Items[i].Name != "kubernetes" {
+					continue
+				}
+				for _, subset := range eps.Items[i].Subsets {
+					for _, addr := range subset.Addresses {
+						add(addr.IP)
+					}
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for cidr := range seen {
+		out = append(out, cidr)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no endpoint addresses found for default/kubernetes")
+	}
+	return out, nil
 }
 
 // podToRun maps a pod event to the owning MCPEvaluationRun via the run label.
@@ -935,7 +1383,7 @@ func (r *MCPEvaluationRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Recorder == nil {
 		r.Recorder = mgr.GetEventRecorderFor("mcpevaluationrun-controller")
 	}
-	if r.Images == (ImageConfig{}) {
+	if r.Images.EvaluatorImage == "" {
 		r.Images = ImageConfigFromEnv()
 	}
 	return ctrl.NewControllerManagedBy(mgr).

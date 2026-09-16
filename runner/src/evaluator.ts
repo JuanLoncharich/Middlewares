@@ -7,6 +7,20 @@
  *   3. adversarial – rogue-behaviour / prompt-injection / SSRF probes
  *   4. synthesis – aggregate scoring, risk category, remediation plan
  *
+ * Security layers in the data path (zero-trust, NetBird mesh enforced):
+ *   - Vigil-LLM — every untrusted MCP payload (initialize instructions, tool
+ *     descriptions, fuzz/probe responses) is POSTed to the Vigil /analyze
+ *     endpoint BEFORE it enters any LLM prompt. A detection aborts the run,
+ *     scores it 0 with riskCategory=Malicious and records a Critical finding
+ *     (VIGIL_ENFORCE=monitor downgrades this to log + finding). In strict
+ *     mode an unreachable scanner also fails the run (fail-closed).
+ *   - Occludra — every OpenCode provider is pinned to the Occludra gateway
+ *     (OCCLUDRA_BASE_URL), which redacts PII and leaked secrets before
+ *     forwarding inference calls to the upstream LLM.
+ *   - NetBird — the evaluator reaches Vigil/Occludra through the sidecar's
+ *     SOCKS5 proxy (MESH_PROXY); the OpenCode child process is routed through
+ *     a local HTTP-proxy bridge exported as HTTP_PROXY/HTTPS_PROXY.
+ *
  * Every agent is an OpenCodeAgent CR fetched from the API server. For each
  * agent a fresh OpenCode server is booted on OPENCODE_PORT, a session is
  * created, the persona's systemPrompt + collected evidence is sent with
@@ -34,6 +48,8 @@ import {
 import { runFuzz, renderFuzzMarkdown } from "./fuzz.js";
 import { runProbes, renderProbeMarkdown } from "./probes.js";
 import { collectStaticEvidence, renderStaticMarkdown } from "./static.js";
+import { createMeshFetch, startMeshProxyBridge, type MeshBridge, type MeshFetch } from "./meshhttp.js";
+import { excerptOf, VigilClient, type VigilVerdict } from "./vigil.js";
 import {
   AgentPromptError,
   AgentTimeoutError,
@@ -42,6 +58,8 @@ import {
   StructuredOutputExhaustedError,
   TargetCrashError,
   TargetUnavailableError,
+  VigilInjectionError,
+  VigilUnavailableError,
   emptyScoring,
   emptyTelemetry,
   errorMessage,
@@ -65,6 +83,7 @@ import {
   type ProbeReport,
   type RemediationItem,
   type RiskCategory,
+  type SecurityGateReport,
   type RunPhase,
   type RunnerEnv,
   type ScoringBlock,
@@ -124,6 +143,22 @@ function readEnv(): RunnerEnv {
   if (agentNames.length === 0) {
     throw new ConfigurationError("AGENT_NAMES must list at least one OpenCodeAgent");
   }
+  const flag = (key: string, fallback: boolean): boolean => {
+    const raw = env[key];
+    if (!isNonEmptyString(raw)) {
+      return fallback;
+    }
+    const normalized = raw.trim().toLowerCase();
+    return normalized !== "0" && normalized !== "false" && normalized !== "no";
+  };
+  const rawEnforce = (env["VIGIL_ENFORCE"] ?? "strict").trim().toLowerCase();
+  if (rawEnforce !== "strict" && rawEnforce !== "monitor") {
+    throw new ConfigurationError(`VIGIL_ENFORCE must be "strict" or "monitor", got "${rawEnforce}"`);
+  }
+  const rawMeshProxy = env["MESH_PROXY"];
+  // Default: the NetBird userspace sidecar's SOCKS5 endpoint in this pod.
+  // An explicitly EMPTY value disables the mesh (non-mesh fallback mode).
+  const meshProxy = rawMeshProxy === undefined ? "socks5://127.0.0.1:1080" : rawMeshProxy.trim() === "" ? null : rawMeshProxy.trim();
   return {
     runName: required("RUN_NAME"),
     runNamespace: required("RUN_NAMESPACE"),
@@ -136,6 +171,19 @@ function readEnv(): RunnerEnv {
     outputDir: env["OUTPUT_DIR"] ?? "/output",
     opencodePort: optionalInt("OPENCODE_PORT", 4096),
     dryRun,
+    // --- Vigil-LLM (inbound scanner) ---
+    vigilUrl: env["VIGIL_URL"] ?? "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze",
+    // Disabled by default in DRY_RUN (no gateways reachable) unless forced on.
+    vigilEnabled: flag("VIGIL_ENABLED", !dryRun),
+    vigilEnforce: rawEnforce === "strict",
+    vigilTimeoutMs: optionalInt("VIGIL_TIMEOUT_MS", 10_000),
+    vigilMaxPayloadBytes: optionalInt("VIGIL_MAX_PAYLOAD_BYTES", 65_536),
+    // --- Occludra (LLM gateway) ---
+    occludraBaseUrl: env["OCCLUDRA_BASE_URL"] ?? "http://occludra-service.security-gateways.svc.cluster.local:8080/v1",
+    occludraEnabled: flag("OCCLUDRA_ENABLED", true),
+    // --- NetBird mesh transport ---
+    meshProxyUrl: meshProxy,
+    meshBridgePort: optionalInt("MESH_BRIDGE_PORT", 18080),
   };
 }
 
@@ -167,7 +215,7 @@ interface OpencodeHandle {
   close: () => void;
 }
 
-async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, port: number, signal: AbortSignal): Promise<OpencodeHandle> {
+async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEnv, signal: AbortSignal): Promise<OpencodeHandle> {
   const modelRef = `${agent.spec.model.providerID}/${agent.spec.model.modelID}`;
   // Agents must never mutate /workspace or reach the network via tools: the
   // static auditor gets read-only file tools, every other persona gets none.
@@ -179,9 +227,22 @@ async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, port: number,
     share: "disabled",
     snapshot: false,
   };
+  // Occludra is the ONLY LLM egress point: pin the provider's baseURL to the
+  // gateway so every inference call is PII/secret-scrubbed before it leaves
+  // the cluster. The call itself is carried by the NetBird mesh through the
+  // HTTP_PROXY bridge exported by main() (see the mesh bootstrap there).
+  if (env.occludraEnabled) {
+    config.provider = {
+      [agent.spec.model.providerID]: {
+        options: { baseURL: env.occludraBaseUrl },
+      },
+    };
+  } else {
+    log.warn("Occludra disabled — LLM traffic bypasses the security gateway", { agent: agent.metadata.name });
+  }
   let handle: Awaited<ReturnType<typeof createOpencode>>;
   try {
-    handle = await createOpencode({ hostname: "127.0.0.1", port, signal, config, timeout: 60_000 });
+    handle = await createOpencode({ hostname: "127.0.0.1", port: env.opencodePort, signal, config, timeout: 60_000 });
   } catch (err) {
     throw new AgentPromptError(agent.metadata.name, `failed to boot OpenCode server: ${errorMessage(err)}`);
   }
@@ -309,7 +370,7 @@ async function runAgentPrompt(
     JSON.stringify(agent.spec.outputFormat.schema, null, 2),
     "```",
   ].join("\n");
-  const handle = await bootOpencode(agent, kind, env.opencodePort, abort.signal);
+  const handle = await bootOpencode(agent, kind, env, abort.signal);
   let timer: NodeJS.Timeout | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -665,6 +726,17 @@ function sleep(ms: number): Promise<void> {
 // Main
 // ---------------------------------------------------------------------------
 
+interface SecurityState {
+  /** null when VIGIL_ENABLED=0 (or DRY_RUN default). */
+  vigil: VigilClient | null;
+  /** Local HTTP-proxy bridge for the OpenCode child process; null when the mesh is off. */
+  bridge: MeshBridge | null;
+  /** Live view into report.securityGate (same object). */
+  gate: SecurityGateReport;
+  /** The advertised surface is scanned once, on the first live target session. */
+  surfaceScanned: boolean;
+}
+
 interface RunState {
   env: RunnerEnv;
   status: StatusWriter;
@@ -672,7 +744,142 @@ interface RunState {
   mcp: McpClient | null;
   dynamic: DynamicEvidence;
   probes: ProbeReport | null;
+  security: SecurityState;
   terminated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Vigil gate: untrusted MCP payloads never enter a prompt unscanned
+// ---------------------------------------------------------------------------
+
+function buildSurfacePayload(ev: DynamicEvidence): string {
+  return JSON.stringify(
+    {
+      instructions: ev.init?.instructions ?? null,
+      tools: ev.tools,
+      prompts: ev.prompts,
+      resources: ev.resources,
+    },
+    null,
+    1,
+  );
+}
+
+function buildFuzzPayload(fuzz: FuzzReport): string {
+  return JSON.stringify(
+    {
+      notableResponses: fuzz.notableResponses,
+      anomalousCases: fuzz.cases.filter((c) => c.errorClass !== "ok"),
+    },
+    null,
+    1,
+  );
+}
+
+function buildProbePayload(probes: ProbeReport): string {
+  return JSON.stringify(
+    {
+      serverInstructionsHits: probes.serverInstructionsHits,
+      toolDescriptionHits: probes.toolDescriptionHits,
+      benignCalls: probes.benignCalls.map((b) => ({ tool: b.tool, outputExcerpt: b.outputExcerpt, hits: b.hits })),
+      activeProbes: probes.activeProbes,
+    },
+    null,
+    1,
+  );
+}
+
+/**
+ * Scan one untrusted payload with Vigil-LLM over the mesh.
+ *
+ * strict (VIGIL_ENFORCE=strict, default): a detection scores the run 0 with
+ * riskCategory=Malicious, records a Critical finding and ABORTS the
+ * evaluation; an unreachable scanner fails the run as well (fail-closed).
+ * monitor: detections and outages are logged + recorded, evaluation continues.
+ */
+async function scanUntrusted(state: RunState, source: string, payload: string): Promise<void> {
+  const vigil = state.security.vigil;
+  if (vigil === null) {
+    return;
+  }
+  const vrec = state.security.gate.vigil;
+  vrec.payloadsScanned += 1;
+
+  let verdict: VigilVerdict;
+  try {
+    verdict = await vigil.analyze(payload, source);
+  } catch (err) {
+    if (err instanceof VigilUnavailableError) {
+      vrec.unavailableErrors += 1;
+      if (vrec.enforced) {
+        // Fail closed: never feed unscanned untrusted content to a model.
+        fail(state, `vigil scan (${source})`, err);
+      }
+      log.warn("vigil unavailable — continuing in monitor mode", { source, error: errorMessage(err) });
+      return;
+    }
+    fail(state, `vigil scan (${source})`, err);
+  }
+
+  if (!verdict.injectionDetected) {
+    log.info("vigil scan clean", { source, scannersFired: verdict.triggeredScanners.length });
+    return;
+  }
+
+  const excerpt = excerptOf(payload);
+  vrec.detections.push({
+    source,
+    confidence: verdict.confidence,
+    scanners: verdict.triggeredScanners,
+    excerpt,
+    abortive: vrec.enforced,
+  });
+  const finding: Finding = {
+    agent: "vigil-llm",
+    severity: "Critical",
+    title: `Indirect prompt injection detected in untrusted ${source}`,
+    description:
+      `Vigil-LLM flagged the MCP server's ${source} content as a prompt injection / jailbreak attempt` +
+      (verdict.confidence !== undefined ? ` (confidence ${verdict.confidence.toFixed(2)})` : "") +
+      (verdict.triggeredScanners.length > 0 ? `; triggered scanners: ${verdict.triggeredScanners.join(", ")}` : "") +
+      `. Excerpt: ${excerpt}`,
+    remediation:
+      "Do not integrate this MCP server: it embeds instructions designed to hijack LLM agents. " +
+      "To triage a suspected false positive, re-run with VIGIL_ENFORCE=monitor and review the payload excerpt.",
+  };
+  state.report.findings.push(finding);
+
+  if (!vrec.enforced) {
+    log.warn("vigil detection — monitor mode, evaluation continues", {
+      source,
+      confidence: verdict.confidence,
+      scanners: verdict.triggeredScanners,
+    });
+    await state.status.patchStatus({ findings: state.report.findings });
+    return;
+  }
+
+  log.error("vigil detection — aborting evaluation, marking Malicious", {
+    source,
+    confidence: verdict.confidence,
+    scanners: verdict.triggeredScanners,
+  });
+  state.report.scoring = {
+    safetyScore: 0,
+    reliabilityScore: 0,
+    riskCategory: "Malicious",
+    summary: `Indirect prompt injection detected by Vigil-LLM in untrusted ${source}.`,
+  };
+  state.report.finalScore = 0;
+  await state.status.patchStatus({
+    phase: "Failed",
+    currentAgent: "",
+    finalScore: 0,
+    scoring: state.report.scoring,
+    findings: state.report.findings,
+    message: state.report.scoring.summary,
+  });
+  throw new VigilInjectionError(source, verdict.confidence, verdict.triggeredScanners, excerpt);
 }
 
 function fail(state: RunState, stage: string, err: unknown): never {
@@ -795,6 +1002,13 @@ async function evaluate(state: RunState): Promise<void> {
 
     if (kind === "dynamic") {
       await ensureTarget();
+      // Gate 1: the advertised surface (instructions + tool/prompt/resource
+      // descriptions) is the classic indirect-injection channel — scan it
+      // before any of it reaches a prompt.
+      if (state.dynamic.init && !state.security.surfaceScanned) {
+        state.security.surfaceScanned = true;
+        await scanUntrusted(state, "advertised-surface", buildSurfacePayload(state.dynamic));
+      }
       const client = state.mcp;
       if (client && state.dynamic.init) {
         try {
@@ -824,6 +1038,10 @@ async function evaluate(state: RunState): Promise<void> {
         // not exist. Fail explicitly rather than scoring nothing.
         fail(state, "target startup", new TargetUnavailableError(state.dynamic.initError || "initialize failed"));
       }
+      // Gate 2: anomalous fuzz responses may carry injected instructions.
+      if (state.dynamic.fuzz) {
+        await scanUntrusted(state, "fuzz-responses", buildFuzzPayload(state.dynamic.fuzz));
+      }
       report.telemetry = state.dynamic.telemetry;
       try {
         await recordAgent(agent, kind, () => runAgentPrompt(agent, kind, buildDynamicMessage(server, state.dynamic), env));
@@ -835,6 +1053,10 @@ async function evaluate(state: RunState): Promise<void> {
 
     if (kind === "adversarial") {
       await ensureTarget();
+      if (state.dynamic.init && !state.security.surfaceScanned) {
+        state.security.surfaceScanned = true;
+        await scanUntrusted(state, "advertised-surface", buildSurfacePayload(state.dynamic));
+      }
       const client = state.mcp;
       if (client && state.dynamic.init) {
         try {
@@ -859,6 +1081,11 @@ async function evaluate(state: RunState): Promise<void> {
         refreshTelemetry(state.dynamic, client);
       } else {
         fail(state, "target startup", new TargetUnavailableError(state.dynamic.initError || "initialize failed"));
+      }
+      // Gate 3: probe outputs — the untrusted server's direct answers to our
+      // adversarial inputs.
+      if (state.probes) {
+        await scanUntrusted(state, "probe-responses", buildProbePayload(state.probes));
       }
       report.telemetry = state.dynamic.telemetry;
       try {
@@ -960,6 +1187,9 @@ async function main(): Promise<number> {
     agents: env.agentNames,
     transport: env.transport,
     dryRun: env.dryRun,
+    vigil: env.vigilEnabled ? `${env.vigilUrl} (${env.vigilEnforce ? "strict" : "monitor"})` : "disabled",
+    occludra: env.occludraEnabled ? env.occludraBaseUrl : "disabled",
+    mesh: env.meshProxyUrl ?? "disabled",
   });
 
   let status: StatusWriter;
@@ -970,6 +1200,44 @@ async function main(): Promise<number> {
     writeTerminationMessage({ phase: "Failed", finalScore: 0, riskCategory: "Unknown", message: errorMessage(err) });
     return 1;
   }
+
+  // ---- security layer bootstrap: NetBird mesh bridge + Vigil client ----
+  let bridge: MeshBridge | null = null;
+  if (env.meshProxyUrl !== null) {
+    try {
+      bridge = await startMeshProxyBridge(env.meshProxyUrl, { port: env.meshBridgePort });
+    } catch (err) {
+      log.error("cannot start mesh proxy bridge", { error: errorMessage(err) });
+      writeTerminationMessage({
+        phase: "Failed",
+        finalScore: 0,
+        riskCategory: "Unknown",
+        message: `mesh bridge bootstrap failed: ${errorMessage(err)}`,
+      });
+      return 1;
+    }
+    // The OpenCode child process spawned by the SDK inherits these and routes
+    // its Occludra-bound provider calls through the bridge (→ NetBird SOCKS5
+    // → WireGuard). This process makes its own vigil/occludra calls through
+    // the explicit mesh fetch instead (Node's fetch ignores proxy env vars).
+    const noProxy = "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,.cluster.local,kubernetes.default";
+    process.env["HTTP_PROXY"] = bridge.url;
+    process.env["HTTPS_PROXY"] = bridge.url;
+    process.env["http_proxy"] = bridge.url;
+    process.env["https_proxy"] = bridge.url;
+    process.env["NO_PROXY"] = noProxy;
+    process.env["no_proxy"] = noProxy;
+    log.info("mesh transport ready", { bridge: bridge.url, upstream: env.meshProxyUrl });
+  } else {
+    log.warn("mesh transport disabled (MESH_PROXY empty) — vigil/occludra calls bypass the NetBird overlay");
+  }
+  const meshFetchFn: MeshFetch = createMeshFetch(env.meshProxyUrl);
+  const vigil = env.vigilEnabled
+    ? new VigilClient(env.vigilUrl, meshFetchFn, {
+        timeoutMs: env.vigilTimeoutMs,
+        maxPayloadBytes: env.vigilMaxPayloadBytes,
+      })
+    : null;
 
   const report: EvaluationReport = {
     runName: env.runName,
@@ -985,6 +1253,18 @@ async function main(): Promise<number> {
     finalScore: 0,
     scoring: emptyScoring(),
     findings: [],
+    securityGate: {
+      vigil: {
+        enabled: vigil !== null,
+        enforced: env.vigilEnforce,
+        url: env.vigilUrl,
+        payloadsScanned: 0,
+        detections: [],
+        unavailableErrors: 0,
+      },
+      occludra: { enabled: env.occludraEnabled, baseUrl: env.occludraBaseUrl },
+      mesh: { proxyUrl: env.meshProxyUrl, bridgePort: bridge !== null ? bridge.port : null },
+    },
     phase: "Running",
     message: "",
   };
@@ -995,6 +1275,7 @@ async function main(): Promise<number> {
     mcp: null,
     dynamic: { init: null, initError: "", tools: [], prompts: [], resources: [], fuzz: null, telemetry: report.telemetry },
     probes: null,
+    security: { vigil, bridge, gate: report.securityGate, surfaceScanned: false },
     terminated: false,
   };
 
@@ -1024,6 +1305,13 @@ async function main(): Promise<number> {
         await state.mcp.close();
       } catch (err) {
         log.warn("failed to close MCP client", { error: errorMessage(err) });
+      }
+    }
+    if (state.security.bridge) {
+      try {
+        await state.security.bridge.close();
+      } catch (err) {
+        log.warn("failed to close mesh bridge", { error: errorMessage(err) });
       }
     }
     touchDone(env);

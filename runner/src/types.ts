@@ -137,6 +137,29 @@ export interface RunnerEnv {
   outputDir: string;
   opencodePort: number;
   dryRun: boolean;
+
+  // --- security layer: Vigil-LLM (inbound prompt-injection scanner) ---
+  /** Full URL of the Vigil /analyze endpoint (routed over the NetBird mesh). */
+  vigilUrl: string;
+  /** Hard gate (true) or observe-only (false). */
+  vigilEnabled: boolean;
+  /** strict: scanner failure or detection fails the run; monitor: log only. */
+  vigilEnforce: boolean;
+  /** Per-request timeout and payload truncation ceiling for scans. */
+  vigilTimeoutMs: number;
+  vigilMaxPayloadBytes: number;
+
+  // --- security layer: Occludra (outgoing LLM gateway) ---
+  /** OpenAI-compatible base URL the OpenCode providers are pointed at. */
+  occludraBaseUrl: string;
+  /** false restores direct provider calls (dev only — breaks mesh isolation). */
+  occludraEnabled: boolean;
+
+  // --- security layer: NetBird mesh transport ---
+  /** socks5://127.0.0.1:1080 (NetBird userspace sidecar) or null to disable. */
+  meshProxyUrl: string | null;
+  /** Local HTTP-proxy bridge port for the OpenCode child process. */
+  meshBridgePort: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +475,33 @@ export interface AgentRunRecord {
   structuredOutput?: unknown;
 }
 
+export interface VigilDetectionRecord {
+  source: string;
+  confidence?: number;
+  scanners: string[];
+  excerpt: string;
+  abortive: boolean;
+}
+
+export interface SecurityGateReport {
+  vigil: {
+    enabled: boolean;
+    enforced: boolean;
+    url: string;
+    payloadsScanned: number;
+    detections: VigilDetectionRecord[];
+    unavailableErrors: number;
+  };
+  occludra: {
+    enabled: boolean;
+    baseUrl: string;
+  };
+  mesh: {
+    proxyUrl: string | null;
+    bridgePort: number | null;
+  };
+}
+
 export interface EvaluationReport {
   runName: string;
   serverName: string;
@@ -471,6 +521,7 @@ export interface EvaluationReport {
   finalScore: number;
   scoring: ScoringBlock;
   findings: Finding[];
+  securityGate: SecurityGateReport;
   phase: RunPhase;
   message: string;
 }
@@ -570,6 +621,44 @@ export class AgentPromptError extends RunnerError {
 export class ConfigurationError extends RunnerError {
   constructor(detail: string) {
     super("ConfigurationError", "config", detail);
+  }
+}
+
+/** Raised when Vigil-LLM flags a payload as prompt injection / jailbreak. */
+export class VigilInjectionError extends RunnerError {
+  public readonly source: string;
+  public readonly confidence?: number;
+  public readonly scanners: string[];
+  public readonly excerpt: string;
+  constructor(source: string, confidence: number | undefined, scanners: string[], excerpt: string) {
+    super(
+      "VigilInjectionError",
+      `vigil:${source}`,
+      `Vigil-LLM detected prompt injection in untrusted content from "${source}"` +
+        (scanners.length > 0 ? ` (scanners: ${scanners.join(", ")})` : "") +
+        (confidence !== undefined ? ` confidence=${confidence.toFixed(2)}` : "") +
+        ` — excerpt: ${excerpt}`,
+    );
+    this.source = source;
+    this.confidence = confidence;
+    this.scanners = scanners;
+    this.excerpt = excerpt;
+  }
+}
+
+/** Raised when the Vigil-LLM API could not be reached or answered uselessly. */
+export class VigilUnavailableError extends RunnerError {
+  public readonly source: string;
+  constructor(source: string, detail: string) {
+    super("VigilUnavailableError", `vigil:${source}`, `Vigil-LLM scan failed for "${source}": ${detail}`);
+    this.source = source;
+  }
+}
+
+/** Raised when a request through the NetBird mesh proxy fails. */
+export class MeshTransportError extends RunnerError {
+  constructor(detail: string) {
+    super("MeshTransportError", "mesh", `mesh transport failure: ${detail}`);
   }
 }
 

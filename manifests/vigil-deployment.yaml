@@ -1,0 +1,260 @@
+# ---------------------------------------------------------------------------
+# Vigil-LLM — inbound prompt-injection & jailbreak scanner.
+#
+# Every untrusted MCP payload (tool descriptions, initialize instructions,
+# fuzz/probe responses) is POSTed by the evaluator to
+# http://vigil-service:5000/analyze BEFORE it reaches any LLM prompt. Vigil
+# runs heuristic pattern matching, YARA signatures and (optionally)
+# transformer/embedding similarity classifiers and returns a verdict; a
+# "blocked" verdict aborts the evaluation and marks the MCPEvaluationRun
+# Failed with riskCategory=Malicious.
+#
+# Deployed in security-gateways (see occludra-deployment.yaml for the namespace
+# rationale — the netbird sidecar needs CAP_NET_ADMIN). Namespace-wide ingress
+# and egress NetworkPolicies ship in occludra-deployment.yaml and cover this
+# Deployment via the empty podSelector.
+#
+# Mesh identity: `vigil.<mesh-domain>` (NetBird peer name `vigil`).
+# Non-mesh path: ClusterIP vigil-service:5000 for operators/smoke tests only.
+# ---------------------------------------------------------------------------
+# Scanner configuration. Key layout mirrors vigil-llm's documented
+# server.conf — verify against the image version you pin. ML-based scanners
+# (transformer / vector / canonical) are disabled by default so the container
+# boots offline and stays fast; the heuristic + YARA pass catches the common
+# injection families. Enable the ML scanners when the cluster can pull their
+# models and tolerate the latency.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vigil-server-conf
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm
+    app.kubernetes.io/component: prompt-scanner
+data:
+  server.conf: |
+    # Vigil-LLM server configuration (basic profile).
+    name: "vigil-server"
+
+    rest:
+      host: 0.0.0.0
+      port: 5000
+
+    # Scanner definitions. Each entry maps to a module under vigil/scanners/.
+    scanners:
+      # Fast regex/heuristic signatures — always on.
+      heuristics:
+        enabled: true
+        patterns:
+          - "signatures/heuristics/*.yml"
+
+      # YARA rules shipped with the image (default security signatures).
+      yara:
+        enabled: true
+        rules:
+          - "signatures/yara/*.yar"
+
+      # Canonical prompt-injection classifier (requires model download).
+      # canonical:
+      #   enabled: true
+
+      # Embedding similarity against a known injection corpus.
+      # transformer:
+      #   enabled: true
+      #   model: "instructionaldetection"
+      # vector:
+      #   enabled: true
+      #   threshold: 0.8
+
+      # Response-similarity and sentiment scanners stay off for evaluations:
+      # the runner feeds raw untrusted payloads, not model responses.
+      sentiment:
+        enabled: false
+
+    logging:
+      level: "INFO"
+      # Do not persist scanned payloads: they are untrusted content.
+      log_payloads: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vigil
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm
+    app.kubernetes.io/component: prompt-scanner
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vigil-llm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vigil-llm
+        app.kubernetes.io/component: prompt-scanner
+        security.eval.io/mesh-peer: vigil
+    spec:
+      serviceAccountName: vigil
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10004
+        runAsGroup: 10004
+        fsGroup: 10004
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: config
+          configMap:
+            name: vigil-server-conf
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: netbird-state
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+      containers:
+        # ----------------------------------------------------------- scanner
+        - name: vigil
+          image: deadbits/vigil-llm:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          env:
+            - name: VIGIL_CONF
+              value: /conf/server.conf
+            - name: HOME
+              value: /tmp
+              # Some builds resolve the config path relative to CWD; both are
+              # provided so either lookup succeeds.
+            - name: VIGIL_CONFIG_PATH
+              value: /conf/server.conf
+          volumeMounts:
+            # subPath so the image's own conf/ siblings stay visible.
+            - name: config
+              mountPath: /conf
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10004
+            runAsGroup: 10004
+            # Vigil writes nothing outside /tmp; if your build writes compiled
+            # caches next to the code, drop this to false.
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          # tcpSocket probes (see occludra manifest for rationale); switch to
+          # httpGet /analyze expects-400 or a /health route if your build has
+          # one.
+          livenessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+        # ---------------------------------------------------- netbird (TUN)
+        - name: netbird
+          image: netbirdio/netbird:latest
+          imagePullPolicy: Always
+          env:
+            - name: NETBIRD_MANAGEMENT_URL
+              value: "https://netbird.example.com:443"   # your management server
+            - name: NETBIRD_SETUP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: netbird-auth
+                  key: setup-key
+            - name: NETBIRD_HOSTNAME
+              value: vigil
+          volumeMounts:
+            - name: netbird-state
+              mountPath: /var/lib/netbird
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
+          securityContext:
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN"]
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: false
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-service
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm
+  annotations:
+    security.eval.io/network-path: "cluster-local (fallback), mesh is primary"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vigil-llm
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vigil
+  namespace: security-gateways
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vigil-llm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vigil
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm

@@ -59,6 +59,37 @@ spec:
           value: llm-provider-credentials
         - name: LLM_SECRET_KEY
           value: ANTHROPIC_API_KEY
+        # ---- security layers (Vigil / Occludra / NetBird) ----
+        # MESH_ENFORCE=false falls back to legacy direct-to-provider mode:
+        # no netbird sidecar, no MESH_PROXY, no per-run mesh egress policy.
+        - name: MESH_ENFORCE
+          value: "true"
+        - name: NETBIRD_IMAGE
+          value: netbirdio/netbird:latest
+        # MUST point at your NetBird management server; evaluation pods enroll
+        # against it with the setup key in Secret mcp-evals/netbird-auth.
+        - name: NETBIRD_MANAGEMENT_URL
+          value: https://netbird.example.com:443
+        - name: NETBIRD_SECRET_NAME
+          value: netbird-auth
+        - name: NETBIRD_SECRET_KEY
+          value: setup-key
+        # Destinations the per-run mesh policy allows for NetBird control and
+        # data plane traffic (management/signal/relay + WireGuard peers).
+        - name: NETBIRD_EGRESS_CIDRS
+          value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+        - name: MESH_PROXY_URL
+          value: socks5://127.0.0.1:1080
+        - name: MESH_BRIDGE_PORT
+          value: "18080"
+        # NetBird peer DNS domain (self-hosted management default). With
+        # MESH_ENFORCE=true the operator derives the evaluator's security
+        # endpoints as vigil.<domain>:5000/analyze and
+        # occludra.<domain>:8080/v1 — the per-run policy blocks the
+        # cluster-local service path, so those mesh names ARE the endpoints.
+        # Set VIGIL_URL / OCCLUDRA_BASE_URL explicitly to override either.
+        - name: NETBIRD_DNS_DOMAIN
+          value: netbird.selfhosted
         ports:
         - containerPort: 8443
           name: metrics

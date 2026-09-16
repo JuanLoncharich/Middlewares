@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -115,6 +116,23 @@ func main() {
 		"runnerServiceAccount", images.RunnerServiceAccount,
 		"llmSecret", images.LLMSecretName,
 	)
+	setupLog.Info("security layer configuration",
+		"meshEnforce", images.MeshEnforce,
+		"netBirdImage", images.NetBirdImage,
+		"netBirdManagementURL", images.NetBirdManagementURL,
+		"netBirdEgressCIDRs", images.NetBirdEgressCIDRs,
+		"meshProxy", images.MeshProxyURL,
+		"vigilURL", images.VigilURL,
+		"occludraBaseURL", images.OccludraBaseURL,
+	)
+	if images.MeshEnforce && len(images.NetBirdEgressCIDRs) == 0 {
+		setupLog.Info("WARNING: MESH_ENFORCE=true but NETBIRD_EGRESS_CIDRS is empty — " +
+			"evaluation pods will resolve DNS and reach the API server but the WireGuard overlay itself will be blocked")
+	}
+	if images.MeshEnforce && strings.Contains(images.NetBirdManagementURL, "netbird.example.com") {
+		setupLog.Info("WARNING: NETBIRD_MANAGEMENT_URL still points at the placeholder " +
+			"https://netbird.example.com:443 — set it to your management server or mesh enrollment will fail")
+	}
 
 	if err = (&controller.MCPServerReconciler{
 		Client:   mgr.GetClient(),

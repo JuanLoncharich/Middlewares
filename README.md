@@ -9,9 +9,14 @@ probing, synthesis) against it, writing a structured verdict back into the CR.
 ```
 MCPServer ──schedule──▶ MCPEvaluationRun ──▶ batch/v1 Job (one Pod)
                                                ├─ init  cloner     shallow clone + toolchain detect → /workspace
+                                               ├─ side  netbird    userspace WireGuard + local SOCKS5 (127.0.0.1:1080)
                                                ├─ ctr   target     untrusted MCP server, jailed, stdio ⇄ /ipc FIFOs
                                                └─ ctr   evaluator  @opencode-ai/sdk runner, patches status
 OpenCodeAgent ×4 ─── referenced by agentSuite ──▶ fetched by the evaluator at run time
+
+evaluator ──Vigil /analyze──▶ vigil   (security-gateways, WireGuard mesh)
+evaluator ──LLM calls──────▶ occludra┐ (security-gateways, WireGuard mesh)
+                            └─PII scrub──▶ upstream LLM
 ```
 
 ## Layout
@@ -25,6 +30,7 @@ OpenCodeAgent ×4 ─── referenced by agentSuite ──▶ fetched by the ev
 | `config/rbac/` | manager ClusterRole, leader-election Role, runner ServiceAccount/Role |
 | `config/manager/` | operator Deployment (namespace `mcp-eval-system`) |
 | `config/samples/` | namespace, NetworkPolicies, reference sandbox Pod, four agent personas, `MCPServer` sample |
+| `manifests/` | Vigil-LLM, Occludra and NetBird deployments (namespace `security-gateways`) — the three security layers |
 | `runner/` | TypeScript evaluator (`@opencode-ai/sdk` + `@kubernetes/client-node`) |
 | `images/cloner/` | init-container image: git + npm/uv/go toolchain detection |
 | `images/target/` | sandbox image: supervisor that binds the server's stdio to the IPC FIFOs |
@@ -94,6 +100,48 @@ structured-output tool call — so both paid and free tiers produce results.
 Switch models by editing the four
 `config/samples/security.eval.io_v1alpha1_opencodeagent_*.yaml` files.
 
+## Security layers (Vigil / Occludra / NetBird)
+
+Three centralized services (namespace `security-gateways`) wrap the
+evaluation data path. Deployed by `deploy.sh`, or individually with
+`kubectl apply -f manifests/…`.
+
+* **Vigil-LLM** (inbound) — before any untrusted MCP payload (initialize
+  instructions, tool descriptions, fuzz/probe responses) enters a prompt, the
+  evaluator POSTs it to `vigil-service:5000/analyze`. A verdict of
+  *injection detected* aborts the run, scores it `0` with
+  `riskCategory=Malicious`, records a `Critical` finding and surfaces through
+  the CRD status/termination message. `VIGIL_ENFORCE=monitor` downgrades
+  detections to log+finding; in the default `strict` mode an *unreachable*
+  scanner also fails the run (fail-closed). Set `VIGIL_ENABLED=0` to disable.
+* **Occludra** (outbound) — every OpenCode provider is pinned to
+  `occludra-service:8080/v1` (`OCCLUDRA_BASE_URL`): the gateway regex-scrubs
+  PII (emails, SSNs, phone numbers, IBANs) and credential-looking strings from
+  every completion request before forwarding upstream. Upstream provider keys
+  live in `security-gateways/llm-provider-credentials`; the policy ships as
+  ConfigMap `occludra-policy`. `OCCLUDRA_ENABLED=0` restores direct provider
+  calls (dev only).
+* **NetBird** (transport) — evaluation pods enroll in a WireGuard mesh via a
+  **userspace** sidecar (`NETBIRD_USERSPACE_HOSTWIRESOCK=yes`: no capabilities,
+  PodSecurity-restricted-safe) that exposes a local SOCKS5 proxy on
+  `127.0.0.1:1080`. The evaluator routes Vigil/Occludra calls through it and
+  exports a local HTTP-proxy bridge as `HTTP_PROXY`/`HTTPS_PROXY` so the
+  OpenCode child process rides the mesh too. Vigil and Occludra run TUN-mode
+  netbird sidecars (hence the `privileged`-PSA `security-gateways` namespace —
+  trusted first-party images only). `MESH_ENFORCE=false` on the operator
+  disables the sidecar, the mesh env vars and the per-run policy.
+
+Runner knobs (all injected by the operator, all overridable per Deployment):
+`MESH_PROXY` (default `socks5://127.0.0.1:1080`, empty = direct),
+`MESH_BRIDGE_PORT` (18080), `VIGIL_URL`, `VIGIL_ENABLED`, `VIGIL_ENFORCE`,
+`VIGIL_TIMEOUT_MS`, `VIGIL_MAX_PAYLOAD_BYTES`, `OCCLUDRA_BASE_URL`,
+`OCCLUDRA_ENABLED`. The operator derives `VIGIL_URL` / `OCCLUDRA_BASE_URL`
+from the mode: in mesh mode they become the NetBird peer names under
+`NETBIRD_DNS_DOMAIN` (default `netbird.selfhosted` — must match your
+management server's DNS domain, since the per-run policy blocks the
+cluster-local service path); with `MESH_ENFORCE=false` they fall back to the
+in-cluster `*.security-gateways.svc.cluster.local` services.
+
 ## Run lifecycle
 
 | Phase | Set by | Meaning |
@@ -122,12 +170,14 @@ The untrusted MCP server is the threat. Controls, from outermost in:
    `security.eval.io/net-phase`:
    * `clone` — only while init containers run (target not yet started):
      egress to git hosts / package registries on 443.
-   * `evaluate` — flipped as soon as all init containers terminate: egress
-     only to DNS, the API server, and the LLM endpoint on 443.
-   `networkpolicy-cilium.yaml` pins the same rules to exact FQDNs
-   (`api.anthropic.com`, `github.com`, …) on Cilium. With the vanilla
-   `NetworkPolicy` file, replace the `10.96.0.1/32` API-server CIDR with your
-   cluster's value.
+   * `evaluate` — flipped as soon as all init containers terminate: a
+     **per-run policy generated by the operator** (`<run>-mesh-egress`) allows
+     ONLY DNS, the API server (endpoint IPs resolved at reconcile time) and
+     the NetBird control/data planes. Direct LLM-provider egress does not
+     exist in this mode; see *Security layers* below.
+   `networkpolicy-cilium.yaml` pins the clone-phase rules to exact FQDNs on
+   Cilium. Set `MESH_ENFORCE=false` on the operator to restore the legacy
+   direct-to-provider mode (and re-add a static evaluate-phase policy).
 3. **Pod** — `automountServiceAccountToken: false`; the evaluator alone mounts
    a 1-hour projected token; `hostNetwork/PID/IPC` off; `activeDeadlineSeconds`
    from `spec.timeoutSeconds`; Job `backoffLimit: 0`, `ttlSecondsAfterFinished: 600`.
@@ -144,12 +194,18 @@ The untrusted MCP server is the threat. Controls, from outermost in:
    evaluator act on the cluster or filesystem.
 
 Residual risk to be aware of: because the target shares the Pod's network
-namespace, during the `evaluate` phase it can open *unauthenticated* TCP
-connections to the same hosts the evaluator can (LLM API, apiserver). It holds
-no credentials for either. If that is unacceptable for your threat model, run
-with a RuntimeClass such as gVisor (`runtimeClassName` on the Job template) or
-deploy the target as a separate Pod labelled `security.eval.io/role=target`,
-which the shipped `target-deny-all` policy blocks completely.
+namespace, during the `evaluate` phase it can reach the same endpoints the
+evaluator can — DNS, the API server, the NetBird ports (WireGuard drops
+unauthenticated packets, so this is inert), and the loopback listeners: the
+netbird SOCKS5 proxy (`127.0.0.1:1080`), the mesh bridge (`127.0.0.1:18080`)
+and the OpenCode server (`127.0.0.1:4096`). It holds no credentials for any of
+them, and the NetBird ACLs attached to the evaluation setup key's group are
+the enforcement layer for the proxy paths — scope that group to `vigil` +
+`occludra` only. If loopback reachability is unacceptable for your threat
+model, run with a RuntimeClass such as gVisor (`runtimeClassName` on the Job
+template) or deploy the target as a separate Pod labelled
+`security.eval.io/role=target`, which the shipped `target-deny-all` policy
+blocks completely.
 
 ## Adding or changing an agent
 

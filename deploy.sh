@@ -17,6 +17,10 @@
 #   SKIP_BUILD=1       skip docker build/push
 #   SKIP_SECRET=1      do not (re)create the LLM secret
 #   TRIGGER=0          do not trigger a run at the end
+#   ---- security layers (Vigil / Occludra / NetBird) ----
+#   DEPLOY_SECURITY_GATEWAYS=0   skip the security-gateways namespace (default: deploy it)
+#   NETBIRD_MANAGEMENT_URL       your NetBird management server (default placeholder is substituted)
+#   NETBIRD_SETUP_KEY            setup key written into Secret netbird-auth (both namespaces)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -25,6 +29,8 @@ IMG_TAG="${IMG_TAG:-latest}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_SECRET="${SKIP_SECRET:-0}"
 TRIGGER="${TRIGGER:-1}"
+DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
+NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 
 IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
@@ -49,6 +55,7 @@ kubectl kustomize config/default \
         -e "s|ghcr.io/security-eval/mcp-cloner:latest|$CLONER_IMG|g" \
         -e "s|ghcr.io/security-eval/mcp-target-sandbox:latest|$TARGET_IMG|g" \
         -e "s|ghcr.io/security-eval/mcp-evaluator:latest|$EVALUATOR_IMG|g" \
+        -e "s|https://netbird.example.com:443|$NETBIRD_MANAGEMENT_URL|g" \
   | kubectl apply -f -
 kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager --timeout=180s
 
@@ -101,6 +108,39 @@ if [ "$SKIP_SECRET" != "1" ]; then
     kubectl -n mcp-evals create secret generic llm-provider-credentials \
       --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
       --dry-run=client -o yaml | kubectl apply -f -
+  fi
+fi
+
+if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
+  log "Deploying security gateways (Occludra, Vigil, NetBird) into security-gateways"
+  kubectl apply -f manifests/occludra-deployment.yaml
+  kubectl apply -f manifests/netbird-daemonset.yaml
+  kubectl apply -f manifests/vigil-deployment.yaml
+  if [ -n "${NETBIRD_SETUP_KEY:-}" ]; then
+    log "Creating NetBird enrollment secrets (setup key)"
+    for ns in security-gateways mcp-evals; do
+      kubectl -n "$ns" create secret generic netbird-auth \
+        --from-literal=setup-key="$NETBIRD_SETUP_KEY" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    done
+  else
+    echo "WARNING: NETBIRD_SETUP_KEY unset — netbird-auth does not exist and mesh enrollment WILL fail." >&2
+    echo "         Create it with: kubectl -n <ns> create secret generic netbird-auth --from-literal=setup-key=<key>" >&2
+  fi
+  if [ "$SKIP_SECRET" != "1" ]; then
+    log "Mirroring LLM credentials into security-gateways (Occludra is the upstream egress point)"
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+      kubectl -n security-gateways create secret generic llm-provider-credentials \
+        --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+        --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    else
+      kubectl -n security-gateways create secret generic llm-provider-credentials \
+        --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    fi
+  else
+    echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
   fi
 fi
 
