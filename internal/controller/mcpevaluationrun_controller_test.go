@@ -159,7 +159,7 @@ func TestBuildEvaluateNetworkPolicy(t *testing.T) {
 	run := testRun()
 	policy := buildEvaluateNetworkPolicy(run, images, []string{"10.66.50.194/32"})
 
-	if policy.Name != "run-1-mesh-egress" || policy.Namespace != "mcp-evals" {
+	if policy.Name != "run-1-evaluate-egress" || policy.Namespace != "mcp-evals" {
 		t.Fatalf("unexpected policy name/namespace: %s/%s", policy.Namespace, policy.Name)
 	}
 	sel := policy.Spec.PodSelector.MatchLabels
@@ -240,6 +240,39 @@ func TestImageConfigEndpointDerivation(t *testing.T) {
 	images = ImageConfigFromEnv()
 	if images.VigilURL != "http://custom-vigil:9999/analyze" {
 		t.Errorf("explicit VIGIL_URL overridden: %q", images.VigilURL)
+	}
+}
+
+func TestBuildEvaluateNetworkPolicyLegacyMode(t *testing.T) {
+	images := meshImages()
+	images.MeshEnforce = false
+	run := testRun()
+	policy := buildEvaluateNetworkPolicy(run, images, []string{"172.21.0.2/32"})
+
+	// Legacy: DNS + apiserver + gateways + public 443 — no netbird rule.
+	if len(policy.Spec.Egress) != 4 {
+		t.Fatalf("legacy policy must have 4 egress rules, got %d", len(policy.Spec.Egress))
+	}
+	var foundGateways, foundPublic443, foundNetbird bool
+	for i := range policy.Spec.Egress {
+		rule := &policy.Spec.Egress[i]
+		for _, port := range rule.Ports {
+			if port.Port != nil && port.Port.IntValue() == 5000 && len(rule.To) == 1 && rule.To[0].NamespaceSelector != nil {
+				foundGateways = true
+			}
+			if port.Port != nil && port.Port.IntValue() == 443 && len(rule.To) == 1 && rule.To[0].IPBlock != nil && rule.To[0].IPBlock.CIDR == "0.0.0.0/0" {
+				foundPublic443 = true
+			}
+			if port.Port != nil && port.Port.IntValue() == 51820 {
+				foundNetbird = true
+			}
+		}
+	}
+	if !foundGateways || !foundPublic443 {
+		t.Fatalf("legacy policy missing gateways/public-443 rules: gw=%v pub=%v", foundGateways, foundPublic443)
+	}
+	if foundNetbird {
+		t.Fatal("legacy policy must not contain netbird rules")
 	}
 }
 

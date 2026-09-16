@@ -804,10 +804,16 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 			},
 		},
 		{
+			// Disk-backed on purpose: Memory-medium emptyDirs mount as tmpfs
+			// with the sticky bit (1777), and hosts with
+			// fs.protected_regular=2 then EACCES every non-owner O_CREAT —
+			// the target (UID 10002) can no longer open the FIFOs or log
+			// files the cloner (UID 10001) created. FIFO payloads are kernel
+			// pipe buffers regardless of the backing medium, so nothing is
+			// lost; the 64Mi sizeLimit still bounds the supervisor logs.
 			Name: volumeIPC,
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{
-					Medium:    corev1.StorageMediumMemory,
 					SizeLimit: ptr.To(resource.MustParse("64Mi")),
 				},
 			},
@@ -1166,10 +1172,12 @@ func (r *MCPEvaluationRunReconciler) buildNetBirdSidecar(run *securityv1alpha1.M
 	return []corev1.Container{sidecar}
 }
 
-// evaluateNetworkPolicyName is the per-run NetworkPolicy that locks an
-// evaluation pod's evaluate phase to DNS + API server + NetBird traffic only.
+// evaluateNetworkPolicyName is the per-run NetworkPolicy locking an
+// evaluation pod's evaluate-phase egress. In mesh mode that is DNS + API
+// server + NetBird only; in legacy mode DNS + API server + the security
+// gateways + public 443.
 func evaluateNetworkPolicyName(run *securityv1alpha1.MCPEvaluationRun) string {
-	return run.Name + "-mesh-egress"
+	return run.Name + "-evaluate-egress"
 }
 
 // ensureEvaluateNetworkPolicy creates (once) the per-run NetworkPolicy that
@@ -1184,9 +1192,6 @@ func evaluateNetworkPolicyName(run *securityv1alpha1.MCPEvaluationRun) string {
 // created BEFORE the Job so the net-phase label flip never has a window
 // without policy coverage. It is self-healing: recreated if deleted.
 func (r *MCPEvaluationRunReconciler) ensureEvaluateNetworkPolicy(ctx context.Context, run *securityv1alpha1.MCPEvaluationRun) error {
-	if !r.Images.MeshEnforce {
-		return nil
-	}
 	log := logf.FromContext(ctx)
 	key := types.NamespacedName{Namespace: run.Namespace, Name: evaluateNetworkPolicyName(run)}
 	existing := &networkingv1.NetworkPolicy{}
@@ -1268,8 +1273,41 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 	}
 	apiServerRule := networkingv1.NetworkPolicyEgressRule{To: apiPeers, Ports: apiPorts}
 
-	// NetBird control plane (management 443/33073, signal 10000, relay 33080)
-	// and data plane (WireGuard 51820/UDP, STUN/TURN 3478/UDP, relay UDP range).
+	// LEGACY mode (MESH_ENFORCE=false): the LLM path terminates in-cluster at
+	// the security gateways, and direct provider calls (public 443) remain
+	// possible for operators who bypass Occludra explicitly.
+	gatewayPort5000 := intstr.FromInt32(5000)
+	gatewayPort8080 := intstr.FromInt32(8080)
+	gatewaysRule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"kubernetes.io/metadata.name": "security-gateways"},
+			},
+		}},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Protocol: ptr.To(corev1.ProtocolTCP), Port: &gatewayPort5000},
+			{Protocol: ptr.To(corev1.ProtocolTCP), Port: &gatewayPort8080},
+		},
+	}
+	public443Rule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{{
+			IPBlock: &networkingv1.IPBlock{
+				CIDR: "0.0.0.0/0",
+				Except: []string{
+					"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+					"169.254.0.0/16", "127.0.0.0/8", "0.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4",
+				},
+			},
+		}},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(443))},
+		},
+	}
+
+	// MESH mode: NetBird control plane (management 443/33073, signal 10000,
+	// relay 33080) and data plane (WireGuard 51820/UDP, STUN/TURN 3478/UDP,
+	// relay UDP range). No gateway-service or public-443 rule is emitted —
+	// the ONLY LLM path is the WireGuard overlay.
 	netbirdPorts := []networkingv1.NetworkPolicyPort{
 		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(443))},
 		{Protocol: ptr.To(corev1.ProtocolTCP), Port: ptr.To(intstr.FromInt32(33073))},
@@ -1290,8 +1328,12 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 	}
 
 	egress := []networkingv1.NetworkPolicyEgressRule{dnsRule, apiServerRule}
-	if netbirdRule.To != nil {
-		egress = append(egress, netbirdRule)
+	if images.MeshEnforce {
+		if netbirdRule.To != nil {
+			egress = append(egress, netbirdRule)
+		}
+	} else {
+		egress = append(egress, gatewaysRule, public443Rule)
 	}
 
 	return &networkingv1.NetworkPolicy{
@@ -1300,7 +1342,7 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 			Namespace: run.Namespace,
 			Labels:    labels,
 			Annotations: map[string]string{
-				"security.eval.io/invariant": "evaluation pods may only egress DNS, the API server and the NetBird overlay",
+				"security.eval.io/invariant": "evaluate-phase egress: DNS + API server + NetBird overlay (mesh) or gateways + public 443 (legacy)",
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{

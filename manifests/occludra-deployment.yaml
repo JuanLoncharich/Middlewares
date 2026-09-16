@@ -85,11 +85,16 @@ data:
         action: redact
     models:
       # Model allowlist: requests for anything not listed are rejected with
-      # 403 before any upstream connection is attempted.
+      # 403 before any upstream connection is attempted. NOTE: OpenCode
+      # addresses the upstream with the BARE model id (the `provider/`
+      # prefix exists only inside agent specs), so patterns match bare ids.
       allow:
-        - "opencode/.*"
-        - "anthropic/.*"
-        - "openai/.*"
+        # OpenCode Zen (free ids end in -free; paid ids like
+        # claude-sonnet-4-6) and Anthropic/OpenAI direct naming.
+        - "^(claude|muse|grok|kimi|qwen|glm|deepseek|gemini|minimax|step)"
+        - ".*-free"
+        - "^o[1345]"
+        - "^gpt"
     logging:
       # Never persist prompt content in gateway logs; count and classify only.
       log_prompts: false

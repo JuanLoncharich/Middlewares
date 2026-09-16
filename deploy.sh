@@ -30,7 +30,10 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_SECRET="${SKIP_SECRET:-0}"
 TRIGGER="${TRIGGER:-1}"
 DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
+MESH_ENFORCE="${MESH_ENFORCE:-true}"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
+OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
+VIGIL_IMG="${VIGIL_IMG:-deadbits/vigil-llm:latest}"
 
 IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
@@ -47,6 +50,18 @@ if [ "$SKIP_BUILD" != "1" ]; then
   docker build -t "$EVALUATOR_IMG" runner
   log "Pushing images"
   docker push "$IMG"; docker push "$CLONER_IMG"; docker push "$TARGET_IMG"; docker push "$EVALUATOR_IMG"
+  if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
+    log "Building Occludra gateway image"
+    docker build -t "$OCCLUDRA_IMG" images/occludra-gateway
+    docker push "$OCCLUDRA_IMG"
+    case "$VIGIL_IMG" in
+      *vigil-stub*)
+        log "Building Vigil stub image"
+        docker build -t "$VIGIL_IMG" images/vigil-stub
+        docker push "$VIGIL_IMG"
+        ;;
+    esac
+  fi
 fi
 
 log "Installing CRDs, RBAC and operator (namespace mcp-eval-system)"
@@ -57,6 +72,7 @@ kubectl kustomize config/default \
         -e "s|ghcr.io/security-eval/mcp-evaluator:latest|$EVALUATOR_IMG|g" \
         -e "s|https://netbird.example.com:443|$NETBIRD_MANAGEMENT_URL|g" \
   | kubectl apply -f -
+kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager MESH_ENFORCE="$MESH_ENFORCE" >/dev/null
 kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager --timeout=180s
 
 log "Applying evaluation namespace, NetworkPolicies, agent personas and sample MCPServer (namespace mcp-evals)"
@@ -111,12 +127,53 @@ if [ "$SKIP_SECRET" != "1" ]; then
   fi
 fi
 
+# Rewrite the gateway image references for this deployment (stdin → stdout).
+substitute_gateway_images() {
+  sed -e "s|ghcr.io/security-eval/occludra-gateway:latest|$OCCLUDRA_IMG|g" \
+      -e "s|image: deadbits/vigil-llm:latest|image: $VIGIL_IMG|g"
+}
+apply_gateway_manifest() {
+  substitute_gateway_images < "$1" | kubectl apply -f -
+}
+
+# With MESH_ENFORCE=false the gateways are ordinary in-cluster services:
+#  - netbird sidecars are stripped (no management server → crashloop →
+#    endpoint flapping), along with their volumes;
+#  - the mesh-mode ingress isolation is relaxed so pods in mcp-evals can
+#    reach the service ports (in mesh mode that path is intentionally
+#    closed — enforcement stays on the evaluator-side per-run policy).
+# Operates on stdin → stdout.
+filter_mesh_sidecars() {
+  python3 -c "
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+for doc in docs:
+    if doc.get('kind') == 'Deployment':
+        pod = doc['spec']['template']['spec']
+        pod['containers'] = [c for c in pod.get('containers', []) if c.get('name') != 'netbird']
+        kept = {m.get('name') for c in pod['containers'] for m in c.get('volumeMounts', [])}
+        pod['volumes'] = [v for v in pod.get('volumes', []) if v.get('name') in kept]
+    if doc.get('kind') == 'NetworkPolicy' and doc.get('metadata', {}).get('name') == 'allow-service-ports-in-namespace':
+        doc['spec']['ingress'][0]['from'].append(
+            {'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'mcp-evals'}}})
+    print(yaml.safe_dump(doc, sort_keys=False), end='')
+    print('---')
+"
+}
+
 if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
-  log "Deploying security gateways (Occludra, Vigil, NetBird) into security-gateways"
-  kubectl apply -f manifests/occludra-deployment.yaml
-  kubectl apply -f manifests/netbird-daemonset.yaml
-  kubectl apply -f manifests/vigil-deployment.yaml
-  if [ -n "${NETBIRD_SETUP_KEY:-}" ]; then
+  log "Deploying security gateways (Occludra, Vigil, NetBird) into security-gateways (mesh=$MESH_ENFORCE)"
+  if [ "$MESH_ENFORCE" = "true" ]; then
+    apply_gateway_manifest manifests/occludra-deployment.yaml
+    apply_gateway_manifest manifests/netbird-daemonset.yaml
+    apply_gateway_manifest manifests/vigil-deployment.yaml
+  else
+    substitute_gateway_images < manifests/occludra-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
+    substitute_gateway_images < manifests/vigil-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
+  fi
+  if [ "$MESH_ENFORCE" != "true" ]; then
+    echo "NOTE: MESH_ENFORCE=false — NetBird enrollment secrets skipped." >&2
+  elif [ -n "${NETBIRD_SETUP_KEY:-}" ]; then
     log "Creating NetBird enrollment secrets (setup key)"
     for ns in security-gateways mcp-evals; do
       kubectl -n "$ns" create secret generic netbird-auth \
