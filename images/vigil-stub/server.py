@@ -27,8 +27,13 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PATTERNS = [
-    ("ignore-instructions", re.compile(r"ignore (all|any|previous|prior|above) (instructions|prompts|rules)", re.I)),
-    ("reveal-system-prompt", re.compile(r"(reveal|print|output|repeat) (your|the) (system )?(prompt|instructions)", re.I)),
+    # Verb may be separated from the target noun by qualifiers ("all
+    # previous", "any prior", "the above", …) — {0,40} of non-sentence
+    # text. "Forget" and friends join the classic "ignore" family.
+    ("ignore-instructions", re.compile(r"\b(ignore|forget|disregard|drop|override|bypass)\b[^.]{0,40}?\b(instructions?|prompts?|rules?|directives?)\b", re.I)),
+    # "(your|the)" is optional: "reveal system prompt" (no possessive) is
+    # just as much an extraction attempt as "reveal your system prompt".
+    ("reveal-system-prompt", re.compile(r"\b(reveal|print|output|repeat|show|display|expose|disclose|leak|dump)\b[^.]{0,30}?\b(system\s+prompt|your\s+prompt|initial\s+instructions|hidden\s+(?:instructions|rules)|operating\s+instructions)\b", re.I)),
     ("role-hijack", re.compile(r"you are now (a|an) [a-z ]+", re.I)),
     ("disregard-safety", re.compile(r"disregard (all|any) (safety|content) (guidelines|policies|rules)", re.I)),
     ("exfiltration", re.compile(r"(curl|wget|fetch|POST)\s+https?://\S+\s+.*(env|HOME|PATH|TOKEN|KEY)", re.I)),

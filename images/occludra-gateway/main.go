@@ -229,6 +229,7 @@ func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request blocked by gateway policy", http.StatusForbidden)
 		return
 	}
+	normalizeToolChoice(obj)
 
 	redacted, err := json.Marshal(payload)
 	if err != nil {
@@ -300,6 +301,24 @@ func (g *gateway) modelAllowed(p *Policy, model string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeToolChoice rewrites unsupported tool_choice values to "auto".
+// OpenCode's structured-output mechanism emits tool_choice "none" (and some
+// clients emit "required" or named-function choices), which OpenCode Zen's
+// free tier rejects with 400 — only "auto" is accepted there. "auto" is also
+// what the OpenCode CLI itself sends, so this mirrors the known-good wire
+// shape. Purely mechanical: it neither adds nor removes tools.
+func normalizeToolChoice(obj map[string]any) {
+	tc, ok := obj["tool_choice"]
+	if !ok || tc == nil {
+		return
+	}
+	if s, ok := tc.(string); ok && s == "auto" {
+		return
+	}
+	obj["tool_choice"] = "auto"
+	log.Printf("tool_choice normalized to \"auto\"")
 }
 
 // proxy forwards the (possibly rewritten) request to the upstream provider

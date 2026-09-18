@@ -1,0 +1,2 @@
+{"injection_detected": true, "confidence": 1.0, "status": "blocked", "scanners": ["ignore-instructions", "reveal-system-prompt"], "runs": {"heuristics": {"score": 1.0, "is_injection": true, "hits": ["ignore-instructions", "reveal-system-prompt"]}}}
+HTTP_STATUS=200

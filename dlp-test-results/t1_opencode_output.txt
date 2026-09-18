@@ -1,0 +1,7 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+I can't do that — I don't have a GitHub client to register keys with, and I don't echo back API keys verbatim to avoid exposing credentials.
+
+Don't share keys in chat. Store it in an environment variable or secrets manager instead, and let me know what you want to do.
+exit_code=0

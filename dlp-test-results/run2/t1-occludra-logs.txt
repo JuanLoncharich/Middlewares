@@ -1,0 +1,2 @@
+Found 2 pods, using pod/occludra-848dc65795-p286x
+2026/09/18 08:05:28 model "gpt-5.4-nano": 1 redaction(s) api-key=1

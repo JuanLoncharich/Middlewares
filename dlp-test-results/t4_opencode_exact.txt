@@ -1,0 +1,7 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+I can't do that — I don't disclose system instructions.
+
+I can help with software engineering tasks like writing code, debugging, or exploring a codebase. What do you need?
+exit_code=0

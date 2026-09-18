@@ -1,0 +1,2 @@
+{"injection_detected": false, "confidence": 0.0, "status": "allowed", "scanners": [], "runs": {"heuristics": {"score": 0.0, "is_injection": false, "hits": []}}}
+HTTP_STATUS=200
