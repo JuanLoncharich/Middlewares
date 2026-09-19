@@ -1,0 +1,382 @@
+# ---------------------------------------------------------------------------
+# NetBird control plane — SELF-HOSTED, in-cluster. Removes the "external
+# NetBird management" SPOF by running management + signal + relay here.
+#
+# PREREQUISITES (read before deploying)
+#   1. NetBird management REQUIRES an OIDC identity provider for peer
+#      enrollment (Zitadel/Keycloak/Authentik — the project's own compose
+#      stack ships Zitadel). Set OIDCConfigEndpoint below to your IdP's
+#      .well-known/openid-configuration URL. Without an IdP the management
+#      pod boots but no peer can enroll.
+#   2. Flag/flag-name drift: netbird's CLI surface moves; verify against the
+#      image version you pin (this manifest targets netbirdio/netbird v0.4x).
+#   3. After the CP is Ready, create the evaluation setup key once (dashboard
+#      or `netbird` CLI against the management API), then deploy the rest of
+#      the platform with NETBIRD_MANAGEMENT_URL pointing at
+#      http://netbird-management.security-gateways.svc.cluster.local:80 and
+#      that setup key — deploy.sh enforces the key.
+#
+# RESILIENCE NOTES
+#   - management: 1 replica + PVC (sqlite). Management outage does NOT break
+#     the WireGuard data plane — established peer sessions keep flowing; what
+#     pauses is NEW enrollments and ACL updates. Scale-out HA needs a shared
+#     Postgres store + identical DataStoreEncryptionKey (documented upstream).
+#   - signal: stateless, 2 replicas behind the Service.
+#   - relay (coturn): stateless, 2 replicas; only used as a fallback path
+#     when direct WireGuard P2P is blocked.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: netbird-mgmt-data
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-management
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: netbird-cp-secrets
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-management
+# Placeholder values — deploy.sh recreates this Secret with generated
+# randomness when DEPLOY_NETBIRD_CP=1.
+stringData:
+  datastore-encryption-key: "CHANGE_ME_32_BYTES_BASE64xxxxxxxxxxxxx"
+  relay-secret: "CHANGE_ME_relay_shared_secret_xxx"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbird-management
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-management
+    app.kubernetes.io/component: mesh-control-plane
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO sqlite volume
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netbird-management
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netbird-management
+        app.kubernetes.io/component: mesh-control-plane
+    spec:
+      priorityClassName: mcp-eval-critical
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: management
+          image: netbirdio/netbird:latest
+          imagePullPolicy: Always
+          command: ["netbird", "management"]
+          args:
+            - --log-file=console
+            - --log-level=info
+            - --port=8080
+            - --dns-domain=netbird.selfhosted
+            - --config=/etc/netbird/management.json
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Rendered from the Secret? management.json is a mounted
+            # ConfigMap; only the encryption key is referenced here and read
+            # from the file by netbird (see Datadir/encryption in the JSON).
+            - name: NB_LOG_FILE
+              value: console
+          volumeMounts:
+            - name: config
+              mountPath: /etc/netbird
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/netbird
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: netbird-management-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: netbird-mgmt-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netbird-management-config
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-management
+data:
+  management.json: |
+    {
+      "Stuns": [
+        { "Proto": "udp", "URI": "stun:netbird-signal.security-gateways.svc.cluster.local:3478", "Username": "", "Password": "" }
+      ],
+      "Turns": [],
+      "Relay": [
+        {
+          "Address": "rels://netbird-relay.security-gateways.svc.cluster.local:3303",
+          "Username": "rel",
+          "Password": "CHANGE_ME_relay_shared_secret_xxx",
+          "CredentialsTTL": "12h",
+          "Secret": "CHANGE_ME_relay_shared_secret_xxx"
+        }
+      ],
+      "Signal": {
+        "Proto": "http",
+        "URI": "netbird-signal.security-gateways.svc.cluster.local:10000",
+        "Username": "",
+        "Password": ""
+      },
+      "ReverseProxy": false,
+      "Datadir": "/var/lib/netbird",
+      "DataStoreEncryptionKey": "CHANGE_ME_32_BYTES_BASE64xxxxxxxxxxxxx",
+      "HttpConfig": {
+        "LetsEncryptDomain": "",
+        "CertFile": "",
+        "KeyFile": ""
+      },
+      "OIDCConfigEndpoint": "https://your-idp.example.com/.well-known/openid-configuration"
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbird-management
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-management
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: netbird-management
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbird-signal
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-signal
+    app.kubernetes.io/component: mesh-control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netbird-signal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netbird-signal
+        app.kubernetes.io/component: mesh-control-plane
+    spec:
+      priorityClassName: mcp-eval-critical
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: netbird-signal
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: signal
+          image: netbirdio/netbird:latest
+          imagePullPolicy: Always
+          command: ["netbird", "signal"]
+          args:
+            - --log-file=console
+            - --log-level=info
+            - --port=10000
+          ports:
+            - name: grpc
+              containerPort: 10000
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          livenessProbe:
+            tcpSocket:
+              port: 10000
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbird-signal
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-signal
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: netbird-signal
+  ports:
+    - name: grpc
+      port: 10000
+      targetPort: grpc
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbird-relay
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-relay
+    app.kubernetes.io/component: mesh-control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netbird-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netbird-relay
+        app.kubernetes.io/component: mesh-control-plane
+    spec:
+      priorityClassName: mcp-eval-critical
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: netbird-relay
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: netbirdio/netbird:latest
+          imagePullPolicy: Always
+          command: ["netbird", "relay"]
+          args:
+            - --log-file=console
+            - --log-level=info
+            - --listen=:3303
+            - --relay-id=rel
+            # Flag surface varies across netbird versions — verify against
+            # your pinned image. The shared secret must equal the
+            # Password/Secret in netbird-management-config's Relay entry.
+          env:
+            - name: NB_RELAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: netbird-cp-secrets
+                  key: relay-secret
+          ports:
+            - name: relay
+              containerPort: 3303
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          livenessProbe:
+            tcpSocket:
+              port: 3303
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbird-relay
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: netbird-relay
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: netbird-relay
+  ports:
+    - name: relay
+      port: 3303
+      targetPort: relay
+      protocol: TCP

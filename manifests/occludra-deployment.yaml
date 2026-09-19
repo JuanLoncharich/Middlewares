@@ -222,6 +222,15 @@ spec:
             # growth per replica. The HPA adds replicas before saturation.
             - name: OCCLUDRA_MAX_INFLIGHT
               value: "64"
+            # ---- upstream failover (removes the single-upstream SPOF) ----
+            # Set both to a secondary provider (e.g. Anthropic direct). On
+            # primary transport failure, 5xx or 429 the gateway retries the
+            # request there before streaming anything to the client.
+            - name: OCCLUDRA_FALLBACK_UPSTREAM_BASE_URL
+              value: ""
+            - name: OCCLUDRA_FALLBACK_API_KEY
+              # Falls back to ANTHROPIC_API_KEY above when empty.
+              value: ""
             # Upstream provider keys — injected into sanitized upstream calls.
             - name: OPENCODE_API_KEY
               valueFrom:

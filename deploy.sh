@@ -26,6 +26,10 @@
 #   DEPLOY_AUTOSCALER=openstack  deploy Cluster Autoscaler (ephemeral Nova VMs). Requires OS_* env vars:
 #                                OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME OS_USER_DOMAIN_NAME
 #                                OS_REGION_NAME AUTOSCALER_NODE_GROUP (+ optional AUTOSCALER_MIN/AUTOSCALER_MAX)
+#   ---- SPOF elimination ----
+#   IN_CLUSTER_REGISTRY=1        deploy the in-cluster registry (manifests/registry.yaml)
+#   DEPLOY_NETBIRD_CP=1          self-host the NetBird control plane in-cluster (requires an OIDC IdP;
+#                                see manifests/netbird-controlplane.yaml). Also generates the CP secrets.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,6 +42,8 @@ DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
 MESH_ENFORCE="${MESH_ENFORCE:-true}"
 AUTOSCALE_METRICS="${AUTOSCALE_METRICS:-0}"
 DEPLOY_AUTOSCALER="${DEPLOY_AUTOSCALER:-0}"
+IN_CLUSTER_REGISTRY="${IN_CLUSTER_REGISTRY:-0}"
+DEPLOY_NETBIRD_CP="${DEPLOY_NETBIRD_CP:-0}"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_IMG="${VIGIL_IMG:-deadbits/vigil-llm:latest}"
@@ -213,6 +219,43 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
   else
     echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# SPOF elimination: in-cluster registry and self-hosted NetBird control plane.
+# ---------------------------------------------------------------------------
+if [ "$IN_CLUSTER_REGISTRY" = "1" ]; then
+  log "Deploying in-cluster registry (namespace registry)"
+  kubectl apply -f manifests/registry.yaml
+  kubectl -n registry rollout status deploy/registry --timeout=180s || true
+  echo "Registry: http://registry.registry.svc.cluster.local:5000 — configure containerd on each worker"
+  echo "  [host.\"http://registry.registry.svc.cluster.local:5000\"]"
+  echo "    capability = [\"pull\", \"resolve\"]"
+  echo "    skip_verify = true"
+  echo "then push images with: IMG_REGISTRY=registry.registry.svc.cluster.local:5000 ./deploy.sh (from inside the cluster)"
+fi
+
+if [ "$DEPLOY_NETBIRD_CP" = "1" ]; then
+  log "Deploying NetBird control plane (self-hosted, in-cluster)"
+  if kubectl -n security-gateways get secret netbird-cp-secrets >/dev/null 2>&1; then
+    echo "netbird-cp-secrets exists; keeping existing secrets"
+  else
+    kubectl -n security-gateways create secret generic netbird-cp-secrets \
+      --from-literal=datastore-encryption-key="$(head -c 32 /dev/urandom | base64 | tr -d '\n')" \
+      --from-literal=relay-secret="$(head -c 24 /dev/urandom | base64 | tr -d '\n')" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  fi
+  # Render the generated relay secret into the management config so the two
+  # always match, regardless of who created the Secret.
+  RELAY_SECRET="$(kubectl -n security-gateways get secret netbird-cp-secrets -o jsonpath='{.data.relay-secret}' | base64 -d)"
+  ENCKEY="$(kubectl -n security-gateways get secret netbird-cp-secrets -o jsonpath='{.data.datastore-encryption-key}' | base64 -d)"
+  OIDC_ENDPOINT="${NETBIRD_OIDC_CONFIG_ENDPOINT:?set NETBIRD_OIDC_CONFIG_ENDPOINT to the IdP well-known openid-configuration URL}"
+  sed -e "s|CHANGE_ME_relay_shared_secret_xxx|${RELAY_SECRET}|g" \
+      -e "s|CHANGE_ME_32_BYTES_BASE64xxxxxxxxxxxxx|${ENCKEY}|g" \
+      -e "s|https://your-idp.example.com/.well-known/openid-configuration|${OIDC_ENDPOINT}|g" \
+      manifests/netbird-controlplane.yaml | kubectl apply -f -
+  echo "NetBird CP deployed. Next: create the evaluation setup key (dashboard/CLI),"
+  echo "then run the platform deploy with NETBIRD_MANAGEMENT_URL=http://netbird-management.security-gateways.svc.cluster.local"
 fi
 
 if [ "$TRIGGER" = "1" ]; then

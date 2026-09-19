@@ -546,7 +546,19 @@ else is engineered to be disposable.
 | Policy distribution | kubelet ConfigMap sync (~1 min) + per-request re-read | eventually consistent, atomic per request |
 | Node capacity | Cluster Autoscaler on OpenStack (ephemeral Nova VMs, scale-out on pending pods, scale-in after 5 min idle); static on kind | **yes** on OpenStack (gated by `DEPLOY_AUTOSCALER=openstack`) |
 | Workstation | single Docker container | **no** — single-user dev tool by design |
-| Accepted SPOFs | kind node, local registry, external NetBird management, OpenCode Zen | documented residuals |
+| Accepted SPOFs | see §9.2 — each has an in-cluster or redundancy path | |
+
+### 9.2 External SPOFs — elimination paths
+
+The four dependencies outside the platform's own manifests, and how each
+stops being a single point of failure:
+
+| SPOF | Failure impact today | Elimination path (shipped) |
+|---|---|---|
+| Host registry (`kind-registry`) | new image pulls fail on host restart | **In-cluster registry** — `manifests/registry.yaml` (`IN_CLUSTER_REGISTRY=1`): registry:2 on a PVC inside the cluster, reschedules across nodes; on OpenStack, uncomment the Swift backend block for multi-replica HA + pull-through cache for third-party images. The registry is on the availability path only (a pull delay), never on the correctness path — Job retries absorb it |
+| External NetBird management | no new enrollments / ACL changes while it's down | **Self-hosted control plane** — `manifests/netbird-controlplane.yaml` (`DEPLOY_NETBIRD_CP=1`): management (PVC-backed) + signal ×2 + relay ×2 in `security-gateways`. Requires an OIDC IdP (netbird prerequisite). Key nuance: even today a management outage does NOT break the WireGuard data plane — established peer sessions keep flowing; self-hosting removes the *operational* SPOF (enrollment/ACL) |
+| OpenCode Zen upstream (only LLM provider) | all evaluations fail while the provider is down | **Gateway-level failover** — Occludra `OCCLUDRA_FALLBACK_UPSTREAM_BASE_URL` + `OCCLUDRA_FALLBACK_API_KEY`: on primary transport failure, 5xx or 429 the request is retried against the secondary provider before the first byte is streamed (no mid-stream duplication). Combined with the runner's per-agent degradation, a full provider outage now degrades instead of failing |
+| kind node (single-node etcd/apiserver) | whole cluster gone with the node | Infra, not manifests: production path is **k0s multi-master on OpenStack** (3 control-plane VMs, etcd quorum) + the Cluster Autoscaler for workers. Documented; out of repo scope by design |
 
 Consistency notes: per-run NetworkPolicy exists **before** the Job (no
 uncovered label-flip window) and is **deleted when the run turns terminal**

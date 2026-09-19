@@ -134,6 +134,11 @@ type gateway struct {
 	policyPath   string
 	upstreamBase *url.URL
 	upstreamKey  string
+	// Optional secondary LLM provider: on primary transport failure,
+	// 5xx or 429 the request is retried here before the first byte is
+	// streamed to the client. Removes the single-upstream SPOF.
+	fallbackBase *url.URL
+	fallbackKey  string
 	client       *http.Client
 	inflight     *inflightLimiter
 }
@@ -184,10 +189,29 @@ func main() {
 		os.Getenv("ANTHROPIC_API_KEY"),
 	)
 
+	// Optional secondary provider (upstream SPOF elimination): a distinct
+	// base URL + its own key. Example: primary OpenCode Zen, fallback
+	// Anthropic direct — on Zen outage/429 the gateway retries there.
+	var fallbackBase *url.URL
+	var fallbackKey string
+	if raw := strings.TrimSpace(os.Getenv("OCCLUDRA_FALLBACK_UPSTREAM_BASE_URL")); raw != "" {
+		fallbackBase, err = url.Parse(raw)
+		if err != nil || fallbackBase == nil || fallbackBase.Scheme == "" || fallbackBase.Host == "" {
+			log.Fatalf("invalid fallback upstream base URL %q: %v", raw, err)
+		}
+		fallbackKey = firstNonEmpty(
+			os.Getenv("OCCLUDRA_FALLBACK_API_KEY"),
+			os.Getenv("ANTHROPIC_API_KEY"),
+		)
+		log.Printf("upstream failover enabled: %s → %s", base, fallbackBase)
+	}
+
 	g := &gateway{
 		policyPath:   policyPath,
 		upstreamBase: base,
 		upstreamKey:  key,
+		fallbackBase: fallbackBase,
+		fallbackKey:  fallbackKey,
 		inflight:     newInflightLimiter(envInt("OCCLUDRA_MAX_INFLIGHT", 64)),
 		client: &http.Client{
 			// SSE completions legitimately stream for minutes; the timeout
@@ -435,6 +459,13 @@ func normalizeToolChoice(obj map[string]any) {
 // OCCLUDRA_UPSTREAM_BASE_URL carries any upstream path prefix (e.g.
 // https://opencode.ai/zen/v1); a leading "/v1" on the incoming path is the
 // gateway's own route prefix and is stripped before joining.
+//
+// Upstream failover: when a secondary provider is configured
+// (OCCLUDRA_FALLBACK_UPSTREAM_BASE_URL), a transport error, 429 or 5xx from
+// the primary is retried against it — only before any byte reaches the
+// client, so streaming responses are never duplicated mid-flight. Requests
+// are NOT retried on 4xx (model-not-found etc. is a request problem, and
+// POSTs are not idempotent beyond this one deliberate hop).
 func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, contentLength int64) {
 	incoming := r.URL.Path
 	if incoming == "/v1" {
@@ -442,38 +473,72 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 	} else if strings.HasPrefix(incoming, "/v1/") {
 		incoming = strings.TrimPrefix(incoming, "/v1")
 	}
-	upstreamURL := strings.TrimSuffix(g.upstreamBase.String(), "/") + incoming
-	if r.URL.RawQuery != "" {
-		upstreamURL += "?" + r.URL.RawQuery
+
+	type upstream struct {
+		name string
+		base *url.URL
+		key  string
 	}
-	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("building upstream request: %v", err), http.StatusInternalServerError)
-		return
-	}
-	for name, values := range r.Header {
-		if isHopByHop(name) || strings.EqualFold(name, "Authorization") {
-			continue
-		}
-		for _, v := range values {
-			upReq.Header.Add(name, v)
-		}
-	}
-	if g.upstreamKey != "" {
-		upReq.Header.Set("Authorization", "Bearer "+g.upstreamKey)
-	}
-	if body != nil {
-		upReq.ContentLength = contentLength
-		upReq.Header.Set("Content-Length", fmt.Sprintf("%d", contentLength))
+	targets := []upstream{{name: "primary", base: g.upstreamBase, key: g.upstreamKey}}
+	if g.fallbackBase != nil {
+		targets = append(targets, upstream{name: "fallback", base: g.fallbackBase, key: g.fallbackKey})
 	}
 
-	resp, err := g.client.Do(upReq)
-	if err != nil {
-		log.Printf("upstream error: %v", err)
-		http.Error(w, "upstream request failed", http.StatusBadGateway)
+	var resp *http.Response
+	servedBy := targets[0].name
+	for i, target := range targets {
+		upstreamURL := strings.TrimSuffix(target.base.String(), "/") + incoming
+		if r.URL.RawQuery != "" {
+			upstreamURL += "?" + r.URL.RawQuery
+		}
+		upReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("building upstream request: %v", err), http.StatusInternalServerError)
+			return
+		}
+		for name, values := range r.Header {
+			if isHopByHop(name) || strings.EqualFold(name, "Authorization") {
+				continue
+			}
+			for _, v := range values {
+				upReq.Header.Add(name, v)
+			}
+		}
+		if target.key != "" {
+			upReq.Header.Set("Authorization", "Bearer "+target.key)
+		}
+		if body != nil {
+			upReq.ContentLength = contentLength
+			upReq.Header.Set("Content-Length", fmt.Sprintf("%d", contentLength))
+		}
+
+		resp, err = g.client.Do(upReq)
+		last := i == len(targets)-1
+		if err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			servedBy = target.name
+			break
+		}
+		// Primary failed with a retryable class — the fallback exists to
+		// absorb exactly this. Close the dead response before moving on.
+		if resp != nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+			resp.Body.Close()
+			resp = nil
+		}
+		if last {
+			if err != nil {
+				log.Printf("upstream %s error: %v", target.name, err)
+				http.Error(w, "upstream request failed", http.StatusBadGateway)
+			}
+			break
+		}
+		log.Printf("upstream %s unavailable (err=%v); failing over to secondary provider", target.name, err)
+	}
+	if resp == nil {
 		return
 	}
 	defer resp.Body.Close()
+	log.Printf("served via upstream %s (status %d)", servedBy, resp.StatusCode)
 
 	for name, values := range resp.Header {
 		if isHopByHop(name) || strings.EqualFold(name, "Content-Length") {

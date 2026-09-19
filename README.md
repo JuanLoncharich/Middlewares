@@ -198,6 +198,15 @@ DEPLOY_AUTOSCALER=openstack \
   OS_PROJECT_NAME=... OS_REGION_NAME=RegionOne \
   AUTOSCALER_NODE_GROUP=eval-workers AUTOSCALER_MIN=1 AUTOSCALER_MAX=10 \
   ./deploy.sh ...
+
+# SPOF elimination for the external dependencies:
+IN_CLUSTER_REGISTRY=1 ./deploy.sh ...        # registry inside the cluster (PVC-backed)
+DEPLOY_NETBIRD_CP=1 NETBIRD_OIDC_CONFIG_ENDPOINT=<idp-wellknown-url> ./deploy.sh ...
+                                             # self-hosted NetBird mgmt/signal/relay
+# LLM upstream redundancy: point Occludra at a secondary provider
+kubectl -n security-gateways set env deploy/occludra \
+  OCCLUDRA_FALLBACK_UPSTREAM_BASE_URL=https://api.anthropic.com/v1 \
+  OCCLUDRA_FALLBACK_API_KEY=<secondary-key>
 ```
 
 ## Security model
