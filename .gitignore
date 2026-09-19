@@ -6,3 +6,4 @@ config/samples/llm-credentials-secret.yaml
 config/samples/git-credentials-secret.yaml
 *.log
 .DS_Store
+.zcode/

@@ -160,6 +160,8 @@ export interface RunnerEnv {
   meshProxyUrl: string | null;
   /** Local HTTP-proxy bridge port for the OpenCode child process. */
   meshBridgePort: number;
+  /** How long to wait for the sidecar's SOCKS5 proxy to accept connections. */
+  meshReadyTimeoutMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +524,8 @@ export interface EvaluationReport {
   scoring: ScoringBlock;
   findings: Finding[];
   securityGate: SecurityGateReport;
+  /** True when at least one agent failed but the run still produced results. */
+  degraded?: boolean;
   phase: RunPhase;
   message: string;
 }
@@ -659,6 +663,13 @@ export class VigilUnavailableError extends RunnerError {
 export class MeshTransportError extends RunnerError {
   constructor(detail: string) {
     super("MeshTransportError", "mesh", `mesh transport failure: ${detail}`);
+  }
+}
+
+/** Raised when the run receives SIGTERM/SIGINT (activeDeadline or manual kill). */
+export class RunTerminatedError extends RunnerError {
+  constructor(signal: string) {
+    super("RunTerminatedError", "signal", `run terminated by ${signal}`);
   }
 }
 

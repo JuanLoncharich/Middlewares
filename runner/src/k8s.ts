@@ -31,10 +31,29 @@ export interface StatusWriter {
   fetchAgent(name: string): Promise<OpenCodeAgent>;
   fetchServer(name: string): Promise<MCPServer>;
   patchStatus(partial: Partial<MCPEvaluationRunStatus>): Promise<void>;
+  /**
+   * Last-chance re-attempt of a terminal-phase patch that was abandoned by
+   * patchStatus after its retries. Called once from the shutdown path so a
+   * lost "Completed"/"Failed" write does not strand the CR non-terminally.
+   * Best-effort; never throws.
+   */
+  flushTerminalPatch(): Promise<void>;
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RETRY_DELAYS = [500, 1500, 4000];
+const TERMINAL_RETRY_DELAYS = [500, 1500, 4000, 8000, 8000];
+const FETCH_RETRY_DELAYS = [500, 1500, 3000];
+
+function httpStatusCode(err: unknown): number | undefined {
+  if (typeof err === "object" && err !== null && "statusCode" in err) {
+    const code = (err as { statusCode?: unknown }).statusCode;
+    if (typeof code === "number") return code;
+  }
+  return undefined;
 }
 
 export class K8sStatusWriter implements StatusWriter {
@@ -42,6 +61,7 @@ export class K8sStatusWriter implements StatusWriter {
   private readonly runName: string;
   private readonly api: k8s.CustomObjectsApi;
   private readonly log: Logger;
+  private pendingTerminalPatch: Partial<MCPEvaluationRunStatus> | null = null;
 
   constructor(namespace: string, runName: string) {
     this.namespace = namespace;
@@ -57,44 +77,77 @@ export class K8sStatusWriter implements StatusWriter {
   }
 
   async fetchAgent(name: string): Promise<OpenCodeAgent> {
-    let raw: unknown;
-    try {
-      raw = await this.api.getNamespacedCustomObject({
-        group: API_GROUP,
-        version: API_VERSION,
-        namespace: this.namespace,
-        plural: PLURAL_AGENTS,
-        name,
-      });
-    } catch (err) {
-      throw new ConfigurationError(`failed to fetch OpenCodeAgent ${this.namespace}/${name}: ${errorMessage(err)}`);
-    }
+    const raw = await this.getWithRetry(
+      (name2) =>
+        this.api.getNamespacedCustomObject({
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace: this.namespace,
+          plural: PLURAL_AGENTS,
+          name: name2,
+        }),
+      `OpenCodeAgent ${this.namespace}/${name}`,
+      name,
+    );
     return assertOpenCodeAgent(raw);
   }
 
   async fetchServer(name: string): Promise<MCPServer> {
-    let raw: unknown;
-    try {
-      raw = await this.api.getNamespacedCustomObject({
-        group: API_GROUP,
-        version: API_VERSION,
-        namespace: this.namespace,
-        plural: PLURAL_SERVERS,
-        name,
-      });
-    } catch (err) {
-      throw new ConfigurationError(`failed to fetch MCPServer ${this.namespace}/${name}: ${errorMessage(err)}`);
-    }
+    const raw = await this.getWithRetry(
+      (name2) =>
+        this.api.getNamespacedCustomObject({
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace: this.namespace,
+          plural: PLURAL_SERVERS,
+          name: name2,
+        }),
+      `MCPServer ${this.namespace}/${name}`,
+      name,
+    );
     return assertMCPServer(raw);
   }
 
   /**
+   * GET with retries for transient API-server failures. A 404 is permanent
+   * (the CR genuinely does not exist) and fails fast; anything else gets
+   * FETCH_RETRY_DELAYS attempts before the caller sees the error.
+   */
+  private async getWithRetry(
+    get: (name: string) => Promise<unknown>,
+    label: string,
+    name: string,
+  ): Promise<unknown> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await get(name);
+      } catch (err) {
+        if (httpStatusCode(err) === 404) {
+          throw new ConfigurationError(`failed to fetch ${label}: not found`);
+        }
+        const delay = FETCH_RETRY_DELAYS[attempt];
+        if (delay === undefined) {
+          throw new ConfigurationError(`failed to fetch ${label}: ${errorMessage(err)}`);
+        }
+        this.log.warn("fetch failed; retrying", { label, attempt: attempt + 1, error: errorMessage(err) });
+        await sleep(delay);
+      }
+    }
+  }
+
+  /**
    * Merge-patches the status subresource. Never throws: status updates are
-   * best-effort and must not abort an evaluation. Retries 3 times with backoff.
+   * best-effort and must not abort an evaluation. Patches carrying a terminal
+   * phase get more attempts with longer backoff; if even those are exhausted
+   * the patch is remembered and re-attempted by flushTerminalPatch() from the
+   * shutdown path, so a lost terminal write does not strand the run
+   * non-terminally. A 404 (run deleted) aborts immediately — there is
+   * nothing left to write to.
    */
   async patchStatus(partial: Partial<MCPEvaluationRunStatus>): Promise<void> {
     const body = { status: partial };
-    const delays = [500, 1500, 4000];
+    const isTerminal = partial.phase === "Completed" || partial.phase === "Failed";
+    const delays = isTerminal ? TERMINAL_RETRY_DELAYS : RETRY_DELAYS;
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
         await this.api.patchNamespacedCustomObjectStatus(
@@ -109,12 +162,62 @@ export class K8sStatusWriter implements StatusWriter {
           k8s.setHeaderOptions("Content-Type", k8s.PatchStrategy.MergePatch),
         );
         this.log.debug("status patched", { keys: Object.keys(partial) });
+        if (isTerminal) this.pendingTerminalPatch = null;
         return;
       } catch (err) {
+        if (httpStatusCode(err) === 404) {
+          this.log.error("run object is gone; abandoning status patch", { keys: Object.keys(partial) });
+          return;
+        }
         const delay = delays[attempt];
         this.log.warn("status patch failed", { attempt: attempt + 1, error: errorMessage(err), keys: Object.keys(partial) });
         if (delay === undefined) {
-          this.log.error("status patch abandoned after retries", { keys: Object.keys(partial) });
+          if (isTerminal) {
+            this.pendingTerminalPatch = partial;
+            this.log.error("terminal status patch abandoned after retries; a final flush will be attempted", {
+              keys: Object.keys(partial),
+            });
+          } else {
+            this.log.error("status patch abandoned after retries", { keys: Object.keys(partial) });
+          }
+          return;
+        }
+        await sleep(delay);
+      }
+    }
+  }
+
+  async flushTerminalPatch(): Promise<void> {
+    const partial = this.pendingTerminalPatch;
+    if (partial === null) return;
+    this.log.warn("flushing previously abandoned terminal patch", { keys: Object.keys(partial) });
+    const body = { status: partial };
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      try {
+        await this.api.patchNamespacedCustomObjectStatus(
+          {
+            group: API_GROUP,
+            version: API_VERSION,
+            namespace: this.namespace,
+            plural: PLURAL_RUNS,
+            name: this.runName,
+            body,
+          },
+          k8s.setHeaderOptions("Content-Type", k8s.PatchStrategy.MergePatch),
+        );
+        this.log.info("abandoned terminal patch recovered", { keys: Object.keys(partial) });
+        this.pendingTerminalPatch = null;
+        return;
+      } catch (err) {
+        if (httpStatusCode(err) === 404) {
+          this.log.error("run object is gone; terminal patch cannot be flushed");
+          return;
+        }
+        const delay = RETRY_DELAYS[attempt];
+        if (delay === undefined) {
+          this.log.error("terminal patch still unwritable; verdict survives in the termination message", {
+            keys: Object.keys(partial),
+          });
           return;
         }
         await sleep(delay);
@@ -180,6 +283,10 @@ export class DryRunStatusWriter implements StatusWriter {
 
   async patchStatus(partial: Partial<MCPEvaluationRunStatus>): Promise<void> {
     this.log.info("dry-run status patch", { patch: partial });
+  }
+
+  async flushTerminalPatch(): Promise<void> {
+    // Dry-run patches never fail, so there is nothing to flush.
   }
 
   private scanAgents(name: string): unknown {

@@ -1,0 +1,17 @@
+# PriorityClass for the platform's control-plane components: the operator and
+# the Vigil / Occludra security gateways. Applied raw (kubectl apply -f) so the
+# name is stable across the kustomize-prefixed operator and the raw gateway
+# manifests. Value stays far below the Kubernetes system-critical classes.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: mcp-eval-critical
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+value: 1000000
+globalDefault: false
+description: >-
+  Control-plane components of the MCP security evaluation platform (operator,
+  Vigil and Occludra gateways). Prevents node pressure from evicting the
+  evaluation platform's brain and security perimeter in favour of lower-value
+  workloads.

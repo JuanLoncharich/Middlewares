@@ -24,6 +24,7 @@ for the real deadbits/vigil-llm (YARA, embeddings, canonical classifiers).
 import json
 import os
 import re
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PATTERNS = [
@@ -43,9 +44,18 @@ PATTERNS = [
 ]
 
 THRESHOLD = float(os.environ.get("VIGIL_STUB_THRESHOLD", "0.5"))
+# Bounded in-flight /analyze requests: at saturation answer 503 + Retry-After
+# (the evaluator's Vigil client retries on 5xx) instead of spawning an
+# unbounded thread per connection and letting memory decide the outcome.
+MAX_INFLIGHT = int(os.environ.get("VIGIL_STUB_MAX_INFLIGHT", "64"))
+MAX_BODY_BYTES = int(os.environ.get("VIGIL_STUB_MAX_BODY_BYTES", str(4 * 1024 * 1024)))
+SEMAPHORE = threading.BoundedSemaphore(MAX_INFLIGHT)
 
 
 class Handler(BaseHTTPRequestHandler):
+    # A wedged client must not hold a semaphore slot (or a thread) forever.
+    timeout = 30
+
     def do_GET(self):
         if self.path in ("/health", "/healthz"):
             self._send(200, {"status": "ok"})
@@ -56,8 +66,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/analyze":
             self._send(404, {"error": "not found"})
             return
+        if not SEMAPHORE.acquire(timeout=2):
+            self._send(503, {"error": "scanner at capacity; retry with backoff"})
+            return
+        try:
+            self._analyze()
+        finally:
+            SEMAPHORE.release()
+
+    def _analyze(self):
         try:
             length = int(self.headers.get("content-length", 0))
+            if length <= 0 or length > MAX_BODY_BYTES:
+                self._send(413, {"error": "missing or oversized body"})
+                return
             payload = json.loads(self.rfile.read(length))
             prompt = str(payload.get("prompt", ""))
         except Exception:

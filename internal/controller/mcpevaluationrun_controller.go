@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -41,6 +42,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -54,6 +56,8 @@ const (
 	ConditionJobCreated = "JobCreated"
 	// ConditionSucceeded reflects the terminal outcome of the run.
 	ConditionSucceeded = "Succeeded"
+	// ConditionRetried records that a transient Job failure was recovered.
+	ConditionRetried = "Retried"
 
 	containerCloner    = "cloner"
 	containerTarget    = "target"
@@ -85,6 +89,21 @@ const (
 	meshBridgePortDefault int32 = 18080
 
 	runRequeueInterval = 15 * time.Second
+
+	// maxJobRetries bounds how many times a run's Job is recreated after a
+	// transient infrastructure failure (eviction, node loss, image pull
+	// flake). Evaluation-verdict failures are never retried.
+	maxJobRetries int32 = 2
+
+	// stuckPendingAfter is how long a pod may sit Pending without any
+	// container starting before the controller treats it as an infrastructure
+	// fault and retries the Job instead of burning the whole deadline.
+	stuckPendingAfter = 5 * time.Minute
+
+	// runReconcileWorkers bounds how many run reconciles execute in parallel
+	// (one run's reconcile does several API-server round-trips; the default
+	// single worker would serialize the whole platform under load).
+	runReconcileWorkers = 8
 )
 
 // ImageConfig carries the images, secrets and security-layer wiring injected
@@ -360,6 +379,11 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			if apierrors.IsAlreadyExists(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
+			if isTransientKubeError(err) {
+				// A transient API-server/etcd hiccup must not fail the run;
+				// controller-runtime retries with exponential backoff.
+				return ctrl.Result{}, fmt.Errorf("creating Job %s (transient, will retry): %w", job.Name, err)
+			}
 			return r.fail(ctx, run, original, "JobCreateFailed", fmt.Sprintf("creating Job: %v", err))
 		}
 		run.Status.JobName = job.Name
@@ -379,6 +403,11 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("fetching Job %s: %w", jobName, err)
 	}
+	if job.DeletionTimestamp != nil {
+		// A transient-failure retry deleted the old Job; wait for it to go
+		// away so the NotFound branch recreates a clean one.
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 	run.Status.JobName = job.Name
 
 	// Self-heal: recreate the mesh egress policy if someone deleted it.
@@ -390,6 +419,17 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	pod, err := r.findPod(ctx, run)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// A pod that sits Pending without any container starting is an
+	// infrastructure fault (image pull, scheduling), not an evaluation
+	// outcome — retry it instead of burning the whole deadline.
+	if pod != nil && pod.Status.Phase == corev1.PodPending && stuckPending(pod, time.Now()) {
+		detail := fmt.Sprintf("pod %s stuck Pending without starting", pod.Name)
+		if reasons := podWaitingReasons(pod); len(reasons) > 0 {
+			detail = fmt.Sprintf("pod %s stuck Pending: %s", pod.Name, strings.Join(reasons, ","))
+		}
+		return r.retryJob(ctx, run, original, detail)
 	}
 
 	// Terminal Job conditions.
@@ -404,6 +444,9 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// The runner may already have recorded a richer message via its own status patch.
 		if tm := parseTerminationMessage(pod); tm != nil && tm.Message != "" {
 			msg = fmt.Sprintf("%s; evaluator: %s", msg, tm.Message)
+		}
+		if reason, transient := infraTransientFailure(job, pod); transient {
+			return r.retryJob(ctx, run, original, reason)
 		}
 		return r.fail(ctx, run, original, cond.Reason, msg)
 	}
@@ -429,6 +472,11 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				cs.State.Terminated.ExitCode, cs.State.Terminated.Reason)
 			if tm := parseTerminationMessage(pod); tm != nil && tm.Message != "" {
 				msg = fmt.Sprintf("%s: %s", msg, tm.Message)
+			}
+			// An OOM kill is a resource fault, not an evaluation verdict —
+			// give the run its bounded recovery attempts.
+			if cs.State.Terminated.Reason == "OOMKilled" {
+				return r.retryJob(ctx, run, original, "evaluator container OOMKilled")
 			}
 			return r.fail(ctx, run, original, "EvaluatorFailed", msg)
 		}
@@ -460,6 +508,14 @@ func (r *MCPEvaluationRunReconciler) complete(ctx context.Context, run, original
 		return r.fail(ctx, run, original, "EvaluatorReportedFailure", msg)
 	}
 
+	// A terminal completion with no termination message, no score and no
+	// recorded agent results is not a success — mark it failed loudly instead
+	// of silently completing with score 0.
+	if tm == nil && run.Status.FinalScore == 0 && run.Status.Scoring == nil && len(run.Status.AgentResults) == 0 {
+		return r.fail(ctx, run, original, "EvaluatorResultsMissing",
+			"evaluator terminated without a termination message and without recording any results")
+	}
+
 	run.Status.Phase = securityv1alpha1.PhaseCompleted
 	run.Status.CurrentAgent = ""
 	run.Status.CompletionTime = &metav1.Time{Time: time.Now()}
@@ -484,7 +540,9 @@ func (r *MCPEvaluationRunReconciler) complete(ctx context.Context, run, original
 			run.Status.Message = "evaluation completed"
 		}
 	} else {
-		run.Status.Message = "evaluation completed"
+		// Results were patched by the evaluator before it lost its
+		// termination message; complete from what is recorded.
+		run.Status.Message = "evaluation completed from recorded agent results (evaluator termination message missing)"
 	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type:               ConditionSucceeded,
@@ -494,6 +552,7 @@ func (r *MCPEvaluationRunReconciler) complete(ctx context.Context, run, original
 		ObservedGeneration: run.Generation,
 	})
 	r.Recorder.Eventf(run, corev1.EventTypeNormal, "Completed", "evaluation completed with score %d", run.Status.FinalScore)
+	r.deleteEvaluateNetworkPolicy(ctx, run)
 	if err := r.patchStatus(ctx, run, original); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -514,6 +573,7 @@ func (r *MCPEvaluationRunReconciler) fail(ctx context.Context, run, original *se
 		ObservedGeneration: run.Generation,
 	})
 	r.Recorder.Event(run, corev1.EventTypeWarning, sanitizeReason(reason), msg)
+	r.deleteEvaluateNetworkPolicy(ctx, run)
 	if err := r.patchStatus(ctx, run, original); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -555,6 +615,123 @@ func (r *MCPEvaluationRunReconciler) deleteJob(ctx context.Context, run *securit
 		return fmt.Errorf("deleting Job %s: %w", job.Name, err)
 	}
 	return nil
+}
+
+// retryJob recreates the run's Job after a transient infrastructure failure
+// (eviction, node loss, image pull flake, OOM kill). Bounded by maxJobRetries;
+// beyond that the run fails permanently. Evaluation-verdict failures never
+// reach this path.
+func (r *MCPEvaluationRunReconciler) retryJob(ctx context.Context, run, original *securityv1alpha1.MCPEvaluationRun, detail string) (ctrl.Result, error) {
+	if run.Status.Retries >= maxJobRetries {
+		return r.fail(ctx, run, original, "JobRetriesExhausted",
+			fmt.Sprintf("transient failure repeated after %d retries, giving up: %s", run.Status.Retries, detail))
+	}
+	run.Status.Retries++
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               ConditionRetried,
+		Status:             metav1.ConditionTrue,
+		Reason:             "TransientJobFailure",
+		Message:            truncate(fmt.Sprintf("%s; recreating Job (retry %d/%d)", detail, run.Status.Retries, maxJobRetries), 512),
+		ObservedGeneration: run.Generation,
+	})
+	r.Recorder.Eventf(run, corev1.EventTypeWarning, "JobRetried",
+		"%s; recreating Job (retry %d/%d)", detail, run.Status.Retries, maxJobRetries)
+	log := logf.FromContext(ctx)
+	log.Info("retrying run after transient infrastructure failure", "run", run.Name, "detail", detail, "retry", run.Status.Retries)
+	if err := r.deleteJob(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.patchStatus(ctx, run, original); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+}
+
+// isTransientKubeError reports whether an API-server error is worth a
+// controller-runtime backoff-and-retry instead of a terminal run failure.
+func isTransientKubeError(err error) bool {
+	if apierrors.IsInternalError(err) ||
+		apierrors.IsServerTimeout(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsTooManyRequests(err) ||
+		apierrors.IsTimeout(err) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// infraTransientFailure inspects a failed Job and its pod and reports whether
+// the failure looks infrastructure-transient — evictions, node loss, pods that
+// never started (image pull, scheduling), OOM kills — rather than a real
+// evaluation outcome. Only such failures are eligible for a Job retry.
+// A nil pod is treated as a real outcome (a deadline expiry whose pod is
+// already gone), never as transient: the stuck-Pending detection covers the
+// "pod never started" case while the pod still exists.
+func infraTransientFailure(job *batchv1.Job, pod *corev1.Pod) (string, bool) {
+	if pod == nil {
+		return "", false
+	}
+	switch pod.Status.Reason {
+	case "Evicted", "NodeLost":
+		return fmt.Sprintf("pod %s: %s", pod.Name, pod.Status.Reason), true
+	}
+	if pod.Status.Phase == corev1.PodPending {
+		// The pod never started any container: pull or scheduling trouble.
+		if reasons := podWaitingReasons(pod); len(reasons) > 0 {
+			return fmt.Sprintf("pod %s never started: %s", pod.Name, strings.Join(reasons, ",")), true
+		}
+		return fmt.Sprintf("pod %s never started", pod.Name), true
+	}
+	for _, cs := range append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...) {
+		if t := cs.State.Terminated; t != nil && t.Reason == "OOMKilled" {
+			return fmt.Sprintf("container %s OOMKilled", cs.Name), true
+		}
+	}
+	return "", false
+}
+
+// podWaitingReasons collects the non-trivial container waiting reasons of a pod.
+func podWaitingReasons(pod *corev1.Pod) []string {
+	var reasons []string
+	seen := map[string]bool{}
+	all := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, cs := range all {
+		if w := cs.State.Waiting; w != nil && w.Reason != "" && w.Reason != "PodInitializing" && !seen[w.Reason] {
+			seen[w.Reason] = true
+			reasons = append(reasons, w.Reason)
+		}
+	}
+	return reasons
+}
+
+// stuckPending reports whether a pod has been Pending without any container
+// starting (running or terminated) for longer than stuckPendingAfter.
+func stuckPending(pod *corev1.Pod, now time.Time) bool {
+	if pod.CreationTimestamp.IsZero() || now.Sub(pod.CreationTimestamp.Time) < stuckPendingAfter {
+		return false
+	}
+	all := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, cs := range all {
+		if cs.State.Running != nil || cs.State.Terminated != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// deleteEvaluateNetworkPolicy removes the per-run egress policy once the run
+// reached a terminal phase. The Job lingers only for its TTL window with no
+// pod running; the policy has no reason to outlive it. Owner-reference GC
+// remains the backstop when the run object itself is deleted.
+func (r *MCPEvaluationRunReconciler) deleteEvaluateNetworkPolicy(ctx context.Context, run *securityv1alpha1.MCPEvaluationRun) {
+	policy := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: evaluateNetworkPolicyName(run), Namespace: run.Namespace},
+	}
+	if err := r.Delete(ctx, policy); err != nil && !apierrors.IsNotFound(err) {
+		// Best-effort: GC will collect it with the run; keep terminating.
+		logf.FromContext(ctx).Error(err, "deleting per-run egress NetworkPolicy", "policy", policy.Name)
+	}
 }
 
 // findPod returns the newest pod labelled for the run, or nil.
@@ -1433,5 +1610,11 @@ func (r *MCPEvaluationRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(podToRun)).
 		Named("mcpevaluationrun").
+		// The default of 1 serializes every run reconcile: with many
+		// MCPServers firing at once, run/Job creation, net-phase flips and
+		// pod observation would queue behind each other. 8 concurrent
+		// workers keep throughput near the API server's rate limit; the
+		// default exponential rate limiter still bounds retry storms.
+		WithOptions(controller.Options{MaxConcurrentReconciles: runReconcileWorkers}).
 		Complete(r)
 }

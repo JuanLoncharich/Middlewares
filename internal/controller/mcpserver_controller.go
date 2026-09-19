@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -50,13 +51,20 @@ const (
 
 	// serverRequeueFallback bounds how long we wait when no cron fire time can be computed.
 	serverRequeueFallback = 5 * time.Minute
+
+	// triggerRequeueInterval is how often a pending trigger-now annotation is
+	// re-checked while a run is still active.
+	triggerRequeueInterval = time.Minute
 )
 
 // MCPServerReconciler reconciles a MCPServer object.
 type MCPServerReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache. Used at fire time to close the cache-lag dedup window.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=security.eval.io,resources=mcpservers,verbs=get;list;watch;create;update;patch;delete
@@ -84,7 +92,12 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	original := server.DeepCopy()
 
 	// Validate agent references before considering any scheduling.
-	if missing := r.missingAgents(ctx, server); len(missing) > 0 {
+	missing, err := r.missingAgents(ctx, server)
+	if err != nil {
+		// A transient API error must not be misread as a missing agent.
+		return ctrl.Result{}, err
+	}
+	if len(missing) > 0 {
 		msg := fmt.Sprintf("agentSuite references missing OpenCodeAgents: %v", missing)
 		meta.SetStatusCondition(&server.Status.Conditions, metav1.Condition{
 			Type:               ConditionReady,
@@ -148,6 +161,24 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	activeRun := findActiveRun(runs)
 	created := false
 
+	// A manual trigger must not be deferred to the next cron fire: if a run is
+	// active, poll briefly so the trigger fires as soon as it finishes.
+	requeueOverride := time.Duration(0)
+
+	if (due || triggerNow) && activeRun == nil {
+		// Close the informer-cache window: a run created by a previous
+		// reconcile may not be visible in the cached list yet, which would let
+		// two reconciles create duplicate runs. One uncached list at fire time
+		// is cheap (only on due/trigger) and authoritative.
+		fresh, err := r.listRunsUncached(ctx, server)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if stillActive := findActiveRun(fresh); stillActive != nil {
+			log.Info("uncached list shows an active run; not creating another", "activeRun", stillActive.Name)
+			activeRun = stillActive
+		}
+	}
 	if (due || triggerNow) && activeRun == nil {
 		run, err := r.createRun(ctx, server)
 		if err != nil {
@@ -168,6 +199,9 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if due {
 			// Consume the fire so we do not keep re-triggering on every requeue.
 			server.Status.LastEvaluationDate = &metav1.Time{Time: mostRecentFire}
+		}
+		if triggerNow {
+			requeueOverride = triggerRequeueInterval
 		}
 	}
 
@@ -197,6 +231,9 @@ func (r *MCPServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	requeue := time.Until(next)
 	if requeue < time.Second {
 		requeue = time.Second
+	}
+	if requeueOverride > 0 {
+		requeue = requeueOverride
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
 }
@@ -229,17 +266,23 @@ func (r *MCPServerReconciler) isDue(server *securityv1alpha1.MCPServer, schedule
 	return !lastFire.IsZero(), lastFire
 }
 
-// missingAgents returns the names in agentSuite that do not resolve to an OpenCodeAgent.
-func (r *MCPServerReconciler) missingAgents(ctx context.Context, server *securityv1alpha1.MCPServer) []string {
+// missingAgents returns the names in agentSuite that do not resolve to an
+// OpenCodeAgent. Transient API errors are returned as errors, not reported as
+// missing agents.
+func (r *MCPServerReconciler) missingAgents(ctx context.Context, server *securityv1alpha1.MCPServer) ([]string, error) {
 	var missing []string
 	for _, ref := range server.Spec.AgentSuite {
 		agent := &securityv1alpha1.OpenCodeAgent{}
 		key := types.NamespacedName{Namespace: server.Namespace, Name: ref.Name}
 		if err := r.Get(ctx, key, agent); err != nil {
-			missing = append(missing, ref.Name)
+			if apierrors.IsNotFound(err) {
+				missing = append(missing, ref.Name)
+				continue
+			}
+			return nil, fmt.Errorf("fetching OpenCodeAgent %s: %w", ref.Name, err)
 		}
 	}
-	return missing
+	return missing, nil
 }
 
 // listRuns returns all MCPEvaluationRuns labelled for this server.
@@ -250,6 +293,24 @@ func (r *MCPServerReconciler) listRuns(ctx context.Context, server *securityv1al
 		client.MatchingLabels{securityv1alpha1.LabelServer: server.Name},
 	); err != nil {
 		return nil, fmt.Errorf("listing MCPEvaluationRuns: %w", err)
+	}
+	return list.Items, nil
+}
+
+// listRunsUncached is listRuns against the API server instead of the informer
+// cache. It is called only at fire time to close the cache-lag window that
+// could let two reconciles both conclude "no active run" and double-create.
+func (r *MCPServerReconciler) listRunsUncached(ctx context.Context, server *securityv1alpha1.MCPServer) ([]securityv1alpha1.MCPEvaluationRun, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	list := &securityv1alpha1.MCPEvaluationRunList{}
+	if err := reader.List(ctx, list,
+		client.InNamespace(server.Namespace),
+		client.MatchingLabels{securityv1alpha1.LabelServer: server.Name},
+	); err != nil {
+		return nil, fmt.Errorf("uncached listing MCPEvaluationRuns: %w", err)
 	}
 	return list.Items, nil
 }
@@ -385,5 +446,8 @@ func (r *MCPServerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&securityv1alpha1.MCPServer{}).
 		Owns(&securityv1alpha1.MCPEvaluationRun{}).
 		Named("mcpserver").
+		// Many MCPServers can share one cron slot; 4 workers keep scheduling
+		// (run creation + prune) from queueing behind a single reconcile.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(r)
 }

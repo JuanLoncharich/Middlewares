@@ -165,6 +165,17 @@ spec:
         # runner can address the gateway as occludra.<mesh-domain>.
         security.eval.io/mesh-peer: occludra
     spec:
+      priorityClassName: mcp-eval-critical
+      topologySpreadConstraints:
+      # Replicas must not pile onto one node: the PDB is satisfied even when
+      # both replicas share a node, but real availability needs node spread.
+      # ScheduleAnyway keeps single-node (kind/k0s dev) clusters schedulable.
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: occludra
       serviceAccountName: occludra
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -206,6 +217,11 @@ spec:
               value: "0.0.0.0:8080"
             - name: OCCLUDRA_POLICY_FILE
               value: /conf/policy.yaml
+            # Backpressure: requests beyond this in-flight count get 503 +
+            # Retry-After (clients back off) instead of unbounded memory
+            # growth per replica. The HPA adds replicas before saturation.
+            - name: OCCLUDRA_MAX_INFLIGHT
+              value: "64"
             # Upstream provider keys — injected into sanitized upstream calls.
             - name: OPENCODE_API_KEY
               valueFrom:
@@ -245,19 +261,28 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
-          # tcpSocket probes: the gateway's health route is not part of its
-          # wire contract; a listening socket is the invariant we rely on.
-          # Switch to httpGet /healthz once your gateway image exposes it.
+          # HTTP probes against the gateway's real /healthz: a hung scrubber
+          # must fail its probes, which a listening-socket check alone does
+          # not catch. The startupProbe absorbs image pulls without tripping
+          # liveness during the ramp.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: 8080
-            initialDelaySeconds: 10
             periodSeconds: 20
+            failureThreshold: 3
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: 8080
-            initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 2
         # ---------------------------------------------------- netbird (TUN)
         # Full-mesh member: owns wt0 inside this pod's network namespace so
         # traffic to the mesh address is kernel-routed into the WireGuard
@@ -300,6 +325,18 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+          # Wedged-sidecar detector, same invariant the netbird DaemonSet
+          # probes: userspace socket OR TUN device present.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -S /var/run/netbird/wt0.sock || ip link show wt0"]
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -S /var/run/netbird/wt0.sock || ip link show wt0"]
+            periodSeconds: 60
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
@@ -330,10 +367,44 @@ metadata:
   name: occludra
   namespace: security-gateways
 spec:
-  minAvailable: 1
+  # Percentage so the budget scales with the HPA (min 50% of N replicas).
+  minAvailable: 50%
   selector:
     matchLabels:
       app.kubernetes.io/name: occludra
+---
+# Horizontal scaling of the LLM egress gateway: every evaluator's every
+# completion call traverses Occludra, so concurrent evaluation runs translate
+# directly into gateway load (CPU-bound regex scrubbing + many long-lived SSE
+# streams). Scale on CPU; the in-flight limiter (OCCLUDRA_MAX_INFLIGHT)
+# backpressures with 503+Retry-After until new replicas are Ready. Requires
+# metrics-server (deploy.sh installs it with AUTOSCALE_METRICS=1).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: occludra
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: occludra
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: occludra
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # Gateway traffic is bursty (runs start/end in waves); hold capacity a
+      # while before shedding replicas.
+      stabilizationWindowSeconds: 300
 ---
 # Namespace-scoped isolation. Evaluation pods may only:
 #   - send WireGuard (UDP/51820) into this namespace — crypto-authenticated

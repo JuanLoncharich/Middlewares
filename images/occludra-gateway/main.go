@@ -23,19 +23,34 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+func envInt(key string, def int) int {
+	if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			return v
+		}
+	}
+	return def
+}
 
 // Policy mirrors manifests/occludra-deployment.yaml ConfigMap occludra-policy.
 type Policy struct {
@@ -72,11 +87,55 @@ type UpstreamPolicy struct {
 
 const maxBodyBytes = 32 << 20
 
+// inflightLimiter is a plain counting semaphore: at saturation the gateway
+// answers 503 + Retry-After instead of accepting unbounded work (each scrub
+// holds a full request body plus a potentially minutes-long SSE stream, so
+// memory is the resource that runs out first). Clients retry with backoff.
+type inflightLimiter struct {
+	mu    sync.Mutex
+	used  int
+	limit int
+}
+
+func newInflightLimiter(limit int) *inflightLimiter {
+	if limit <= 0 {
+		limit = 1
+	}
+	return &inflightLimiter{limit: limit}
+}
+
+// acquire reserves a slot, waiting up to timeout for one to free; it reports
+// saturation (false) if none frees in time. The mutex is only held for the
+// check/increment, never across the wait.
+func (l *inflightLimiter) acquire(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		l.mu.Lock()
+		if l.used < l.limit {
+			l.used++
+			l.mu.Unlock()
+			return true
+		}
+		l.mu.Unlock()
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (l *inflightLimiter) release() {
+	l.mu.Lock()
+	l.used--
+	l.mu.Unlock()
+}
+
 type gateway struct {
 	policyPath   string
 	upstreamBase *url.URL
 	upstreamKey  string
 	client       *http.Client
+	inflight     *inflightLimiter
 }
 
 // currentPolicy loads the policy file on demand. ConfigMap volume updates
@@ -129,7 +188,21 @@ func main() {
 		policyPath:   policyPath,
 		upstreamBase: base,
 		upstreamKey:  key,
-		client:       &http.Client{Timeout: 10 * time.Minute},
+		inflight:     newInflightLimiter(envInt("OCCLUDRA_MAX_INFLIGHT", 64)),
+		client: &http.Client{
+			// SSE completions legitimately stream for minutes; the timeout
+			// bounds the WHOLE request including body read, so it stays
+			// generous — but bounded, unlike an unset client.
+			Timeout: 10 * time.Minute,
+			Transport: &http.Transport{
+				// Defaults give 2 idle conns per host; under agent
+				// concurrency every request above that churns a fresh TCP+
+				// TLS handshake against the upstream.
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -139,10 +212,34 @@ func main() {
 	})
 	mux.HandleFunc("/", g.serve)
 
-	addr := envOr("OCCLUDRA_LISTEN", "0.0.0.0:8080")
+	// Long WriteTimeout would cut streaming responses mid-flight; the other
+	// server timeouts still bound slowloris-style connection holds.
+	server := &http.Server{
+		Addr:              envOr("OCCLUDRA_LISTEN", "0.0.0.0:8080"),
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// Graceful shutdown: drain in-flight LLM streams on SIGTERM/SIGINT within
+	// the pod's 30s terminationGracePeriodSeconds instead of hard-cutting them.
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	go func() {
+		<-shutdownCtx.Done()
+		log.Printf("shutdown signal received; draining in-flight requests")
+		drainCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if err := server.Shutdown(drainCtx); err != nil {
+			log.Printf("graceful shutdown incomplete: %v", err)
+			_ = server.Close()
+		}
+	}()
+
+	addr := server.Addr
 	log.Printf("occludra gateway listening on %s → upstream %s (policy %s, %d detectors)",
 		addr, base, policyPath, len(policy.Detectors))
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
@@ -197,6 +294,18 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	stats := &requestStats{redactions: map[string]int{}}
 	policy := g.currentPolicy(nil)
+
+	// Backpressure before reading the body: at saturation answer 503 +
+	// Retry-After (evaluator and OpenCode clients retry with backoff)
+	// instead of buffering unlimited concurrent request bodies and SSE
+	// streams — memory, not CPU, is what runs out first under load.
+	if !g.inflight.acquire(2 * time.Second) {
+		log.Printf("saturated (%d in-flight); rejecting with 503", g.inflight.used)
+		w.Header().Set("Retry-After", "3")
+		http.Error(w, "gateway at capacity; retry with backoff", http.StatusServiceUnavailable)
+		return
+	}
+	defer g.inflight.release()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {

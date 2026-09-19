@@ -21,6 +21,11 @@
 #   DEPLOY_SECURITY_GATEWAYS=0   skip the security-gateways namespace (default: deploy it)
 #   NETBIRD_MANAGEMENT_URL       your NetBird management server (default placeholder is substituted)
 #   NETBIRD_SETUP_KEY            setup key written into Secret netbird-auth (both namespaces)
+#   ---- scaling ----
+#   AUTOSCALE_METRICS=1          install metrics-server (required by the gateways' HPAs; kind needs this)
+#   DEPLOY_AUTOSCALER=openstack  deploy Cluster Autoscaler (ephemeral Nova VMs). Requires OS_* env vars:
+#                                OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME OS_USER_DOMAIN_NAME
+#                                OS_REGION_NAME AUTOSCALER_NODE_GROUP (+ optional AUTOSCALER_MIN/AUTOSCALER_MAX)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -31,6 +36,8 @@ SKIP_SECRET="${SKIP_SECRET:-0}"
 TRIGGER="${TRIGGER:-1}"
 DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
 MESH_ENFORCE="${MESH_ENFORCE:-true}"
+AUTOSCALE_METRICS="${AUTOSCALE_METRICS:-0}"
+DEPLOY_AUTOSCALER="${DEPLOY_AUTOSCALER:-0}"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_IMG="${VIGIL_IMG:-deadbits/vigil-llm:latest}"
@@ -163,6 +170,9 @@ for doc in docs:
 
 if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
   log "Deploying security gateways (Occludra, Vigil, NetBird) into security-gateways (mesh=$MESH_ENFORCE)"
+  # PriorityClass shared by the operator and both gateways (node-pressure
+  # evictions must not take out the control plane or the security perimeter).
+  kubectl apply -f manifests/priorityclass.yaml
   if [ "$MESH_ENFORCE" = "true" ]; then
     apply_gateway_manifest manifests/occludra-deployment.yaml
     apply_gateway_manifest manifests/netbird-daemonset.yaml
@@ -181,8 +191,12 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
         --dry-run=client -o yaml | kubectl apply -f -
     done
   else
-    echo "WARNING: NETBIRD_SETUP_KEY unset — netbird-auth does not exist and mesh enrollment WILL fail." >&2
-    echo "         Create it with: kubectl -n <ns> create secret generic netbird-auth --from-literal=setup-key=<key>" >&2
+    # In mesh mode EVERY run's egress is NetBird-only: without a setup key no
+    # sidecar can enroll and every evaluation dies on its first Vigil scan.
+    # Fail loudly here instead of deploying a platform that cannot evaluate.
+    echo "ERROR: MESH_ENFORCE=true but NETBIRD_SETUP_KEY is unset — evaluation pods will fail to enroll in the mesh." >&2
+    echo "       Set NETBIRD_SETUP_KEY=<key>, or pass MESH_ENFORCE=false for the legacy direct-to-provider mode." >&2
+    exit 1
   fi
   if [ "$SKIP_SECRET" != "1" ]; then
     log "Mirroring LLM credentials into security-gateways (Occludra is the upstream egress point)"
@@ -204,6 +218,47 @@ fi
 if [ "$TRIGGER" = "1" ]; then
   log "Triggering first evaluation of filesystem-mcp"
   kubectl -n mcp-evals annotate mcpserver filesystem-mcp security.eval.io/trigger-now=true --overwrite
+fi
+
+# ---------------------------------------------------------------------------
+# Scaling: metrics-server (HPA backend) and, on OpenStack, the Cluster
+# Autoscaler that adds/removes ephemeral Nova VMs as run and gateway load
+# demands.
+# ---------------------------------------------------------------------------
+if [ "$AUTOSCALE_METRICS" = "1" ] && ! kubectl get deploy metrics-server -n kube-system >/dev/null 2>&1; then
+  log "Installing metrics-server (HPA metrics backend)"
+  kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+  # kind/k0s nodes serve kubelet metrics with self-signed certs.
+  kubectl -n kube-system patch deploy metrics-server --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+  kubectl -n kube-system rollout status deploy/metrics-server --timeout=180s
+fi
+
+if [ "$DEPLOY_AUTOSCALER" = "openstack" ]; then
+  log "Deploying Cluster Autoscaler (OpenStack provider, ephemeral VM workers)"
+  : "${OS_AUTH_URL:?set OS_AUTH_URL, e.g. https://keystone.example.com:5000/v3}"
+  : "${OS_USERNAME:?set OS_USERNAME}"
+  : "${OS_PASSWORD:?set OS_PASSWORD}"
+  : "${OS_PROJECT_NAME:?set OS_PROJECT_NAME}"
+  : "${OS_USER_DOMAIN_NAME:=Default}"
+  : "${OS_REGION_NAME:?set OS_REGION_NAME}"
+  : "${AUTOSCALER_NODE_GROUP:?set AUTOSCALER_NODE_GROUP to the scalable worker node-group name}"
+  AUTOSCALER_MIN="${AUTOSCALER_MIN:-1}"
+  AUTOSCALER_MAX="${AUTOSCALER_MAX:-10}"
+  kubectl -n kube-system create secret generic openstack-cloud-config \
+    --from-literal=cloud.conf="[Global]
+auth-url = $OS_AUTH_URL
+username = $OS_USERNAME
+password = $OS_PASSWORD
+project-name = $OS_PROJECT_NAME
+user-domain-name = $OS_USER_DOMAIN_NAME
+region = $OS_REGION_NAME" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  sed -e "s|__AUTOSCALER_MIN__|$AUTOSCALER_MIN|g" \
+      -e "s|__AUTOSCALER_MAX__|$AUTOSCALER_MAX|g" \
+      -e "s|__AUTOSCALER_NODE_GROUP__|$AUTOSCALER_NODE_GROUP|g" \
+      manifests/cluster-autoscaler-openstack.yaml | kubectl apply -f -
+  echo "Autoscaler: workers scale $AUTOSCALER_MIN..$AUTOSCALER_MAX in node group '$AUTOSCALER_NODE_GROUP'; idle VMs are deleted after 5m."
 fi
 
 log "Done. Watch progress with:"

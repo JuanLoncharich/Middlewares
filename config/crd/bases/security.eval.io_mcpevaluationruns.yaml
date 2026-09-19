@@ -157,6 +157,12 @@ spec:
                 - Completed
                 - Failed
                 type: string
+              retries:
+                description: Retries counts how many times the controller recreated the Job after a transient infrastructure failure (eviction, node loss, image pull flake).
+                format: int32
+                maximum: 2
+                minimum: 0
+                type: integer
               scoring:
                 description: ScoringBlock is the synthesized final scoring produced by the synthesis agent.
                 properties:

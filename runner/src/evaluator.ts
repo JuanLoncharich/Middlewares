@@ -48,13 +48,14 @@ import {
 import { runFuzz, renderFuzzMarkdown } from "./fuzz.js";
 import { runProbes, renderProbeMarkdown } from "./probes.js";
 import { collectStaticEvidence, renderStaticMarkdown } from "./static.js";
-import { createMeshFetch, startMeshProxyBridge, type MeshBridge, type MeshFetch } from "./meshhttp.js";
+import { createMeshFetch, startMeshProxyBridge, waitForSocks5Proxy, type MeshBridge, type MeshFetch } from "./meshhttp.js";
 import { excerptOf, VigilClient, type VigilVerdict } from "./vigil.js";
 import {
   AgentPromptError,
   AgentTimeoutError,
   ConfigurationError,
   RunnerError,
+  RunTerminatedError,
   StructuredOutputExhaustedError,
   TargetCrashError,
   TargetUnavailableError,
@@ -184,6 +185,7 @@ function readEnv(): RunnerEnv {
     // --- NetBird mesh transport ---
     meshProxyUrl: meshProxy,
     meshBridgePort: optionalInt("MESH_BRIDGE_PORT", 18080),
+    meshReadyTimeoutMs: optionalInt("MESH_READY_TIMEOUT_MS", 60_000),
   };
 }
 
@@ -353,6 +355,7 @@ async function runAgentPrompt(
   kind: AgentKind,
   userMessage: string,
   env: RunnerEnv,
+  externalSignal?: AbortSignal,
 ): Promise<PromptResult> {
   const name = agent.metadata.name;
   const requestedTimeout = agent.spec.config?.timeoutMs ?? 30_000;
@@ -362,6 +365,10 @@ async function runAgentPrompt(
   }
   const retryCount = agent.spec.config?.retryCount ?? 2;
   const abort = new AbortController();
+  // SIGTERM (activeDeadline expiry, manual delete) must abort the in-flight
+  // OpenCode work, not just flag the state between agents.
+  const onExternalAbort = (): void => abort.abort();
+  externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
   const started = Date.now();
   // Text-mode models never see the structured-output schema, so restate the
   // output contract (and the schema itself) in the message. Schema-driven
@@ -437,6 +444,7 @@ async function runAgentPrompt(
   try {
     return await Promise.race([work(), timeoutPromise]);
   } finally {
+    externalSignal?.removeEventListener("abort", onExternalAbort);
     if (timer !== null) {
       clearTimeout(timer);
     }
@@ -752,6 +760,10 @@ interface RunState {
   probes: ProbeReport | null;
   security: SecurityState;
   terminated: boolean;
+  /** Agents that failed but let the run continue (degraded semantics). */
+  failedAgents: string[];
+  /** AbortController of the agent currently executing; aborted on SIGTERM. */
+  currentAbort: AbortController | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -924,7 +936,11 @@ async function evaluate(state: RunState): Promise<void> {
   let staticEvidence: StaticEvidence | null = null;
   let targetStarted = false;
 
-  const recordAgent = async (agent: OpenCodeAgent, kind: AgentKind, run: () => Promise<PromptResult>): Promise<unknown> => {
+  const recordAgent = async (
+    agent: OpenCodeAgent,
+    kind: AgentKind,
+    run: (signal: AbortSignal) => Promise<PromptResult>,
+  ): Promise<unknown> => {
     const name = agent.metadata.name;
     const started = Date.now();
     await status.patchStatus({ phase: "Evaluating", currentAgent: name, message: `running agent ${name}` });
@@ -937,8 +953,10 @@ async function evaluate(state: RunState): Promise<void> {
       status: "failed",
     };
     report.agents[name] = record;
+    const abort = new AbortController();
+    state.currentAbort = abort;
     try {
-      const result = await run();
+      const result = await run(abort.signal);
       record.durationMs = result.durationMs;
       record.status = "ok";
       record.structuredOutput = result.structured;
@@ -948,8 +966,15 @@ async function evaluate(state: RunState): Promise<void> {
     } catch (err) {
       record.durationMs = Date.now() - started;
       record.error = errorMessage(err);
+      state.failedAgents.push(name);
+      // Persist the failure incrementally: partial results survive whatever
+      // happens next (degraded continuation or a later crash).
       await status.patchStatus({ agentResults: { [name]: { error: record.error, errorClass: errorName(err) } } });
       throw err;
+    } finally {
+      if (state.currentAbort === abort) {
+        state.currentAbort = null;
+      }
     }
   };
 
@@ -976,9 +1001,14 @@ async function evaluate(state: RunState): Promise<void> {
   };
 
   // ---- passes -------------------------------------------------------------
+  // Degraded-continuation semantics: a persona that fails (timeout, LLM
+  // outage, structured-output exhaustion, target unavailable) is recorded in
+  // agentResults and the remaining personas still run. The run completes
+  // degraded when at least one agent produced results, and only fails when
+  // nothing usable was produced. Security gates (Vigil strict) stay fatal.
   for (const agent of agents) {
     if (state.terminated) {
-      fail(state, "run", new AgentTimeoutError(agent.metadata.name, 0));
+      fail(state, "run", new RunTerminatedError("SIGTERM/SIGINT"));
     }
     const kind = kinds.get(agent.metadata.name) ?? "generic";
     const name = agent.metadata.name;
@@ -988,7 +1018,12 @@ async function evaluate(state: RunState): Promise<void> {
         try {
           staticEvidence = await collectStaticEvidence({ workspaceDir: env.workspaceDir });
         } catch (err) {
-          fail(state, "collect static evidence", err);
+          log.warn("static evidence collection failed; agent degraded", { agent: name, error: errorMessage(err) });
+          state.failedAgents.push(name);
+          await status.patchStatus({
+            agentResults: { [name]: { error: `collect static evidence: ${errorMessage(err)}`, errorClass: errorName(err) } },
+          });
+          continue;
         }
         report.staticEvidenceSummary = {
           fileCount: staticEvidence.fileCount,
@@ -999,9 +1034,11 @@ async function evaluate(state: RunState): Promise<void> {
       }
       const evidence = staticEvidence;
       try {
-        await recordAgent(agent, kind, () => runAgentPrompt(agent, kind, buildStaticMessage(server, evidence, env), env));
+        await recordAgent(agent, kind, (signal) =>
+          runAgentPrompt(agent, kind, buildStaticMessage(server, evidence, env), env, signal),
+        );
       } catch (err) {
-        fail(state, `agent ${name} (static)`, err);
+        log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
       }
       continue;
     }
@@ -1027,22 +1064,19 @@ async function evaluate(state: RunState): Promise<void> {
           report.fuzz = state.dynamic.fuzz;
         } catch (err) {
           if (err instanceof TargetCrashError || err instanceof TargetUnavailableError) {
-            log.error("target crashed during fuzzing", { error: errorMessage(err) });
+            log.error("target crashed during fuzzing; continuing without fuzz evidence", { error: errorMessage(err) });
             state.dynamic.telemetry.crashes += 1;
-            const recovered = await client.recover(30_000);
-            if (!recovered) {
-              fail(state, "fuzzing", err);
-            }
+            await client.recover(30_000);
           } else {
-            fail(state, "fuzzing", err);
+            log.error("fuzzing failed; continuing without fuzz evidence", { error: errorMessage(err) });
           }
         }
         refreshTelemetry(state.dynamic, client);
-      } else if (!state.dynamic.init && kinds.size > 0) {
-        // The target never came up: this is itself a hard evaluation failure
-        // for a dynamic pass — the persona cannot analyse a server that does
-        // not exist. Fail explicitly rather than scoring nothing.
-        fail(state, "target startup", new TargetUnavailableError(state.dynamic.initError || "initialize failed"));
+      } else if (!state.dynamic.init) {
+        // The target never came up: no longer fatal — the persona scores the
+        // failure telemetry itself (buildDynamicMessage carries the
+        // handshake error), which is a fairer verdict than aborting.
+        log.warn("target unavailable; dynamic persona will score the failure telemetry", { agent: name });
       }
       // Gate 2: anomalous fuzz responses may carry injected instructions.
       if (state.dynamic.fuzz) {
@@ -1050,9 +1084,11 @@ async function evaluate(state: RunState): Promise<void> {
       }
       report.telemetry = state.dynamic.telemetry;
       try {
-        await recordAgent(agent, kind, () => runAgentPrompt(agent, kind, buildDynamicMessage(server, state.dynamic), env));
+        await recordAgent(agent, kind, (signal) =>
+          runAgentPrompt(agent, kind, buildDynamicMessage(server, state.dynamic), env, signal),
+        );
       } catch (err) {
-        fail(state, `agent ${name} (dynamic)`, err);
+        log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
       }
       continue;
     }
@@ -1074,19 +1110,16 @@ async function evaluate(state: RunState): Promise<void> {
           report.probes = state.probes;
         } catch (err) {
           if (err instanceof TargetCrashError || err instanceof TargetUnavailableError) {
-            log.error("target crashed during probing", { error: errorMessage(err) });
+            log.error("target crashed during probing; continuing without probe evidence", { error: errorMessage(err) });
             state.dynamic.telemetry.crashes += 1;
-            const recovered = await client.recover(30_000);
-            if (!recovered) {
-              fail(state, "adversarial probes", err);
-            }
+            await client.recover(30_000);
           } else {
-            fail(state, "adversarial probes", err);
+            log.error("probing failed; continuing without probe evidence", { error: errorMessage(err) });
           }
         }
         refreshTelemetry(state.dynamic, client);
       } else {
-        fail(state, "target startup", new TargetUnavailableError(state.dynamic.initError || "initialize failed"));
+        log.warn("target unavailable; adversarial persona will score the failure telemetry", { agent: name });
       }
       // Gate 3: probe outputs — the untrusted server's direct answers to our
       // adversarial inputs.
@@ -1095,11 +1128,11 @@ async function evaluate(state: RunState): Promise<void> {
       }
       report.telemetry = state.dynamic.telemetry;
       try {
-        await recordAgent(agent, kind, () =>
-          runAgentPrompt(agent, kind, buildAdversarialMessage(server, state.dynamic, state.probes), env),
+        await recordAgent(agent, kind, (signal) =>
+          runAgentPrompt(agent, kind, buildAdversarialMessage(server, state.dynamic, state.probes), env, signal),
         );
       } catch (err) {
-        fail(state, `agent ${name} (adversarial)`, err);
+        log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
       }
       continue;
     }
@@ -1111,17 +1144,23 @@ async function evaluate(state: RunState): Promise<void> {
       report.telemetry = state.dynamic.telemetry;
       let structured: unknown;
       try {
-        structured = await recordAgent(agent, kind, () =>
-          runAgentPrompt(agent, kind, buildSynthesisMessage(server, report.agents, state.dynamic.telemetry), env),
+        structured = await recordAgent(agent, kind, (signal) =>
+          runAgentPrompt(agent, kind, buildSynthesisMessage(server, report.agents, state.dynamic.telemetry), env, signal),
         );
       } catch (err) {
-        fail(state, `agent ${name} (synthesis)`, err);
+        log.warn("synthesis agent failed; falling back to conservative scoring", { agent: name, error: errorMessage(err) });
+        continue;
       }
       let synth: SynthesisOutput;
       try {
         synth = parseSynthesis(structured, name);
       } catch (err) {
-        fail(state, `agent ${name} (synthesis output validation)`, err);
+        log.warn("synthesis output validation failed; falling back to conservative scoring", {
+          agent: name,
+          error: errorMessage(err),
+        });
+        state.failedAgents.push(name);
+        continue;
       }
       const scoring: ScoringBlock = {
         safetyScore: synth.safetyScore,
@@ -1142,12 +1181,20 @@ async function evaluate(state: RunState): Promise<void> {
 
     // generic persona
     try {
-      await recordAgent(agent, kind, () =>
-        runAgentPrompt(agent, kind, buildGenericMessage(server, report.agents, state.dynamic.telemetry), env),
+      await recordAgent(agent, kind, (signal) =>
+        runAgentPrompt(agent, kind, buildGenericMessage(server, report.agents, state.dynamic.telemetry), env, signal),
       );
     } catch (err) {
-      fail(state, `agent ${name} (generic)`, err);
+      log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
     }
+  }
+
+  // Every persona failed (or the evidence they produced was unusable): the
+  // run genuinely has nothing to report — fail it explicitly rather than
+  // completing with a meaningless score of 0.
+  const okAgents = Object.values(report.agents).filter((rec) => rec.status === "ok").length;
+  if (okAgents === 0) {
+    fail(state, "all agents failed", new RunnerError("AllAgentsFailed", "agents", `every agent failed: ${state.failedAgents.join(", ")}`));
   }
 
   // If no synthesis agent ran, derive a conservative score from what exists.
@@ -1173,8 +1220,13 @@ async function evaluate(state: RunState): Promise<void> {
   }
 
   report.phase = "Completed";
-  report.message = `evaluated ${agents.length} agent(s); riskCategory=${report.scoring.riskCategory} finalScore=${report.finalScore}`;
-  await status.patchStatus({ phase: "Completed", currentAgent: "", message: report.message });
+  let completionMessage = `evaluated ${agents.length} agent(s); riskCategory=${report.scoring.riskCategory} finalScore=${report.finalScore}`;
+  if (state.failedAgents.length > 0) {
+    report.degraded = true;
+    completionMessage = `degraded: ${state.failedAgents.length}/${agents.length} agent(s) failed (${state.failedAgents.join(", ")}); ${completionMessage}`;
+  }
+  report.message = completionMessage;
+  await status.patchStatus({ phase: "Completed", currentAgent: "", message: completionMessage });
 }
 
 async function main(): Promise<number> {
@@ -1210,6 +1262,23 @@ async function main(): Promise<number> {
   // ---- security layer bootstrap: NetBird mesh bridge + Vigil client ----
   let bridge: MeshBridge | null = null;
   if (env.meshProxyUrl !== null) {
+    // Wait for the netbird sidecar's SOCKS5 listener before anything else:
+    // strict-mode Vigil scans would otherwise die in ~6s with an opaque
+    // transport error while the sidecar is still enrolling.
+    if (!env.dryRun) {
+      try {
+        await waitForSocks5Proxy(env.meshProxyUrl, env.meshReadyTimeoutMs);
+      } catch (err) {
+        log.error("mesh proxy never became ready", { error: errorMessage(err) });
+        writeTerminationMessage({
+          phase: "Failed",
+          finalScore: 0,
+          riskCategory: "Unknown",
+          message: errorMessage(err).slice(0, 2048),
+        });
+        return 1;
+      }
+    }
     try {
       bridge = await startMeshProxyBridge(env.meshProxyUrl, { port: env.meshBridgePort });
     } catch (err) {
@@ -1283,14 +1352,44 @@ async function main(): Promise<number> {
     probes: null,
     security: { vigil, bridge, gate: report.securityGate, surfaceScanned: false },
     terminated: false,
+    failedAgents: [],
+    currentAbort: null,
   };
 
   const onSignal = (signal: NodeJS.Signals): void => {
-    log.warn("termination signal received", { signal });
+    log.warn("termination signal received; aborting in-flight agent", { signal });
     state.terminated = true;
+    state.currentAbort?.abort();
   };
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
+
+  // Process-level safety net: a stray rejection or uncaught error must not
+  // crash the container without a status patch and a termination message —
+  // that would strand the run non-terminally until the deadline.
+  let crashHandled = false;
+  const fatalCrash = (kind: string, err: unknown): void => {
+    if (crashHandled) return;
+    crashHandled = true;
+    const message = `${kind}: ${errorName(err)}: ${errorMessage(err)}`.slice(0, 2048);
+    log.error("fatal process error", { kind, errorClass: errorName(err), error: errorMessage(err) });
+    report.phase = "Failed";
+    report.message = message;
+    writeTerminationMessage({
+      phase: "Failed",
+      finalScore: report.finalScore,
+      riskCategory: report.scoring.riskCategory,
+      message,
+    });
+    void status
+      .patchStatus({ phase: "Failed", currentAgent: "", message })
+      .then(() => process.exit(1))
+      .catch(() => process.exit(1));
+    // Hard backstop in case the patch stalls on its retries.
+    setTimeout(() => process.exit(1), 8000).unref();
+  };
+  process.on("uncaughtException", (err: Error) => fatalCrash("uncaughtException", err));
+  process.on("unhandledRejection", (reason: unknown) => fatalCrash("unhandledRejection", reason));
 
   let exitCode = 0;
   try {
@@ -1299,7 +1398,7 @@ async function main(): Promise<number> {
     exitCode = 1;
     const stage = err instanceof RunnerError ? err.stage : "unknown";
     const message = state.terminated
-      ? `run terminated by signal (activeDeadline/timeout) during ${stage}: ${errorMessage(err)}`
+      ? `run terminated by signal during ${stage}: ${errorMessage(err)}`
       : `${errorName(err)} at ${stage}: ${errorMessage(err)}`;
     report.phase = "Failed";
     report.message = message;
@@ -1322,6 +1421,10 @@ async function main(): Promise<number> {
     }
     touchDone(env);
     writeReport(env, report);
+    // Last-chance write for a terminal-phase patch that exhausted its
+    // retries during the run — without it the CR would stay non-terminal
+    // even though the verdict exists.
+    await status.flushTerminalPatch();
     const phase: RunPhase = report.phase === "Completed" ? "Completed" : "Failed";
     writeTerminationMessage({
       phase,

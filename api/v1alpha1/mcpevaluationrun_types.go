@@ -183,6 +183,13 @@ type MCPEvaluationRunStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// Retries counts how many times the controller recreated the Job after a
+	// transient infrastructure failure (eviction, node loss, image pull flake).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2
+	// +optional
+	Retries int32 `json:"retries,omitempty"`
+
 	// StartTime is when the run entered Pending.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`

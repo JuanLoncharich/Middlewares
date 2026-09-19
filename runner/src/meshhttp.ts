@@ -33,6 +33,9 @@ const log: Logger = rootLogger.child("mesh");
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
+// Bound for bridged upstream requests / CONNECT tunnels with no data flow.
+// Matches the 10-minute ceiling Occludra applies to slow LLM completions.
+const TUNNEL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Proxy descriptor
@@ -405,6 +408,43 @@ async function requestDirect(target: URL, init: MeshRequestInit, timeoutMs: numb
 export type MeshFetch = (url: string, init?: MeshRequestInit) => Promise<MeshResponse>;
 
 /**
+ * Poll the local mesh proxy (the netbird userspace sidecar's SOCKS5 listener)
+ * with plain TCP dials until it accepts connections, so the first real Vigil /
+ * Occludra call does not die against a sidecar that is still enrolling.
+ * Throws MeshTransportError if the proxy never comes up within timeoutMs.
+ */
+export async function waitForSocks5Proxy(rawProxy: string, timeoutMs: number, intervalMs = 1000): Promise<void> {
+  const proxy = parseProxyUrl(rawProxy);
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 1; ; attempt++) {
+    const up = await new Promise<boolean>((resolve) => {
+      const socket = net.connect({ host: proxy.host, port: proxy.port });
+      const done = (ok: boolean): void => {
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.setTimeout(Math.min(intervalMs, 2000), () => done(false));
+      socket.once("connect", () => done(true));
+      socket.once("error", () => done(false));
+    });
+    if (up) {
+      log.info("mesh proxy is accepting connections", { proxy: `${proxy.host}:${proxy.port}`, attempt });
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new MeshTransportError(
+        `mesh proxy ${proxy.host}:${proxy.port} did not come up within ${timeoutMs}ms — ` +
+          `check the netbird sidecar logs (enrollment may have failed)`,
+      );
+    }
+    if (attempt % 10 === 0) {
+      log.info("waiting for mesh proxy", { proxy: `${proxy.host}:${proxy.port}`, waitedMs: Date.now() - (deadline - timeoutMs) });
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+/**
  * Build the mesh-aware fetch used for Vigil / Occludra calls.
  * `rawProxy === null | ""` → direct connections (non-mesh fallback mode).
  */
@@ -445,8 +485,27 @@ function pipeSockets(a: net.Socket, b: net.Socket): void {
     a.destroy();
     b.destroy();
   };
-  a.on("error", teardown);
-  b.on("error", teardown);
+  // A CONNECT tunnel through a hung netbird can otherwise stall forever:
+  // tear tunnels down after TUNNEL_IDLE_TIMEOUT_MS without data flowing in
+  // either direction (LLM SSE streams flush at least every few seconds).
+  let lastActivity = Date.now();
+  const touch = (): void => {
+    lastActivity = Date.now();
+  };
+  a.on("data", touch);
+  b.on("data", touch);
+  const idleTimer = setInterval(() => {
+    if (Date.now() - lastActivity >= TUNNEL_IDLE_TIMEOUT_MS) teardown();
+  }, 30_000);
+  idleTimer.unref();
+  const onDone = (): void => {
+    clearInterval(idleTimer);
+    teardown();
+  };
+  a.on("close", onDone);
+  b.on("close", onDone);
+  a.on("error", onDone);
+  b.on("error", onDone);
   a.pipe(b);
   b.pipe(a);
 }
@@ -514,6 +573,11 @@ export async function startMeshProxyBridge(rawProxy: string, opts: BridgeOptions
           method: req.method ?? "GET",
           headers,
           createConnection: () => upstream,
+        });
+        // No inactivity bound on the absolute-form path otherwise: a hung
+        // upstream would stall this bridge request forever.
+        ureq.setTimeout(TUNNEL_IDLE_TIMEOUT_MS, () => {
+          ureq.destroy(new MeshTransportError(`upstream inactivity timeout after ${TUNNEL_IDLE_TIMEOUT_MS}ms`));
         });
         ureq.on("response", (ures: http.IncomingMessage) => {
           if (res.headersSent) {

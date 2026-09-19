@@ -1,0 +1,213 @@
+# ---------------------------------------------------------------------------
+# Cluster Autoscaler — OpenStack provider (ephemeral VM worker scaling).
+#
+# WHEN TO DEPLOY: only when this platform runs on a real OpenStack-backed
+# cluster (Magnum or k0s/kubeadm-on-Nova). On the local kind cluster there is
+# nothing to scale — skip this manifest (deploy.sh does).
+#
+# WHAT IT DOES: pods that cannot schedule (e.g. MCPEvaluationRun jobs — each
+# requests ~1.1 vCPU / 1 GiB across containers — plus HPA-replicas of Vigil /
+# Occludra) trigger a scale-out of the worker node group. The autoscaler asks
+# Nova for a NEW ephemeral VM, which joins the cluster via its baked-in
+# cloud-init (Magnum node groups do this natively), the pending pods run, and
+# once the VM sits unneeded past `--scale-down-unneeded-time` it is DELETED
+# again — ephemeral capacity, pay-per-run.
+#
+# REQUIREMENTS
+#   - OpenStack credentials with compute + instance-boot permissions, rendered
+#     into Secret kube-system/openstack-cloud-config (deploy.sh does this from
+#     OS_* environment variables).
+#   - A scalable worker node group: Magnum node group NAME, or an
+#     autoscaling group whose members auto-join the cluster on boot.
+#   - Pod requests must be honest (they are: every container in the eval Job
+#     and both gateways carries requests) — the autoscaler only sees demand
+#     through unschedulable pods.
+#
+# EVICTION INTERPLAY: worker nodes evictable via the PDBs; eval Jobs carry
+# default priority (well above --expendable-pods-priority-cutoff), so the
+# autoscaler scales OUT for them instead of preempting them, and scale-IN
+# waits for running evaluations to finish.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-autoscaler
+  labels:
+    app: cluster-autoscaler
+rules:
+  - apiGroups: [""]
+    resources: ["events", "endpoints"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    resourceNames: ["cluster-autoscaler"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["watch", "list", "get", "update"]
+  - apiGroups: [""]
+    resources:
+      - "pods"
+      - "services"
+      - "replicationcontrollers"
+      - "persistentvolumeclaims"
+      - "persistentvolumes"
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["extensions", "apps"]
+    resources: ["daemonsets", "replicasets", "statefulsets"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["watch", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csidrivers", "csinodes", "volumeattachments"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["batch", "extensions"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["cluster-autoscaler"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["cluster-autoscaler"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-autoscaler
+  labels:
+    app: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+      annotations:
+        # Secret contents are credentials — bump this annotation on rotation.
+        checksum/secret: ""
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: cluster-autoscaler
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cluster-autoscaler
+          # cloud-provider-openstack's autoscaler build; pin to your cluster's
+          # minor version (v1.30.x for a v1.30 cluster, etc.).
+          image: registry.k8s.io/provider-os/cluster-autoscaler:v1.31.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /cluster-autoscaler
+          args:
+            - --cloud-provider=openstack
+            - --cloud-config=/etc/openstack/cloud.conf
+            # Node group to scale: MIN:MAX:NAME — substituted by deploy.sh
+            # from AUTOSCALER_MIN / AUTOSCALER_MAX / AUTOSCALER_NODE_GROUP.
+            - --nodes=__AUTOSCALER_MIN__:__AUTOSCALER_MAX__:__AUTOSCALER_NODE_GROUP__
+            # Ephemeral-VM semantics: add fast, reap fast. A worker that has
+            # been unneeded (no non-daemonset pods) for 5 minutes is a Nova
+            # instance again — and gets deleted.
+            - --scale-down-unneeded-time=5m
+            - --scale-down-delay-after-add=2m
+            - --scale-down-unready-time=10m
+            - --max-node-provision-time=10m
+            - --scan-interval=30s
+            - --v=2
+          env:
+            - name: OCCM_CLOUD_CONFIG
+              value: /etc/openstack/cloud.conf
+          volumeMounts:
+            - name: openstack-cloud-config
+              mountPath: /etc/openstack
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 500m
+              memory: 600Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: openstack-cloud-config
+          secret:
+            secretName: openstack-cloud-config

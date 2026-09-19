@@ -1,13 +1,15 @@
-apiVersion: v1
-kind: Namespace
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
+  name: controller-manager
+  namespace: system
   labels:
     app.kubernetes.io/name: mcp-eval-operator
-    app.kubernetes.io/managed-by: kustomize
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
-  name: system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -22,7 +24,12 @@ spec:
   selector:
     matchLabels:
       control-plane: controller-manager
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       annotations:
@@ -30,6 +37,16 @@ spec:
       labels:
         control-plane: controller-manager
     spec:
+      priorityClassName: mcp-eval-critical
+      topologySpreadConstraints:
+      # Spread replicas across nodes when more than one node exists without
+      # blocking single-node (kind/k0s dev) clusters.
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            control-plane: controller-manager
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -40,6 +57,7 @@ spec:
       - command:
         - /manager
         args:
+        # Two replicas with leader election: one active, one hot standby.
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8443
@@ -113,6 +131,8 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 20
         readinessProbe:
+          # /readyz includes a real API-server reachability check
+          # (internal/controller/health.go), not just a process ping.
           httpGet:
             path: /readyz
             port: 8081
@@ -121,7 +141,8 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 256Mi
+            # 256Mi was OOM-tight for a manager listing Jobs + NetworkPolicies.
+            memory: 512Mi
           requests:
             cpu: 50m
             memory: 128Mi

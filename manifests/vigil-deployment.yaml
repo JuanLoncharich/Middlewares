@@ -102,6 +102,17 @@ spec:
         app.kubernetes.io/component: prompt-scanner
         security.eval.io/mesh-peer: vigil
     spec:
+      priorityClassName: mcp-eval-critical
+      topologySpreadConstraints:
+      # Replicas must not pile onto one node: the PDB is satisfied even when
+      # both replicas share a node, but real availability needs node spread.
+      # ScheduleAnyway keeps single-node (kind/k0s dev) clusters schedulable.
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: vigil-llm
       serviceAccountName: vigil
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -172,19 +183,29 @@ spec:
             limits:
               cpu: "1"
               memory: 2Gi
-          # tcpSocket probes (see occludra manifest for rationale); switch to
-          # httpGet /analyze expects-400 or a /health route if your build has
-          # one.
+          # HTTP probes against the real /health route (stub and vigil-llm
+          # both expose it): a hung scanner must fail its probes, which a
+          # listening-socket check alone does not catch. The startupProbe
+          # absorbs slow boots (the real image may load scanner corpora)
+          # without tripping liveness during the ramp.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health
               port: 5000
-            initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 3
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health
               port: 5000
-            initialDelaySeconds: 10
             periodSeconds: 10
+            failureThreshold: 2
         # ---------------------------------------------------- netbird (TUN)
         - name: netbird
           image: netbirdio/netbird:latest
@@ -220,6 +241,19 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+          # A wedged netbird sidecar silently removes this pod from the mesh
+          # with no other signal. Same check the netbird DaemonSet uses:
+          # userspace socket OR TUN device present.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -S /var/run/netbird/wt0.sock || ip link show wt0"]
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -S /var/run/netbird/wt0.sock || ip link show wt0"]
+            periodSeconds: 60
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
@@ -246,7 +280,8 @@ metadata:
   name: vigil
   namespace: security-gateways
 spec:
-  minAvailable: 1
+  # Percentage so the budget scales with the HPA (min 50% of N replicas).
+  minAvailable: 50%
   selector:
     matchLabels:
       app.kubernetes.io/name: vigil-llm
@@ -258,3 +293,36 @@ metadata:
   namespace: security-gateways
   labels:
     app.kubernetes.io/name: vigil-llm
+---
+# Horizontal scaling of the inbound scanner: every untrusted payload
+# (advertised surface, fuzz responses, probe outputs) of every run is POSTed
+# here, so scanner load grows linearly with concurrent evaluation runs.
+# Scale on CPU; the stub's in-flight limiter (VIGIL_STUB_MAX_INFLIGHT)
+# backpressures with 503+Retry-After until new replicas are Ready. Requires
+# metrics-server (deploy.sh installs it with AUTOSCALE_METRICS=1).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vigil
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vigil
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # Evaluation traffic arrives in waves (runs start/end together); hold
+      # capacity for a while before shedding replicas.
+      stabilizationWindowSeconds: 300

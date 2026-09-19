@@ -133,7 +133,8 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
 
 Runner knobs (all injected by the operator, all overridable per Deployment):
 `MESH_PROXY` (default `socks5://127.0.0.1:1080`, empty = direct),
-`MESH_BRIDGE_PORT` (18080), `VIGIL_URL`, `VIGIL_ENABLED`, `VIGIL_ENFORCE`,
+`MESH_BRIDGE_PORT` (18080), `MESH_READY_TIMEOUT_MS` (60000),
+`VIGIL_URL`, `VIGIL_ENABLED`, `VIGIL_ENFORCE`,
 `VIGIL_TIMEOUT_MS`, `VIGIL_MAX_PAYLOAD_BYTES`, `OCCLUDRA_BASE_URL`,
 `OCCLUDRA_ENABLED`. The operator derives `VIGIL_URL` / `OCCLUDRA_BASE_URL`
 from the mode: in mesh mode they become the NetBird peer names under
@@ -157,6 +158,47 @@ The evaluator patches `status.agentResults[<agent>]` after each agent, so
 partial results survive a later failure. The full report is also written to
 `/output/evaluation-report.json` inside the Pod and summarised in the
 container's termination message.
+
+**Degraded continuation:** a persona that fails (LLM timeout, structured-output
+exhaustion, target unavailable) no longer aborts the run — its error is
+recorded in `agentResults[<agent>]` and the remaining agents still execute.
+The run completes with a `degraded: N/M agent(s) failed (…)` message when at
+least one agent produced results, and fails only if every agent failed.
+The exception is a **strict-mode Vigil detection**, which remains a hard abort
+(security semantics).
+
+## Resilience model
+
+| Failure | Recovery |
+|---|---|
+| Operator pod loss | 2 replicas with leader election (1 active + hot standby), PDB `minAvailable: 1`, topology spread, `PriorityClass mcp-eval-critical` |
+| Transient API/etcd error creating a Job | controller-runtime backoff-retry (only validation errors fail the run) |
+| Pod evicted / node lost / image-pull flake / OOM kill | run controller recreates the Job, bounded by `status.retries ≤ 2`; evaluation-verdict failures are never retried |
+| Pod stuck Pending (pull/scheduling) | detected after 5 min without container progress → same bounded retry instead of burning the whole deadline |
+| Vigil/Occludra replica loss | 2 replicas each, PDB, node spread, HTTP health probes with startupProbe; netbird TUN sidecars liveness-probed |
+| Evaluator crash (uncaught exception / rejection) | process-level handler patches `phase: Failed` + termination message before exit |
+| Terminal status patch lost to an API outage | terminal patches get extended backoff + one final `flushTerminalPatch()` from the shutdown path; the termination message is the last-resort copy the run controller reads back |
+| NetBird sidecar slow to enroll | evaluator waits for the SOCKS5 proxy to accept connections (`MESH_READY_TIMEOUT_MS`, default 60s) before the first security-gateway call |
+| Registry flake during clone/deps install | cloner wraps git/npm/uv/go ops in 300s timeout × 3 attempts |
+| Stale per-run NetworkPolicies | deleted when the run reaches a terminal phase (owner-ref GC remains the backstop) |
+| Deploying mesh mode without a setup key | `deploy.sh` hard-fails instead of shipping a platform whose runs cannot reach the gateways |
+| Many runs due at once | run reconciler uses 8 concurrent workers (4 for the cron scheduler) — no serialization at the control plane |
+| Gateway saturation (too many concurrent runs) | Vigil and Occludra autoscale via HPA (CPU 70 %, 2→8 replicas); at per-replica capacity limits they answer 503 + Retry-After and the evaluator backs off and retries |
+| Cluster out of node capacity (OpenStack) | Cluster Autoscaler (`DEPLOY_AUTOSCALER=openstack`) boots an ephemeral Nova VM into the worker group for the pending run/gateway pods and deletes it again ~5 min after it goes idle; running evaluations are never preempted for scale-in |
+
+### Scaling knobs
+
+```bash
+# HPA metrics backend (needed for the gateways' HorizontalPodAutoscalers):
+AUTOSCALE_METRICS=1 ./deploy.sh ...
+
+# Ephemeral-VM node autoscaling on a real OpenStack cluster (ignored on kind):
+DEPLOY_AUTOSCALER=openstack \
+  OS_AUTH_URL=https://keystone:5000/v3 OS_USERNAME=... OS_PASSWORD=... \
+  OS_PROJECT_NAME=... OS_REGION_NAME=RegionOne \
+  AUTOSCALER_NODE_GROUP=eval-workers AUTOSCALER_MIN=1 AUTOSCALER_MAX=10 \
+  ./deploy.sh ...
+```
 
 ## Security model
 

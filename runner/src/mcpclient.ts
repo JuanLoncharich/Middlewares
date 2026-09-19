@@ -204,17 +204,20 @@ export class StdioFifoTransport implements McpTransport {
     // Both opens block until the peer side is opened by the target container:
     // the target's shell opens stdin (read) first, then stdout (write).
     // Running them concurrently ensures neither side deadlocks.
+    const openAll = Promise.all([
+      fs.promises.open(this.stdinPath, fs.constants.O_WRONLY),
+      fs.promises.open(this.stdoutPath, fs.constants.O_RDONLY),
+    ]);
     let handles: [fs.promises.FileHandle, fs.promises.FileHandle];
     try {
-      handles = await withTimeout(
-        Promise.all([
-          fs.promises.open(this.stdinPath, fs.constants.O_WRONLY),
-          fs.promises.open(this.stdoutPath, fs.constants.O_RDONLY),
-        ]),
-        this.openTimeoutMs,
-        "opening IPC FIFOs",
-      );
+      handles = await withTimeout(openAll, this.openTimeoutMs, "opening IPC FIFOs");
     } catch (err) {
+      // The underlying opens may still complete after the timeout fired;
+      // release the handles whenever they arrive instead of leaking them.
+      void openAll.then(
+        ([a, b]) => Promise.allSettled([a.close(), b.close()]),
+        () => undefined,
+      );
       throw new TargetUnavailableError(`could not open IPC FIFOs: ${errorMessage(err)}`);
     }
     if (gen !== this.generation || this.closed) {

@@ -59,7 +59,7 @@ its code lives, and whether it holds state.
 | `OpenCodeAgent` | **CRD** | ns `mcp-evals` | `api/v1alpha1/opencodeagent_types.go` | persona config (etcd) |
 | `MCPServerReconciler` | **controller** (Reconcile loop, controller-runtime) | runs inside manager pod | `internal/controller/mcpserver_controller.go` | stateless; recomputes from etcd each pass |
 | `MCPEvaluationRunReconciler` | **controller** | same | `internal/controller/mcpevaluationrun_controller.go` (1437 lines) | stateless; builds Jobs, watches Pods |
-| controller-manager | **Deployment** `mcp-eval-controller-manager` (1 replica, `--leader-elect`) | `mcp-eval-system` | repo root `Dockerfile`, `cmd/main.go` | none (etcd is the state) |
+| controller-manager | **Deployment** `mcp-eval-controller-manager` (2 replicas, `--leader-elect`, PDB minAvailable 1, topology spread, `PriorityClass mcp-eval-critical`) | `mcp-eval-system` | repo root `Dockerfile`, `cmd/main.go` | none (etcd is the state) |
 | cloner | **init container** of the run Pod | `mcp-evals` | `images/cloner/` (bash) | writes `/workspace`, exits |
 | target sandbox | **container** (`target`) of the run Pod, UID 10002 | `mcp-evals` | `images/target/` (bash supervisor) | ephemeral, jailed |
 | evaluator | **container** (`evaluator`) of the run Pod, UID 10001 | `mcp-evals` | `runner/` (TypeScript → `dist/evaluator.js`) | ephemeral; writes results to 4 places (§8.1) |
@@ -164,9 +164,24 @@ Owns run → Job → Pod. Key mechanics:
 - `buildJob()` (line ~772) constructs the batch/Job:
   - containers: init `cloner` → sidecar `netbird` (starts first as a regular
     container before `target`/`evaluator` need it) → `target` → `evaluator`;
-  - `backoffLimit: 0` (one attempt — runs fail loudly, cron retries),
-    `ttlSecondsAfterFinished: 600` (Job + Pod garbage-collected 10 min after
-    terminal), `activeDeadlineSeconds: spec.timeoutSeconds`;
+  - `backoffLimit: 0` at the Job level (evaluation-verdict failures fail
+    loudly), `ttlSecondsAfterFinished: 600` (Job + Pod garbage-collected 10 min
+    after terminal), `activeDeadlineSeconds: spec.timeoutSeconds`. The RUN
+    controller adds the recovery layer on top: transient infrastructure
+    failures (Evicted / NodeLost / image-pull stuck / OOMKilled / pod Pending
+    with no container progress for 5 min) delete and recreate the Job, bounded
+    by `status.retries ≤ 2` (condition `Retried`, event `JobRetried`); beyond
+    that the run fails `JobRetriesExhausted`. A transient error while CREATING
+    the Job (API-server 5xx/timeouts/network) is retried with
+    controller-runtime backoff instead of failing the run — only Invalid /
+    Forbidden-class errors fail it permanently.
+  - Terminal runs delete their per-run `<run>-evaluate-egress` NetworkPolicy
+    (owner-ref GC remains the backstop when the run object is deleted), so
+    retained history runs no longer accumulate stale policies.
+  - `complete()` no longer silently marks Completed at score 0: with no
+    termination message AND no recorded `agentResults`/`scoring` the run fails
+    `EvaluatorResultsMissing`; with results present (patched by the evaluator
+    before it lost its termination message) it completes from them.
   - Pod `automountServiceAccountToken: false` globally; **only the evaluator
     mounts** a 1-hour projected SA token (`mcp-eval-runner`) — RBAC limited
     to `get/list/watch/patch/update` MCPEvaluationRun **status** (config/rbac/runner_role.yaml);
@@ -196,7 +211,11 @@ Owns run → Job → Pod. Key mechanics:
   `/dev/termination-log` for `kubectl describe` visibility.
 - Manager flags (`cmd/main.go`): `--metrics-bind-address` (default off),
   `--health-probe-bind-address :8081`, `--leader-elect` (**enabled** via
-  manager.yaml args; Deployment replicas: 1, HA-ready to scale N with 1 active).
+  manager.yaml; Deployment replicas: 2 — one active, one hot standby, PDB
+  minAvailable 1 + topology spread). `/readyz` includes a real API-server
+  reachability check (`internal/controller/health.go`: GET on the API
+  server's own `/readyz`, cached 5 s), so a wedged manager leaves Service
+  endpoints instead of holding its lease blind.
 
 ---
 
@@ -210,6 +229,14 @@ toolchain detection (node/npm → `npm install`; python/uv → `uv sync`;
 go → `go build`), and emission of `/workspace/.mcp-launch.json`
 `{cmd, args, cwd, transport, port}` — the contract the target supervisor
 consumes. Runs only during net-phase `clone`.
+
+Every network-facing step (git clone/fetch, npm ci/install, uv pip install,
+go build) runs through a `bounded()` helper: 300 s wall-clock timeout × 3
+attempts with 5 s backoff (`OP_TIMEOUT_SECONDS` / `OP_RETRIES`), plus
+`GIT_HTTP_LOW_SPEED_*` guards — a flaky registry or hung upstream retries or
+fails early instead of silently burning the whole Job deadline
+(backoffLimit is 0 and this init container is the single clone attempt, so
+the script itself must be the recovery layer).
 
 ### 4.2 Target sandbox (`images/target/entrypoint.sh`)
 Jails the **untrusted** MCP server (the threat model's adversary):
@@ -230,10 +257,10 @@ The orchestrator. Module map:
 
 | File | Responsibility |
 |---|---|
-| `evaluator.ts` | main() flow, agent orchestration, OpenCode boot (`bootOpencode`: `createOpencode` spawns `opencode serve` on 127.0.0.1:4096+ with config `{model, permission:"deny", autoupdate:false, share:"disabled", snapshot:false, provider.opencode.options.baseURL = OCCLUDRA_BASE_URL}`), structured-output recovery from plain text, report writing |
-| `k8s.ts` | status writer: **merge-patch on the status subresource** (`patchNamespacedCustomObjectStatus`), retry w/ backoff, never throws; dry-run mode reads `${OUTPUT_DIR}/server.json` + `agents/<name>.json` instead of the API |
+| `evaluator.ts` | main() flow, agent orchestration, OpenCode boot (`bootOpencode`: `createOpencode` spawns `opencode serve` on 127.0.0.1:4096+ with config `{model, permission:"deny", autoupdate:false, share:"disabled", snapshot:false, provider.opencode.options.baseURL = OCCLUDRA_BASE_URL}`), structured-output recovery from plain text, report writing. **Degraded continuation**: a failing persona is recorded in `agentResults` and the remaining agents still run; the run completes `degraded: N/M failed` when ≥1 agent succeeded and fails only when all failed. Strict-mode Vigil detections stay a hard abort. Process-level `uncaughtException`/`unhandledRejection` handlers patch `Failed` + write the termination message before exiting; SIGTERM aborts the in-flight agent's OpenCode call via its AbortController; before the first security-gateway call the runner waits for the netbird SOCKS5 proxy to accept connections (`MESH_READY_TIMEOUT_MS`, default 60 s) |
+| `k8s.ts` | status writer: **merge-patch on the status subresource** (`patchNamespacedCustomObjectStatus`), retry w/ backoff, never throws; patches carrying a terminal phase get extended backoff and a final `flushTerminalPatch()` from the shutdown path (a lost terminal write would otherwise strand the CR non-terminally); a 404 (run deleted) aborts retries; `fetchAgent`/`fetchServer` retry transient API errors and fail fast on 404; dry-run mode reads `${OUTPUT_DIR}/server.json` + `agents/<name>.json` instead of the API |
 | `vigil.ts` | VigilClient: POST `/analyze {prompt}` with timeout + retry/backoff; verdict parsing across all response shapes; `VigilUnavailableError` classification (caller decides strict fail-closed vs monitor); `excerptOf` for logs |
-| `meshhttp.ts` | NetBird transport: SOCKS5 (RFC 1928) client with user/pass auth staging; `fetch-over-SOCKS5` for the evaluator's own Vigil/Occludra calls; local **HTTP↔SOCKS5 bridge** listener on `127.0.0.1:18080` exported as `HTTP_PROXY`/`HTTPS_PROXY` so the OpenCode child process (cannot be taught SOCKS5) rides the mesh too |
+| `meshhttp.ts` | NetBird transport: SOCKS5 (RFC 1928) client with user/pass auth staging; `fetch-over-SOCKS5` for the evaluator's own Vigil/Occludra calls; `waitForSocks5Proxy()` readiness gate; local **HTTP↔SOCKS5 bridge** listener on `127.0.0.1:18080` exported as `HTTP_PROXY`/`HTTPS_PROXY` so the OpenCode child process (cannot be taught SOCKS5) rides the mesh too; bridged upstream requests and CONNECT tunnels carry a 10-min inactivity bound so a hung netbird cannot stall them forever |
 | `mcpclient.ts` | MCP client over stdio-FIFO or SSE loopback transport |
 | `static.ts` | SAST evidence: repo tree, launch metadata, flagged patterns |
 | `fuzz.ts` | protocol fuzzing: ~25 mutated cases per advertised tool (type confusion, boundary values, injection strings in arguments), error/telemetry capture |
@@ -272,10 +299,17 @@ gateway netbird sidecars need `CAP_NET_ADMIN` for their TUN devices. Nothing
 untrusted is ever scheduled here.
 
 ### 5.1 Occludra — LLM egress redaction gateway
-**Kind**: Deployment ×2 (PDB minAvailable 1, rolling maxUnavailable 0) +
-ClusterIP `occludra-service:8080` + NodePort `occludra-np:30080`. Stateless
-Go service (`images/occludra-gateway/main.go`); the only LLM egress point of
-the platform.
+**Kind**: Deployment ×2 (PDB minAvailable 1, rolling maxUnavailable 0, topology
+spread, `PriorityClass mcp-eval-critical`) + ClusterIP `occludra-service:8080`
++ NodePort `occludra-np:30080`. Stateless Go service
+(`images/occludra-gateway/main.go`); the only LLM egress point of the platform.
+HTTP probes hit the real `/healthz`; **graceful shutdown** drains in-flight LLM
+streams on SIGTERM (25 s budget inside the pod's 30 s grace period); the server
+sets `ReadHeaderTimeout`/`IdleTimeout` (WriteTimeout stays unlimited so SSE
+responses are never cut mid-stream) and the upstream client uses a tuned
+Transport (`MaxIdleConnsPerHost: 20`, `IdleConnTimeout: 90s`). No upstream
+retry: LLM POSTs are not idempotent and the evaluator's per-agent retry
+already covers transient failures.
 
 Request pipeline for `POST /v1/chat/completions` and `/v1/responses`
 (everything else proxies verbatim; `/healthz` for probes):
@@ -324,7 +358,13 @@ pass-through.
 `vigil-np:30500`. Contract: `POST /analyze {"prompt": "…"}` →
 `{"injection_detected": bool, "confidence": float (0–1),
 "status": "blocked"\|"allowed", "scanners": [names], "runs": {…}}`;
-`GET /health`. Content is never logged (`log_payloads: false`).
+`GET /health` (also the probe target, with a startupProbe absorbing slow
+corpus-loading boots). Content is never logged (`log_payloads: false`).
+The netbird TUN sidecars on both gateways are liveness-probed with the same
+exec check the DaemonSet uses (`test -S /var/run/netbird/wt0.sock || ip link
+show wt0`) so a wedged sidecar is restarted instead of silently dropping the
+pod from the mesh; the userspace run sidecar (no TUN, no stable socket path)
+relies on the evaluator's SOCKS5 readiness gate + run-level retries instead.
 
 **Deployed implementation today is the test double** (`images/vigil-stub/server.py`,
 Alpine Python, UID 10004, read-only rootfs): deterministic regex heuristics,
@@ -436,10 +476,16 @@ Four destinations, four lifetimes (this is the complete persistence story):
    retries, then logs and moves on — the Job exit code and termination log
    still carry the verdict). Patches: `phase: Running` →
    `phase: Evaluating` + `currentAgent` per agent → `agentResults[<agent>]`
-   after **each** agent (partial results survive later failures) →
+   after **each** agent (partial results survive later failures — now by
+   design, since failed agents degrade the run instead of aborting it) →
    `findings` → `finalScore` + `scoring` → `phase: Completed`. On error:
-   `phase: Failed` + `message` (stage/agent + error class). Survives pod
-   deletion, TTL, cluster restarts; visible via `kubectl get mcprun -o yaml`.
+   `phase: Failed` + `message` (stage/agent + error class). Terminal-phase
+   patches get extended backoff plus one final `flushTerminalPatch()` from
+   the shutdown path; if even that fails, the verdict survives in
+   `/dev/termination-log` and the run controller reads it back (its
+   `EvaluatorResultsMissing` guard catches the truly-empty case). Survives
+   pod deletion, TTL, cluster restarts; visible via `kubectl get mcprun -o
+   yaml`.
 2. **`/output/evaluation-report.json`** inside the evaluator container —
    the full report (all agent outputs, evidence, telemetry) written by
    `writeReport()`. Backing: emptyDir on the run Pod → **dies with the
@@ -490,20 +536,47 @@ else is engineered to be disposable.
 | Capability | Mechanism | Natively distributed? |
 |---|---|---|
 | Cluster state | etcd Raft (kind = single node here; the repo history targets k0s multi-master too) | **yes** (replicated protocol; single instance in this dev cluster) |
-| Operator | Deployment, `--leader-elect` enabled, replicas 1 (scale-out safe: N replicas, 1 active) | HA-ready |
+| Operator | Deployment, 2 replicas, `--leader-elect` enabled, PDB minAvailable 1, topology spread, `PriorityClass mcp-eval-critical` | **yes** — one active + hot standby, survives node drain |
 | Scheduling correctness | cron math vs etcd timestamps every reconcile | survives failover/restarts, no timers |
-| Evaluation workloads | independent batch Jobs per run | **yes** — embarrassingly parallel across servers |
-| Occludra | 2 stateless replicas, shared ConfigMap policy, PDB, rolling maxUnavailable 0, ClusterIP random spread | **yes** |
-| Vigil | 2 stateless (stub) replicas, PDB | **yes** (real image: ChromaDB makes a replica *eventually* self-contained after corpus load; PV needed for durability) |
+| Run creation | uncached (APIReader) active-run check at fire time closes the cache-lag dedup window | no double-create on reconcile races |
+| Evaluation workloads | independent batch Jobs per run; transient infra failures recreate the Job (≤2, `status.retries`); stuck-Pending pods fast-retried at 5 min | **yes** — embarrassingly parallel across servers; infra flakes recover without waiting for the next cron |
+| Occludra | HPA 2→8 (CPU 70 %), shared ConfigMap policy, PDB 50 %, rolling maxUnavailable 0, topology spread, HTTP probes + graceful shutdown + in-flight backpressure | **yes** |
+| Vigil | HPA 2→8 (CPU 70 %), PDB 50 %, topology spread, `/health` HTTP probes + startupProbe + in-flight backpressure | **yes** (real image: ChromaDB makes a replica *eventually* self-contained after corpus load; PV needed for durability) |
 | Mesh data plane | NetBird WireGuard peer-to-peer | **yes** — no central data chokepoint (management plane is external/SPOF) |
 | Policy distribution | kubelet ConfigMap sync (~1 min) + per-request re-read | eventually consistent, atomic per request |
+| Node capacity | Cluster Autoscaler on OpenStack (ephemeral Nova VMs, scale-out on pending pods, scale-in after 5 min idle); static on kind | **yes** on OpenStack (gated by `DEPLOY_AUTOSCALER=openstack`) |
 | Workstation | single Docker container | **no** — single-user dev tool by design |
 | Accepted SPOFs | kind node, local registry, external NetBird management, OpenCode Zen | documented residuals |
 
 Consistency notes: per-run NetworkPolicy exists **before** the Job (no
-uncovered label-flip window); net-phase flips exactly once; evaluator status
-patches are optimistic merge-patches (conflicts → retry/backoff, controller
-re-reconcile confirms).
+uncovered label-flip window) and is **deleted when the run turns terminal**
+(owner-ref GC backstop on run deletion); net-phase flips exactly once;
+evaluator status patches are optimistic merge-patches (conflicts →
+retry/backoff, controller re-reconcile confirms); run-level `status.retries`
+bounds Job recreation so recovery cannot loop.
+
+---
+
+## 9.1 Load profile — what happens at each point under heavy traffic
+
+| Point | Load source | Behaviour as traffic rises | Scaling mechanism |
+|---|---|---|---|
+| Operator (manager) | reconcile of N servers × M runs; every run's Job/NP/pod transitions | The default single reconcile worker would serialize everything; workers are now 8 (run ctrl) / 4 (server ctrl), each reconcile is stateless. List/watch goes through the informer cache; the uncached fire-time list is one extra read per actual fire | Vertical: CPU/mem 500m/512Mi. Horizontal replicas add standby only (leader election) — throughput comes from workers. Retry storms bounded by the default exponential rate limiter |
+| MCPEvaluationRun Jobs | one pod per run; each ~1.1 vCPU / 1 GiB requests | Pods go Pending when nodes fill — this is the signal the Cluster Autoscaler consumes | Embarrassingly parallel; bounded per-server by the single-active-run rule, cluster-wide by node capacity / autoscaler MAX |
+| Occludra | every LLM completion of every agent of every run (regex scrub CPU + long-lived SSE streams) | Up to HPA max 8 replicas; beyond per-replica `OCCLUDRA_MAX_INFLIGHT=64` in-flight it answers 503 + Retry-After (clients back off) instead of exhausting memory | HPA CPU 70 %, 2→8, PDB 50 %; backpressure as the last resort |
+| Vigil | every untrusted payload scan (surface, fuzz, probes) of every run | Same envelope: HPA to 8 replicas; stub saturates at `VIGIL_STUB_MAX_INFLIGHT=64` with 503 + Retry-After (the evaluator's Vigil client retries ≥5xx) | HPA CPU 70 %, 2→8, PDB 50 %; backpressure as the last resort |
+| NetBird | userspace WireGuard inside each eval pod (sidecar) and per gateway pod | Per-pod resource, scales 1:1 with pods; TUN sidecars liveness-probed | No central data plane to scale (management plane is the documented external SPOF) |
+| API server / etcd | CR patches (status per agent), Jobs, per-run NPs, events | controller-runtime informer caches absorb reads; writes are merge-patches, retries with backoff. Metrics-server adds kubelet scrape load | Cluster-infra concern (multi-master on production OpenStack; single-node kind accepted locally) |
+| Upstream LLM (Zen) | N runs × 4 agents streaming completions | 429s from the provider surface as agent errors → per-agent degradation, never a lost run | External quota; degradation semantics absorb it safely |
+
+**Node autoscaling (OpenStack, ephemeral VMs):** pending eval pods / HPA
+replicas that don't fit trigger Cluster Autoscaler (`--cloud-provider=openstack`)
+→ a fresh Nova VM joins the worker group (autoscale `AUTOSCALER_MIN`..`MAX`),
+runs its wave, and is deleted once unneeded for 5 min
+(`--scale-down-unneeded-time`). Eval Jobs are never preempted for scale-in
+(above the expendable cutoff) — a node with a running evaluation is not
+reaped. On the local kind cluster nothing is deployed (`deploy.sh` gates both
+`AUTOSCALE_METRICS` and `DEPLOY_AUTOSCALER`).
 
 ---
 
@@ -536,8 +609,10 @@ heuristic scan → verdict JSON.
 `OPENCODE_API_KEY` (required unless `SKIP_SECRET=1`), `SKIP_BUILD=1`,
 `OCCLUDRA_IMG`, `VIGIL_IMG` (default `deadbits/vigil-llm:latest`; if pointed
 at the stub path it builds/pushes `images/vigil-stub`). Builds 5 images,
-pushes, applies CRDs+manager (`make deploy`), security layers, samples,
-secret, triggers first run.
+pushes, applies CRDs+manager (`make deploy`), security layers (including the
+shared `PriorityClass mcp-eval-critical`), samples, secret, triggers first
+run. With `MESH_ENFORCE=true` (default) `NETBIRD_SETUP_KEY` is **required** —
+the script exits early rather than deploying a mesh whose runs cannot enroll.
 
 Local dev loop: images `:local` in `kind-registry` → rebuild via
 `docker build -t localhost:5001/<img>:local <dir> && docker push` →
