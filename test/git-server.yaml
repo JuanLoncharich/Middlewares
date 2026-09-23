@@ -1,0 +1,154 @@
+# ---------------------------------------------------------------------------
+# TEST-ONLY in-cluster git server for the evaluation fixtures
+# (test/mcp-servers/mcp-benign-demo and mcp-evil-demo).
+#
+# Deployed by test/run-local-e2e.sh together with:
+#   - Secret mcp-evals/git-test-tls     (self-signed server cert, script-generated)
+#   - Secret mcp-evals/mcp-git-test-ca  (the CA, key ca.crt — forwarded by the
+#     operator to the cloner as GIT_SSL_CAINFO via credentialsSecretRef)
+#
+# URL inside the cluster: https://git-test.mcp-evals.svc.cluster.local/mcp-<name>-demo.git
+#
+# NetworkPolicy model: the clone-phase egress policy (config/samples) only
+# allows PUBLIC 443 — private ranges are deliberately excluded — so two
+# additive policies are defined here: eval pods in clone phase may egress to
+# THIS pod on the git port, and this pod accepts ingress from mcp-evals.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-test
+  namespace: mcp-evals
+  labels:
+    app: git-test
+    security.eval.io/component: test-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: git-test
+  template:
+    metadata:
+      labels:
+        app: git-test
+        security.eval.io/component: test-fixture
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: git-server
+          image: localhost:5001/git-test-server:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 5443
+              protocol: TCP
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/git-server
+              readOnly: true
+          env:
+            - name: GIT_SERVER_TLS_CERT
+              value: /etc/git-server/tls.crt
+            - name: GIT_SERVER_TLS_KEY
+              value: /etc/git-server/tls.key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          startupProbe:
+            tcpSocket:
+              port: 5443
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 5443
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: tls
+          secret:
+            secretName: git-test-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-test
+  namespace: mcp-evals
+  labels:
+    app: git-test
+    security.eval.io/component: test-fixture
+  annotations:
+    security.eval.io/network-path: "test fixture — clone-phase only"
+spec:
+  type: ClusterIP
+  selector:
+    app: git-test
+  ports:
+    - name: https
+      port: 443
+      targetPort: 5443
+      protocol: TCP
+---
+# Ingress into the fixture: only evaluation pods may reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: git-test-ingress
+  namespace: mcp-evals
+spec:
+  podSelector:
+    matchLabels:
+      app: git-test
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5443
+---
+# Egress from evaluation pods in clone phase to the fixture (additive to the
+# static clone-phase policy, which only opens public 443 on purpose).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: evaluation-pod-clone-phase-git-test
+  namespace: mcp-evals
+spec:
+  podSelector:
+    matchLabels:
+      security.eval.io/role: evaluation-pod
+      security.eval.io/net-phase: clone
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: git-test
+      ports:
+        # 5443 = post-DNAT pod port (kindnet/Calico match post-DNAT);
+        # 443 = service port, kept for CNIs matching pre-DNAT.
+        - protocol: TCP
+          port: 5443
+        - protocol: TCP
+          port: 443

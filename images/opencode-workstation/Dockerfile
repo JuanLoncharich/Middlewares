@@ -3,8 +3,9 @@
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl ca-certificates jq \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git curl ca-certificates jq openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd
 
 # OpenCode AI CLI
 RUN npm install -g opencode-ai
@@ -12,7 +13,7 @@ RUN npm install -g opencode-ai
 # Non-root user (the base image's `node` user already owns uid 1000; replace
 # it with `programmer` so the required name/uid pair is available).
 RUN userdel --remove node \
-    && useradd --create-home --uid 1000 programmer
+    && useradd --create-home --shell /bin/bash --uid 1000 programmer
 
 # Config template rewritten at container start by the entrypoint.
 COPY opencode.json.template /home/programmer/.config/opencode/opencode.json.template

@@ -22,6 +22,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -540,6 +541,27 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 	defer resp.Body.Close()
 	log.Printf("served via upstream %s (status %d)", servedBy, resp.StatusCode)
 
+	isInference := markerApplies(incoming)
+	isSSE := strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+
+	// Non-streaming JSON inference response: buffer (bounded), append the
+	// marker to the last message, forward.
+	if responseMarkerEnabled() && isInference && !isSSE {
+		limited := io.LimitReader(resp.Body, maxBodyBytes)
+		bodyBytes, err := io.ReadAll(limited)
+		if err != nil {
+			http.Error(w, "reading upstream response failed", http.StatusBadGateway)
+			return
+		}
+		bodyBytes = appendMarkerToJSON(bodyBytes)
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+		w.Header().Set("X-Occludra-Proxy", "true")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(bodyBytes)
+		return
+	}
+
 	for name, values := range resp.Header {
 		if isHopByHop(name) || strings.EqualFold(name, "Content-Length") {
 			continue
@@ -548,8 +570,28 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			w.Header().Add(name, v)
 		}
 	}
+	if responseMarkerEnabled() && isInference {
+		w.Header().Set("X-Occludra-Proxy", "true")
+	}
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
+	if isSSE && responseMarkerEnabled() && isInference {
+		// Line-oriented pass-through with terminal-event interception —
+		// the stream stays live, only the final event is held back long
+		// enough to inject the marker before it.
+		injector := newSSEMarkerInjector(isInference)
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxBodyBytes)
+		for scanner.Scan() {
+			for _, out := range injector.transform(scanner.Text()) {
+				fmt.Fprintln(w, out)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		return
+	}
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := resp.Body.Read(buf)
@@ -565,6 +607,224 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			return
 		}
 	}
+}
+
+// responseMarker is the append-detection feature: every response that comes
+// back THROUGH the gateway gets " (proxy)" appended to the last message, so
+// clients can visually verify their LLM traffic never went direct to the
+// provider. Controlled by OCCLUDRA_RESPONSE_MARKER (default on).
+const responseMarkerText = " (proxy)"
+
+func responseMarkerEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("OCCLUDRA_RESPONSE_MARKER"))
+	return raw == "" || !(raw == "0" || raw == "false" || raw == "no" || raw == "off")
+}
+
+// markerApplies reports whether the request path is one whose responses
+// carry model text (the two inference wire formats; everything else —
+// /models, health, etc. — is passed through untouched).
+func markerApplies(incoming string) bool {
+	return strings.HasSuffix(incoming, "/chat/completions") || strings.HasSuffix(incoming, "/responses")
+}
+
+// appendMarkerToJSON mutates a non-streaming inference response in place:
+// chat.completions → choices[last].message.content; responses API → the last
+// output_text entry. Unknown shapes pass through unchanged.
+func appendMarkerToJSON(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	changed := false
+	if choices, ok := payload["choices"].([]any); ok && len(choices) > 0 {
+		if choice, ok := choices[len(choices)-1].(map[string]any); ok {
+			if msg, ok := choice["message"].(map[string]any); ok {
+				if content, ok := msg["content"].(string); ok {
+					msg["content"] = content + responseMarkerText
+					changed = true
+				}
+			}
+		}
+	}
+	if outputs, ok := payload["output"].([]any); ok && len(outputs) > 0 {
+		for i := len(outputs) - 1; i >= 0 && !changed; i-- {
+			item, ok := outputs[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			contents, ok := item["content"].([]any)
+			if !ok {
+				continue
+			}
+			for j := len(contents) - 1; j >= 0 && !changed; j-- {
+				part, ok := contents[j].(map[string]any)
+				if !ok || part["type"] != "output_text" {
+					continue
+				}
+				if text, ok := part["text"].(string); ok {
+					part["text"] = text + responseMarkerText
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// sseMarkerInjector rewrites a chat-completions/responses SSE stream so the
+// LAST text the client renders carries the marker. It never buffers the
+// stream: lines pass through immediately except the terminal events, which
+// are intercepted and preceded by an injected marker event.
+//
+//   - chat.completions: before `data: [DONE]` an extra chunk with a content
+//     delta is emitted.
+//   - responses API: before the `response.completed` event, an
+//     output_text.delta echoing the item ids of the previous real delta is
+//     emitted, AND the completed snapshot's final text is mutated in place.
+type sseMarkerInjector struct {
+	inferencePath bool
+	// last real output_text.delta fields, reused for the injected one.
+	itemID      string
+	outputIndex any
+	contentInd  any
+	sawDeltas   bool
+	// completedSeen: the `event: response.completed` line was just passed —
+	// its data line must be mutated but NOT re-injected (the marker delta
+	// goes out exactly once, before the event block).
+	completedSeen bool
+}
+
+func newSSEMarkerInjector(inferencePath bool) *sseMarkerInjector {
+	return &sseMarkerInjector{inferencePath: inferencePath}
+}
+
+// transform receives one line (with its trailing newline already stripped)
+// and returns zero or more lines to write, in order.
+func (m *sseMarkerInjector) transform(line string) []string {
+	if !m.inferencePath {
+		return []string{line}
+	}
+	trimmed := strings.TrimSpace(line)
+
+	// Track the ids of the most recent real text delta (responses API).
+	if data, ok := strings.CutPrefix(trimmed, "data:"); ok {
+		var ev struct {
+			Type        string `json:"type"`
+			ItemID      string `json:"item_id"`
+			OutputIndex any    `json:"output_index"`
+			ContentInd  any    `json:"content_index"`
+			Delta       any    `json:"delta"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(data)), &ev) == nil && ev.Type == "response.output_text.delta" {
+			m.itemID, m.outputIndex, m.contentInd, m.sawDeltas = ev.ItemID, ev.OutputIndex, ev.ContentInd, true
+		}
+	}
+
+	isChatDone := trimmed == "data: [DONE]"
+	isCompletedEventLine := strings.HasPrefix(trimmed, "event: response.completed")
+	isCompletedDataLine := strings.HasPrefix(trimmed, "data: {") && strings.Contains(trimmed, `"type":"response.completed"`)
+	if !isChatDone && !isCompletedEventLine && !isCompletedDataLine {
+		m.completedSeen = false
+		return []string{line}
+	}
+
+	var injected []string
+	if isChatDone {
+		chunk := map[string]any{
+			"id":      "occludra-proxy-marker",
+			"object":  "chat.completion.chunk",
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": responseMarkerText}, "finish_reason": nil}},
+		}
+		b, _ := json.Marshal(chunk)
+		injected = append(injected, "data: "+string(b), "")
+	} else if isCompletedEventLine {
+		// responses API: emit the marker delta before the completed event
+		// block, then fall through so the snapshot data line below is
+		// mutated in place.
+		if m.sawDeltas || m.itemID != "" {
+			delta := map[string]any{
+				"type":          "response.output_text.delta",
+				"item_id":       m.itemID,
+				"output_index":  m.outputIndex,
+				"content_index": m.contentInd,
+				"delta":         responseMarkerText,
+			}
+			if m.itemID == "" {
+				delete(delta, "item_id")
+			}
+			b, _ := json.Marshal(delta)
+			injected = append(injected, "event: response.output_text.delta", "data: "+string(b), "")
+		}
+		m.completedSeen = true
+		return append(injected, line)
+	} else if !m.completedSeen {
+		// data line carrying response.completed without an event line
+		// (stream style without event framing): inject once, then mutate.
+		if m.sawDeltas || m.itemID != "" {
+			delta := map[string]any{
+				"type":          "response.output_text.delta",
+				"item_id":       m.itemID,
+				"output_index":  m.outputIndex,
+				"content_index": m.contentInd,
+				"delta":         responseMarkerText,
+			}
+			if m.itemID == "" {
+				delete(delta, "item_id")
+			}
+			b, _ := json.Marshal(delta)
+			injected = append(injected, "event: response.output_text.delta", "data: "+string(b), "")
+		}
+	}
+	m.completedSeen = false
+
+	if isCompletedDataLine {
+		// Mutate the completed snapshot's final text too: clients that take
+		// the authoritative text from response.completed see the marker
+		// even if they drop the injected orphan delta.
+		var snapshot map[string]any
+		data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if json.Unmarshal([]byte(data), &snapshot) == nil {
+			if snapResp, ok := snapshot["response"].(map[string]any); ok {
+				if outputs, ok := snapResp["output"].([]any); ok {
+					for i := len(outputs) - 1; i >= 0; i-- {
+						item, ok := outputs[i].(map[string]any)
+						if !ok {
+							continue
+						}
+						contents, ok := item["content"].([]any)
+						if !ok {
+							continue
+						}
+						done := false
+						for j := len(contents) - 1; j >= 0 && !done; j-- {
+							part, ok := contents[j].(map[string]any)
+							if !ok || part["type"] != "output_text" {
+								continue
+							}
+							if text, ok := part["text"].(string); ok {
+								part["text"] = text + responseMarkerText
+								done = true
+							}
+						}
+						if done {
+							if b, err := json.Marshal(snapshot); err == nil {
+								line = "data: " + string(b)
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	return append(injected, line)
 }
 
 func isHopByHop(name string) bool {

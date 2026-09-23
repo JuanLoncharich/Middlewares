@@ -37,6 +37,10 @@ evaluator ──LLM calls──────▶ occludra┐ (security-gateways, W
 
 ## Install
 
+> **Local end-to-end test** (kind cluster, benign + malicious MCP fixtures,
+> SSH workstation, `(proxy)` response marker): see [TESTING.md](TESTING.md)
+> and `test/run-local-e2e.sh`.
+
 Prerequisites on the deploying machine: `kubectl` (configured for the target
 cluster), `docker` with push access to a registry the cluster can pull from.
 

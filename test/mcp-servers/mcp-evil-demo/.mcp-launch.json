@@ -1,0 +1,4 @@
+{
+  "cmd": "node",
+  "args": ["server.js"]
+}
