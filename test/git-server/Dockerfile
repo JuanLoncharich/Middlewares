@@ -5,9 +5,11 @@
 # test/git-server.yaml limits ingress to the evaluation namespace).
 FROM alpine:3.20
 RUN apk add --no-cache git python3
-COPY server.py /usr/local/bin/git-test-server.py
-COPY mcp-benign-demo/ /tmp/src/mcp-benign-demo/
-COPY mcp-evil-demo/ /tmp/src/mcp-evil-demo/
+# Build context is test/ (the fixtures live in test/mcp-servers):
+#   docker build -f test/git-server/Dockerfile test/
+COPY git-server/server.py /usr/local/bin/git-test-server.py
+COPY mcp-servers/mcp-benign-demo/ /tmp/src/mcp-benign-demo/
+COPY mcp-servers/mcp-evil-demo/ /tmp/src/mcp-evil-demo/
 # Build bare repos and generate the dumb-protocol metadata; serving is smart
 # HTTP (server.py bridges git-http-backend) so `clone --depth 1` works.
 RUN set -eux; \

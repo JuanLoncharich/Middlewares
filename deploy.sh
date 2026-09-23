@@ -86,6 +86,14 @@ kubectl kustomize config/default \
         -e "s|https://netbird.example.com:443|$NETBIRD_MANAGEMENT_URL|g" \
   | kubectl apply -f -
 kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager MESH_ENFORCE="$MESH_ENFORCE" >/dev/null
+# Air-gap deploys (images imported straight into the nodes' containerd store,
+# hack/import-images-to-nodes.sh) must set IMAGE_PULL_POLICY=IfNotPresent:
+# with Always the kubelet still dials the registry and ImagePullBackOffs.
+if [ -n "${IMAGE_PULL_POLICY:-}" ]; then
+  kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager IMAGE_PULL_POLICY="$IMAGE_PULL_POLICY" >/dev/null
+  kubectl -n mcp-eval-system patch deploy/mcp-eval-controller-manager --type=json \
+    -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"'"$IMAGE_PULL_POLICY"'"}]'
+fi
 kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager --timeout=180s
 
 log "Applying evaluation namespace, NetworkPolicies, agent personas and sample MCPServer (namespace mcp-evals)"
@@ -141,9 +149,11 @@ if [ "$SKIP_SECRET" != "1" ]; then
 fi
 
 # Rewrite the gateway image references for this deployment (stdin → stdout).
+# With IMAGE_PULL_POLICY set (air-gap), gateways must not pull either.
 substitute_gateway_images() {
   sed -e "s|ghcr.io/security-eval/occludra-gateway:latest|$OCCLUDRA_IMG|g" \
-      -e "s|image: deadbits/vigil-llm:latest|image: $VIGIL_IMG|g"
+      -e "s|image: deadbits/vigil-llm:latest|image: $VIGIL_IMG|g" \
+      ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"}
 }
 apply_gateway_manifest() {
   substitute_gateway_images < "$1" | kubectl apply -f -

@@ -47,7 +47,7 @@ kubectl -n "$NAMESPACE" create secret generic mcp-git-test-ca \
 
 # ---- 2. build + push the git server image (fixtures baked in)
 log "Building git-test-server image ($GIT_IMAGE)"
-docker build -t "$GIT_IMAGE" test/git-server
+docker build -f test/git-server/Dockerfile -t "$GIT_IMAGE" test
 docker push "$GIT_IMAGE"
 
 # ---- 3. deploy the git server + fixture NetworkPolicies

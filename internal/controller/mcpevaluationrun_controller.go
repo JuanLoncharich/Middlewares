@@ -115,6 +115,11 @@ type ImageConfig struct {
 	RunnerServiceAccount string
 	LLMSecretName        string
 	LLMSecretKey         string
+	// ImagePullPolicy for every container of the evaluation Job. Always
+	// (default) suits registry-backed deploys; IfNotPresent is required for
+	// air-gap clusters where images were imported straight into the nodes'
+	// containerd store (hack/import-images-to-nodes.sh).
+	ImagePullPolicy corev1.PullPolicy
 
 	// MeshEnforce enables the NetBird zero-trust wiring: a userspace netbird
 	// sidecar per evaluation pod, mesh env vars on the evaluator, and a
@@ -186,6 +191,7 @@ func ImageConfigFromEnv() ImageConfig {
 		RunnerServiceAccount: envOr("RUNNER_SERVICE_ACCOUNT", "mcp-eval-runner"),
 		LLMSecretName:        envOr("LLM_SECRET_NAME", "llm-provider-credentials"),
 		LLMSecretKey:         envOr("LLM_SECRET_KEY", "ANTHROPIC_API_KEY"),
+		ImagePullPolicy:      imagePullPolicyFromEnv(),
 
 		MeshEnforce:          meshEnforce,
 		NetBirdImage:         envOr("NETBIRD_IMAGE", "netbirdio/netbird:latest"),
@@ -206,6 +212,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// imagePullPolicyFromEnv reads IMAGE_PULL_POLICY (Always by default).
+// IfNotPresent is required on air-gap clusters whose images were imported
+// straight into the nodes' containerd store (hack/import-images-to-nodes.sh);
+// invalid values fall back to Always.
+func imagePullPolicyFromEnv() corev1.PullPolicy {
+	switch envOr("IMAGE_PULL_POLICY", string(corev1.PullAlways)) {
+	case string(corev1.PullIfNotPresent):
+		return corev1.PullIfNotPresent
+	case string(corev1.PullNever):
+		return corev1.PullNever
+	default:
+		return corev1.PullAlways
+	}
 }
 
 // envFlag parses a boolean env var; unparsable values keep the default.
@@ -1118,7 +1139,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	cloner := corev1.Container{
 		Name:            containerCloner,
 		Image:           r.Images.ClonerImage,
-		ImagePullPolicy: corev1.PullAlways,
+		ImagePullPolicy: r.Images.ImagePullPolicy,
 		Env:             clonerEnv,
 		VolumeMounts:    clonerMounts,
 		SecurityContext: lockedSecurityContext(evaluatorUID),
@@ -1138,7 +1159,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	target := corev1.Container{
 		Name:            containerTarget,
 		Image:           r.Images.TargetImage,
-		ImagePullPolicy: corev1.PullAlways,
+		ImagePullPolicy: r.Images.ImagePullPolicy,
 		Env: []corev1.EnvVar{
 			{Name: "MCP_TRANSPORT", Value: transport},
 			{Name: "MCP_PORT", Value: fmt.Sprintf("%d", targetPort)},
@@ -1174,7 +1195,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	evaluator := corev1.Container{
 		Name:            containerEvaluator,
 		Image:           r.Images.EvaluatorImage,
-		ImagePullPolicy: corev1.PullAlways,
+		ImagePullPolicy: r.Images.ImagePullPolicy,
 		Env: []corev1.EnvVar{
 			{Name: "RUN_NAME", Value: run.Name},
 			{
@@ -1321,7 +1342,7 @@ func (r *MCPEvaluationRunReconciler) buildNetBirdSidecar(run *securityv1alpha1.M
 		RestartPolicy:   ptr.To(corev1.ContainerRestartPolicyAlways),
 		Name:            containerNetBird,
 		Image:           r.Images.NetBirdImage,
-		ImagePullPolicy: corev1.PullAlways,
+		ImagePullPolicy: r.Images.ImagePullPolicy,
 		Env: []corev1.EnvVar{
 			{Name: "NETBIRD_MANAGEMENT_URL", Value: r.Images.NetBirdManagementURL},
 			{
