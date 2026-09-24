@@ -30,6 +30,15 @@
 #   IN_CLUSTER_REGISTRY=1        deploy the in-cluster registry (manifests/registry.yaml)
 #   DEPLOY_NETBIRD_CP=1          self-host the NetBird control plane in-cluster (requires an OIDC IdP;
 #                                see manifests/netbird-controlplane.yaml). Also generates the CP secrets.
+#   ---- vector DB (distributed Chroma over MinIO) ----
+#   DEPLOY_VECTOR_DB=1           deploy the distributed Chroma cluster (namespace `chroma`):
+#                                SysDB coordinator + Rust SysDB + Log Service (WAL) + Query Nodes
+#                                + Compactors + Work Queue + Garbage Collector, with MinIO object
+#                                storage and a Postgres-backed catalog. Vigil's vector scanner
+#                                queries its frontend for prompt-injection similarity.
+#   CHROMA_IMG_TAG               chroma component image tag (short commit SHA from the `chromadb`
+#                                Docker Hub org; keep in vintage with the vendored chart).
+#   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -44,6 +53,10 @@ AUTOSCALE_METRICS="${AUTOSCALE_METRICS:-0}"
 DEPLOY_AUTOSCALER="${DEPLOY_AUTOSCALER:-0}"
 IN_CLUSTER_REGISTRY="${IN_CLUSTER_REGISTRY:-0}"
 DEPLOY_NETBIRD_CP="${DEPLOY_NETBIRD_CP:-0}"
+DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
+CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
+SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
+LOADER_IMG="$IMG_REGISTRY/vigil-corpus-loader:$IMG_TAG"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_IMG="${VIGIL_IMG:-deadbits/vigil-llm:latest}"
@@ -69,15 +82,23 @@ if [ "$SKIP_BUILD" != "1" ]; then
     docker push "$OCCLUDRA_IMG"
     case "$VIGIL_IMG" in
       *vigil-stub*)
-        log "Building Vigil stub image"
+        log "Building Vigil stub image (heuristics + ONNX MiniLM for the vector scanner)"
         docker build -t "$VIGIL_IMG" images/vigil-stub
         docker push "$VIGIL_IMG"
         ;;
     esac
   fi
+  if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
+    log "Building Vigil corpus loader image"
+    docker build -t "$LOADER_IMG" images/vigil-corpus-loader
+    docker push "$LOADER_IMG"
+  fi
 fi
 
 log "Installing CRDs, RBAC and operator (namespace mcp-eval-system)"
+# The PriorityClass is referenced by the operator pod spec — it must exist
+# before the Deployment is applied (fresh-cluster ordering bug).
+kubectl apply -f manifests/priorityclass.yaml
 kubectl kustomize config/default \
   | sed -e "s|ghcr.io/security-eval/mcp-eval-operator:latest|$IMG|g" \
         -e "s|ghcr.io/security-eval/mcp-cloner:latest|$CLONER_IMG|g" \
@@ -183,6 +204,61 @@ for doc in docs:
     print('---')
 "
 }
+
+# ---------------------------------------------------------------------------
+# Vector DB: distributed Chroma (SysDB coordinator + Rust SysDB + Log Service
+# WAL + Compactors + Query Nodes + Work Queue + GC) over MinIO object storage.
+# Vigil's vector scanner queries the frontend; topology docs in ARCHITECTURE.md,
+# manifests in manifests/chroma/.
+# ---------------------------------------------------------------------------
+if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
+  log "Deploying vector-DB substrate (MinIO, Postgres, OTel) into namespace chroma"
+  # The substrate manifests and the chart both target namespace `chroma`;
+  # create it up front so apply order never matters. The PriorityClass is
+  # referenced by MinIO/Postgres (and the gateways further down).
+  kubectl create namespace chroma --dry-run=client -o yaml | kubectl apply -f -
+  kubectl apply -f manifests/priorityclass.yaml
+  kubectl apply -f manifests/chroma/minio.yaml \
+                 -f manifests/chroma/postgres.yaml \
+                 -f manifests/chroma/otel-collector.yaml \
+                 -f manifests/chroma/networkpolicy.yaml
+  for dep in minio postgres otel-collector; do
+    kubectl -n chroma rollout status "deploy/$dep" --timeout=300s
+  done
+
+  log "Rendering + applying distributed Chroma (component images chromadb/*:$CHROMA_IMG_TAG)"
+  # CRDs first: the MemberList custom resources in the chart cannot be
+  # applied until the chroma.cluster CRD is established.
+  kubectl apply -f manifests/chroma/chart/crds/
+  helm template distributed-chroma manifests/chroma/chart \
+    -f manifests/chroma/values-mcp-eval.yaml \
+    --set-file rustFrontendService.configuration=manifests/chroma/frontend-config.yaml \
+    --set-file rustLogService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file queryService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file compactionService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file garbageCollector.configuration=manifests/chroma/worker-config.yaml \
+    --set-file rustSysdbService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file workQueueService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file fnConsumer.configuration=manifests/chroma/worker-config.yaml \
+    | sed "s|__CHROMA_IMG_TAG__|$CHROMA_IMG_TAG|g" \
+    | kubectl apply -f -
+  for dep in sysdb rust-sysdb-service rust-frontend-service work-queue-service fn-consumer; do
+    kubectl -n chroma rollout status "deploy/$dep" --timeout=600s
+  done
+  for sts in rust-log-service query-service compaction-service garbage-collector; do
+    kubectl -n chroma rollout status "statefulset/$sts" --timeout=600s
+  done
+
+  if [ "$SKIP_CORPUS_LOAD" != "1" ]; then
+    log "Loading Vigil embedding corpora into Chroma (Job vigil-corpus-loader)"
+    sed "s|__LOADER_IMG__|$LOADER_IMG|g" manifests/chroma/corpus-loader-job.yaml \
+      | kubectl apply -f -
+    # First (cold) run downloads the datasets from HuggingFace.
+    kubectl -n chroma wait --for=condition=complete job/vigil-corpus-loader --timeout=900s \
+      || { echo "ERROR: corpus loader did not complete — logs: kubectl -n chroma logs job/vigil-corpus-loader" >&2; exit 1; }
+  fi
+  echo "Vector DB up: http://rust-frontend-service.chroma.svc.cluster.local:8000 (namespace chroma)"
+fi
 
 if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
   log "Deploying security gateways (Occludra, Vigil, NetBird) into security-gateways (mesh=$MESH_ENFORCE)"

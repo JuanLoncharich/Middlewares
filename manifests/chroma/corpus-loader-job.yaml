@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Corpus loader Job — downloads Vigil's embedding corpora from HuggingFace
+# (deadbits org) and pushes them into the distributed Chroma collections via
+# the frontend REST API.
+#
+# deploy.sh builds/pushes the image and applies this manifest with
+# __LOADER_IMG__ substituted. Idempotent: collections holding vectors are
+# skipped (FORCE_LOAD=1 to reload); re-applying after a completed Job
+# re-runs it only when the spec changes (deploy.sh deletes+recreates it).
+#
+# Corpus -> collection mapping (all-MiniLM-L6-v2, 384-dim):
+#   deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2 -> vigil_instruction_bypass
+#   deadbits/vigil-jailbreak-all-MiniLM-L6-v2          -> vigil_jailbreak
+#
+# NetworkPolicy: the only pod in `chroma` allowed HTTPS egress is this Job
+# (see networkpolicy.yaml).
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vigil-corpus-loader
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: vigil-corpus-loader
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vigil-corpus-loader
+        app.kubernetes.io/part-of: chroma-distributed
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loader
+          image: __LOADER_IMG__
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CHROMA_URL
+              value: http://rust-frontend-service.chroma.svc.cluster.local:8000
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            # 8800+ entries x 384 floats parsed in memory, plus batch state.
+            limits:
+              cpu: "1"
+              memory: 1Gi

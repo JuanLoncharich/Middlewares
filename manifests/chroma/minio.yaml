@@ -1,0 +1,140 @@
+# ---------------------------------------------------------------------------
+# MinIO — the S3-compatible object store of the distributed Chroma cluster.
+#
+# This is the "Object Storage" plane of the architecture: compacted vector
+# indices (HNSW/SPANN segments), WAL fragments and the massive metadata live
+# here instead of node-local PVCs, which is what makes Query Nodes stateless.
+#
+# Endpoint contract (hard-coded by chroma's Rust storage client when a
+# worker config says `credentials: "Minio"`):
+#   endpoint  http://minio.chroma:9000   (service name `minio`, ns `chroma`)
+#   keys      access `minio` / secret `minio123`  -> DO NOT change the Secret
+#   region    us-east-1, force-path-style; workers create the
+#             `chroma-storage` bucket themselves on startup.
+#
+# Unlike chroma's dev manifest (emptyDir) this stores data on a PVC so the
+# vector index survives MinIO pod reschedules.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/part-of: chroma-distributed
+type: Opaque
+stringData:
+  # Fixed by chroma's `credentials: "Minio"` client profile — see header.
+  access-key-id: minio
+  secret-access-key: minio123
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: object-storage
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  # Recreate, not RollingUpdate: the PVC is RWO and must detach before the
+  # new pod attaches it.
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: object-storage
+        app.kubernetes.io/part-of: chroma-distributed
+    spec:
+      # Object storage is the one stateful single point of this plane; keep
+      # it running through node-pressure evictions.
+      priorityClassName: mcp-eval-critical
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+      containers:
+        - name: minio
+          # Same release chroma pins in k8s/test/minio.yaml, by digest.
+          image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - /storage
+            - --console-address=:9005
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key-id
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-access-key
+          ports:
+            - name: http
+              containerPort: 9000
+            - name: console
+              containerPort: 9005
+          volumeMounts:
+            - name: data
+              mountPath: /storage
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: http
+            periodSeconds: 15
+            failureThreshold: 4
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http

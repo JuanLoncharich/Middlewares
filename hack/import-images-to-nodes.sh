@@ -34,6 +34,22 @@ if [ ${#IMAGES[@]} -eq 0 ]; then
     ghcr.io/security-eval/mcp-evaluator:latest
     ghcr.io/security-eval/occludra-gateway:latest
     ghcr.io/security-eval/vigil-stub:latest
+    ghcr.io/security-eval/vigil-corpus-loader:latest
+    # Vector DB plane (see manifests/chroma/): keep CHROMA_IMG_TAG in sync
+    # with deploy.sh / manifests/chroma/values-mcp-eval.yaml.
+    chromadb/sysdb-service:dff1d8a
+    chromadb/sysdb-migration:dff1d8a
+    chromadb/rust-sysdb-service:dff1d8a
+    chromadb/rust-frontend-service-oss:dff1d8a
+    chromadb/rust-log-service:dff1d8a
+    chromadb/query-service:dff1d8a
+    chromadb/compactor-service:dff1d8a
+    chromadb/work-queue-service:dff1d8a
+    chromadb/fn-consumer-service:dff1d8a
+    chromadb/garbage-collector-service:dff1d8a
+    quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    postgres:15
+    otel/opentelemetry-collector:0.107.0
   )
 fi
 

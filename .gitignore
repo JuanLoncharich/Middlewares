@@ -7,3 +7,4 @@ config/samples/git-credentials-secret.yaml
 *.log
 .DS_Store
 .zcode/
+__pycache__/

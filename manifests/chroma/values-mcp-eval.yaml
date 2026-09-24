@@ -1,0 +1,247 @@
+# ---------------------------------------------------------------------------
+# distributed Chroma — platform values for the mcp-eval security platform.
+#
+# Rendered by deploy.sh:
+#   helm template distributed-chroma manifests/chroma/chart \
+#        -f manifests/chroma/values-mcp-eval.yaml \
+#        --set-file rustFrontendService.configuration=manifests/chroma/frontend-config.yaml \
+#        --set-file <every worker service>.configuration=manifests/chroma/worker-config.yaml
+#
+# The topology is the one chroma's own Tilt environment runs: Go SysDB
+# coordinator (Postgres-backed catalog) + Rust SysDB + Log Service (WAL) +
+# Query Nodes + Compactors + Work Queue + Fn Consumer + Garbage Collector,
+# all sharing MinIO (S3 API, service `minio.chroma:9000`) as object storage.
+#
+# WHY NAMESPACE `chroma`: the worker/frontend configuration files hard-code
+# chroma's own service DNS names (sysdb.chroma, rust-log-service.chroma,
+# minio.chroma:9000, memberlist CRs in `chroma`). Renaming the namespace
+# means forking those configs too.
+#
+# IMAGE TAG: chroma's CI publishes per-commit images to Docker Hub org
+# `chromadb` tagged with the short commit SHA. __CHROMA_IMG_TAG__ is
+# substituted by deploy.sh (CHROMA_IMG_TAG). Repo → image mapping (Docker
+# Hub names differ from chart value names on purpose):
+#   sysdb               -> chromadb/sysdb-service
+#   rustLogService      -> chromadb/rust-log-service
+#   rustFrontendService -> chromadb/rust-frontend-service-oss
+#   queryService        -> chromadb/query-service
+#   compactionService   -> chromadb/compactor-service
+#   garbageCollector    -> chromadb/garbage-collector-service
+#   workQueueService    -> chromadb/work-queue-service
+#   fnConsumer          -> chromadb/fn-consumer-service
+#   rustSysdbService    -> chromadb/rust-sysdb-service
+#   sysdbMigration      -> chromadb/sysdb-migration
+#
+# CPU COMPATIBILITY (empirical, 2026-09-24): some recent main-branch builds
+# (observed for 39d597e, 0ca571e, 93ca545) die instantly with SIGILL (exit
+# 132) on CPUs lacking the vector ISA those binaries were built against,
+# while `dff1d8a` (2026-09-22) runs on the same host. When bumping the tag,
+# smoke-test first: `docker run --rm chromadb/query-service:<sha>` must NOT
+# exit 132 (101/124 = runs fine — panic-on-missing-config / serving).
+# ---------------------------------------------------------------------------
+namespace: 'chroma'
+
+# ---------------------------------------------------------- SysDB coordinator
+# Go binary `coordinator`, Postgres-backed catalog. The s3-* flags seed the
+# cluster-wide storage config handed to every worker; `create-bucket-if-not-
+# exists` makes the coordinator create the `chroma-storage` bucket in MinIO
+# on first boot (the Rust workers also self-create it, belt and braces).
+sysdb:
+  image:
+    repository: 'chromadb/sysdb-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 1
+  flags:
+    version-file-enabled: true
+    s3-endpoint: "http://minio.chroma:9000"
+    s3-access-key-id: "minio"
+    s3-secret-access-key: "minio123"
+    s3-force-path-style: true
+    create-bucket-if-not-exists: true
+    kubernetes-namespace: chroma
+  env:
+    - name: OPTL_TRACING_ENDPOINT
+      # Template quirk: env values are rendered with `{{ .value | nindent }}`,
+      # so the value must literally be the mapping line.
+      value: 'value: "otel-collector.chroma.svc.cluster.local:4317"' 
+  resources:
+    limits:
+      cpu: '1000m'
+      memory: '512Mi'
+    requests:
+      cpu: '100m'
+      memory: '128Mi'
+
+# --------------------------------------------------- SysDB migration (Job)
+# Alembic migrations for the coordinator's Postgres catalog. Job name embeds
+# the image tag, so bumping CHROMA_IMG_TAG re-runs it automatically.
+sysdbMigration:
+  image:
+    repository: 'chromadb/sysdb-migration'
+    tag: '__CHROMA_IMG_TAG__'
+  username: chroma
+  password: chroma
+  netloc: postgres
+  port: 5432
+  dbName: sysdb
+  sslmode: disable
+
+# ------------------------------------------------------------- Rust SysDB
+# The Rust rewrite of the catalog; every Rust worker's config points at it
+# (mcmr_sysdb) and the frontend migrates default_tenant onto it.
+rustSysdbService:
+  image:
+    repository: 'chromadb/rust-sysdb-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: '500m'
+      memory: '384Mi'
+    requests:
+      cpu: '100m'
+      memory: '128Mi'
+
+# ------------------------------------------------- Frontend (REST gateway)
+# The client entrypoint: port 8000, API v2 (POST /api/v2/...). Vigil's
+# vector scanner and the corpus loader both talk to this and to nothing else.
+rustFrontendService:
+  image:
+    repository: 'chromadb/rust-frontend-service-oss'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 1
+  # The frontend binary is the shared `chroma` CLI; in distributed mode it is
+  # driven by a config file (same as chroma's values.dev.yaml).
+  command: '["chroma", "run", "$(CONFIG_PATH)"]'
+  otherEnvConfig: |
+    - name: RUST_BACKTRACE
+      value: "1"
+  resources:
+    limits:
+      cpu: '1000m'
+      memory: '1Gi'
+    requests:
+      cpu: '250m'
+      memory: '256Mi'
+
+# ------------------------------------------------------------ Log Service
+rustLogService:
+  image:
+    repository: 'chromadb/rust-log-service'
+    tag: '__CHROMA_IMG_TAG__'
+  cache:
+    hostPath: '/local/cache/chroma-log-service'
+    type: DirectoryOrCreate
+    mountPath: '/cache/'
+    additionalVolumes: []
+  resources:
+    limits:
+      cpu: '500m'
+      memory: '768Mi'
+    requests:
+      cpu: '200m'
+      memory: '256Mi'
+
+# ------------------------------------------------------------- Query nodes
+# Stateless search replicas; scale replicaCount with read traffic.
+queryService:
+  image:
+    repository: 'chromadb/query-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 2
+  env:
+    - name: RUST_BACKTRACE
+      value: 'value: "1"' 
+  cache:
+    hostPath: '/local/cache/chroma-query-service'
+    type: DirectoryOrCreate
+    mountPath: '/cache/'
+    additionalVolumes: []
+  resources:
+    limits:
+      cpu: '1000m'
+      memory: '1Gi'
+    requests:
+      cpu: '200m'
+      memory: '384Mi'
+
+# --------------------------------------------------------------- Compactors
+compactionService:
+  image:
+    repository: 'chromadb/compactor-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 2
+  env:
+    - name: RUST_BACKTRACE
+      value: 'value: "1"' 
+  cache:
+    hostPath: '/local/cache/chroma-compaction-service'
+    type: DirectoryOrCreate
+    mountPath: '/cache/'
+    additionalVolumes: []
+  resources:
+    limits:
+      cpu: '1000m'
+      memory: '1536Mi'
+    requests:
+      cpu: '200m'
+      memory: '384Mi'
+
+# ----------------------------------------------------- Work queue + consumer
+workQueueService:
+  image:
+    repository: 'chromadb/work-queue-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 1
+  env:
+    - name: RUST_BACKTRACE
+      value: 'value: "1"' 
+  resources:
+    limits:
+      cpu: '500m'
+      memory: '512Mi'
+    requests:
+      cpu: '100m'
+      memory: '128Mi'
+
+fnConsumer:
+  image:
+    repository: 'chromadb/fn-consumer-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 1
+  env:
+    - name: RUST_BACKTRACE
+      value: 'value: "1"' 
+  resources:
+    limits:
+      cpu: '500m'
+      memory: '768Mi'
+    requests:
+      cpu: '100m'
+      memory: '192Mi'
+
+# --------------------------------------------------------- Garbage collector
+garbageCollector:
+  image:
+    repository: 'chromadb/garbage-collector-service'
+    tag: '__CHROMA_IMG_TAG__'
+  replicaCount: 1
+  cache:
+    hostPath: '/local/cache/chroma-garbage-collector'
+    type: DirectoryOrCreate
+    mountPath: '/cache/'
+    additionalVolumes: []
+  resources:
+    limits:
+      cpu: '500m'
+      memory: '1Gi'
+    requests:
+      cpu: '100m'
+      memory: '256Mi'
+
+# --------------------------------------------------------------------------
+# Explicitly disabled, hosted-only or not needed here:
+foundationService:
+  enabled: false
+mdacService:
+  enabled: false

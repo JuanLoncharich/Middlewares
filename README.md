@@ -31,6 +31,7 @@ evaluator ──LLM calls──────▶ occludra┐ (security-gateways, W
 | `config/manager/` | operator Deployment (namespace `mcp-eval-system`) |
 | `config/samples/` | namespace, NetworkPolicies, reference sandbox Pod, four agent personas, `MCPServer` sample |
 | `manifests/` | Vigil-LLM, Occludra and NetBird deployments (namespace `security-gateways`) — the three security layers |
+| `manifests/chroma/` | Distributed Chroma vector database over MinIO (namespace `chroma`): vendored official chart, values, worker configs, MinIO/Postgres/OTel substrate, NetworkPolicies and the Vigil corpus-loader Job |
 | `runner/` | TypeScript evaluator (`@opencode-ai/sdk` + `@kubernetes/client-node`) |
 | `images/cloner/` | init-container image: git + npm/uv/go toolchain detection |
 | `images/target/` | sandbox image: supervisor that binds the server's stdio to the IPC FIFOs |
@@ -118,6 +119,14 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
   the CRD status/termination message. `VIGIL_ENFORCE=monitor` downgrades
   detections to log+finding; in the default `strict` mode an *unreachable*
   scanner also fails the run (fail-closed). Set `VIGIL_ENABLED=0` to disable.
+  Detection is two-layered: deterministic heuristics plus a **vector
+  similarity scan against the distributed Chroma cluster**
+  (`manifests/chroma/`, namespace `chroma`): SysDB coordinator + log-service
+  WAL + 2 query nodes + 2 compactors over **MinIO** object storage, with the
+  Vigil embedding corpora (`deadbits/*-all-MiniLM-L6-v2`, 8 900+ vectors)
+  loaded by the `vigil-corpus-loader` Job. The scanner embeds prompts with
+  ONNX MiniLM (baked into the image) and flags cosine distance < 0.45;
+  a vector-plane outage degrades to heuristics without failing runs.
 * **Occludra** (outbound) — every OpenCode provider is pinned to
   `occludra-service:8080/v1` (`OCCLUDRA_BASE_URL`): the gateway regex-scrubs
   PII (emails, SSNs, phone numbers, IBANs) and credential-looking strings from

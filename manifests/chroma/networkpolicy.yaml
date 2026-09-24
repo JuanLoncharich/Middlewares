@@ -1,0 +1,138 @@
+# ---------------------------------------------------------------------------
+# NetworkPolicies for the `chroma` namespace (distributed Chroma + MinIO +
+# Postgres + OTel).
+#
+# Baseline: default-deny both directions, then:
+#   - full intra-namespace traffic (the chroma planes are chatty: frontend →
+#     sysdb/log, workers → MinIO/Postgres/sysdb, memberlist gRPC mesh, etc.);
+#   - ingress to the Rust frontend (REST :8000) only from the Vigil scanner
+#     pods in security-gateways (their vector scanner queries the corpus) —
+#     evaluation pods in mcp-evals have no direct path here by design;
+#   - DNS egress;
+#   - HTTPS egress ONLY for the corpus-loader Job (it downloads the Vigil
+#     embedding datasets from HuggingFace). Everything else in the namespace
+#     has no external egress: chroma talks exclusively to in-cluster MinIO.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: chroma
+  labels:
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: chroma
+  labels:
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-vigil-to-frontend
+  namespace: chroma
+  labels:
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  # Only the frontend serves clients; sysdb/log/minio/postgres stay
+  # namespace-internal.
+  podSelector:
+    matchLabels:
+      app: rust-frontend-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: security-gateways
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vigil-llm
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: chroma
+  labels:
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-corpus-loader-egress
+  namespace: chroma
+  labels:
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vigil-corpus-loader
+  policyTypes:
+    - Egress
+  egress:
+    # HuggingFace dataset download (loader is the only pod allowed out).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Push into the Chroma frontend.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rust-frontend-service
+      ports:
+        - protocol: TCP
+          port: 8000

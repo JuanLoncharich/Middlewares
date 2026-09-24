@@ -34,10 +34,22 @@ OPENCODE_API_KEY=<tu-zen-key> \
 ./deploy.sh
 ```
 
-Qué hace: construye y pushea las 5 imágenes al registry local de kind,
-instala operador (ahora **2 réplicas con leader election**), gateways (con
-HPAs — instala metrics-server si pasás también `AUTOSCALE_METRICS=1`),
-políticas, agentes y dispara el primer run.
+Qué hace: construye y pushea las imágenes al registry local de kind,
+instala operador (ahora **2 réplicas con leader election**), el **vector DB
+distribuido** (Chroma sobre MinIO en namespace `chroma`, `DEPLOY_VECTOR_DB=1`
+por defecto — usa `DEPLOY_VECTOR_DB=0` o `SKIP_CORPUS_LOAD=1` para saltarlo),
+gateways (con HPAs — instala metrics-server si pasás también
+`AUTOSCALE_METRICS=1`), políticas, agentes y dispara el primer run.
+
+> **Nota de CPU para el vector DB**: las imágenes de componentes de chroma se
+> publican por SHA de commit. Algunas builds recientes mueren con SIGILL en
+> CPUs sin AVX-512 (verificado 2026-09-24); el pin por defecto
+> (`CHROMA_IMG_TAG=dff1d8a`) está verificado en este hardware. Si cambiás el
+> tag, probá antes `docker run --rm chromadb/query-service:<tag>` — no debe
+> salir con código 132. Verificación end-to-end del scanner vectorial:
+> `kubectl -n security-gateways exec -i deploy/vigil -- python3 -` con un
+> POST a `http://localhost:5000/analyze` — una inyección debe reportar
+> `runs.vector.is_injection=true` con distancia < 0.45.
 
 Si cambiaste código Go/TS desde el último deploy, no pases `SKIP_BUILD`.
 

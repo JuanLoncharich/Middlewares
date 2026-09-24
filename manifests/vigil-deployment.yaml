@@ -18,11 +18,15 @@
 # Non-mesh path: ClusterIP vigil-service:5000 for operators/smoke tests only.
 # ---------------------------------------------------------------------------
 # Scanner configuration. Key layout mirrors vigil-llm's documented
-# server.conf — verify against the image version you pin. ML-based scanners
-# (transformer / vector / canonical) are disabled by default so the container
-# boots offline and stays fast; the heuristic + YARA pass catches the common
-# injection families. Enable the ML scanners when the cluster can pull their
-# models and tolerate the latency.
+# server.conf — verify against the image version you pin.
+#
+# VECTORS: the real vigil-llm runs its `vector` scanner against an embedded
+# on-disk ChromaDB inside the container. This platform instead ships the
+# DISTRIBUTED Chroma cluster (manifests/chroma/ — coordinator, log service,
+# compactors, query nodes over MinIO) and the stub's vector scanner queries
+# its frontend REST API with the same all-MiniLM-L6-v2 model as the loaded
+# Vigil corpora. Set VIGIL_CHROMA_URL="" to disable the vector layer and
+# fall back to pure heuristics.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -65,6 +69,12 @@ data:
       # vector:
       #   enabled: true
       #   threshold: 0.8
+      #
+      # NOTE: the commented `vector` block above belongs to the REAL
+      # vigil-llm image (embedded on-disk ChromaDB). The stub deployed here
+      # instead queries the distributed Chroma cluster when
+      # VIGIL_CHROMA_URL is set (see the Deployment env) — no on-disk
+      # database and no PV needed for the vector path.
 
       # Response-similarity and sentiment scanners stay off for evaluations:
       # the runner feeds raw untrusted payloads, not model responses.
@@ -156,6 +166,13 @@ spec:
               # provided so either lookup succeeds.
             - name: VIGIL_CONFIG_PATH
               value: /conf/server.conf
+              # Vector scanner -> distributed Chroma frontend (manifests/chroma/).
+              # Unset/empty disables the layer; a dead cluster degrades the
+              # verdict to heuristics with a 60s init-retry cooldown.
+            - name: VIGIL_CHROMA_URL
+              value: http://rust-frontend-service.chroma.svc.cluster.local:8000
+            - name: VIGIL_VECTOR_THRESHOLD
+              value: "0.45"
           volumeMounts:
             # subPath so the image's own conf/ siblings stay visible.
             - name: config

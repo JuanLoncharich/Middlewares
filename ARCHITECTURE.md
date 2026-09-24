@@ -68,7 +68,8 @@ its code lives, and whether it holds state.
 | netbird node client | **DaemonSet** `netbird-node` (TUN mode, CAP_NET_ADMIN) | `security-gateways`, 1/node | `manifests/netbird-daemonset.yaml` | emptyDir state |
 | Occludra gateway | **Deployment** `occludra` (2 replicas, PDB min 1, rolling maxUnavailable 0) + **Service** `occludra-service` (ClusterIP 8080) + **Service** `occludra-np` (NodePort 30080) | `security-gateways` | `images/occludra-gateway/` (Go, single file `main.go`) | **stateless**; policy read per-request |
 | `occludra-policy` | **ConfigMap** (mounted at `/conf`, watched per-request) | `security-gateways` | `manifests/occludra-deployment.yaml` | policy source of truth (etcd) |
-| Vigil scanner | **Deployment** `vigil` (2 replicas, PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | dev: `images/vigil-stub/server.py` (Python); prod pin `deadbits/vigil-llm:latest` | **stub: zero state**; real: ChromaDB vector DB (§5.2) |
+| Vigil scanner | **Deployment** `vigil` (2 replicas, PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | dev: `images/vigil-stub/server.py` (Python: heuristics + ONNX MiniLM vector scanner); prod pin `deadbits/vigil-llm:latest` | **stub: stateless** (models baked at build); vector scan queries the distributed Chroma (§5.2) |
+| Distributed Chroma | SysDB coordinator (`sysdb`) + Rust SysDB + Log Service WAL (StatefulSet) + **2 Query Nodes** + **2 Compactors** + Work Queue + Fn Consumer + Garbage Collector + Rust frontend (REST v2 :8000); chart vendored at `manifests/chroma/chart/` | `chroma` | `manifests/chroma/` (chart + values + worker/frontend configs), images `chromadb/<svc>:<sha>` | object segments in **MinIO**; catalog in **Postgres** |
 | `vigil-server-conf` | **ConfigMap** (`server.conf`, scanner enable/disable) | `security-gateways` | `manifests/vigil-deployment.yaml` | scanner profile (etcd) |
 | NetworkPolicies | **NetworkPolicy** ×5 static + **1 generated per run** (`<run>-evaluate-egress`) | `security-gateways` / `mcp-evals` | `manifests/occludra-deployment.yaml`, `workstation-nodeport.yaml`, controller §4 | — |
 | LLM credentials | **Secret** `llm-provider-credentials` (key `OPENCODE_API_KEY`) — exists in **both** `mcp-evals` (evaluator passes it to its own gateway calls' config; real key upstream lives in the gateway) and `security-gateways` (decoded only by occludra) | both ns | created by `deploy.sh` | etcd |
@@ -77,8 +78,10 @@ its code lives, and whether it holds state.
 | local registry | **Docker container** `kind-registry` (`registry:2`, `localhost:5001`) | host Docker | kind setup | image layers on volume |
 | kind cluster | **kind** `mcp-test` (node `mcp-test-control-plane`, k8s v1.33.1, CNI kindnet — **does enforce** NetworkPolicy via nftables NFQUEUE) | host Docker | — | etcd on node disk |
 
-There is **no application database, no SQL, no object store** in this platform
-by design; §8 is the complete data-store inventory.
+The evaluation state itself lives exclusively in etcd (§8); the vector plane
+(§5.2) is the one deliberate exception to "no application database": the
+distributed Chroma cluster keeps its object segments in MinIO and its
+catalog in Postgres, walled off in namespace `chroma`.
 
 ---
 
@@ -367,7 +370,9 @@ pod from the mesh; the userspace run sidecar (no TUN, no stable socket path)
 relies on the evaluator's SOCKS5 readiness gate + run-level retries instead.
 
 **Deployed implementation today is the test double** (`images/vigil-stub/server.py`,
-Alpine Python, UID 10004, read-only rootfs): deterministic regex heuristics,
+Debian-slim Python, UID 10004, read-only rootfs): two detection layers.
+
+1. **Heuristics** (always on): deterministic regex families,
 score = 0.6 per hit (cap 1.0), detection at `VIGIL_STUB_THRESHOLD` ≥ 0.5,
 `VIGIL_STUB_ALWAYS_BLOCK=1` forces detection for abort-path drills.
 
@@ -382,25 +387,71 @@ score = 0.6 per hit (cap 1.0), detection at `VIGIL_STUB_THRESHOLD` ≥ 0.5,
 | `hidden-instruction` | `[system]`, `(system note)`, `<\|im_start\|>` |
 | `credential-harvest` | `api key\|password\|secret\|token [:=] ≥8 chars` (requires the separator — "password is X" passes here; that path is Occludra's job on egress) |
 
+2. **Vector scanner** (active when `VIGIL_CHROMA_URL` is set, the deploy.sh
+default): the prompt is embedded with **all-MiniLM-L6-v2** (quantized ONNX
+baked into the image — no runtime model download) and queried against the
+**distributed Chroma cluster** (§5.2.1) over its REST v2 frontend. A cosine
+distance below `VIGIL_VECTOR_THRESHOLD` (0.45) against the loaded Vigil
+corpora flags the input. Measured separation on the deployed stack:
+paraphrased injections ≈ 0.23–0.27, jailbreak role-hijacks ≈ 0.41, benign
+prompts ≥ 0.73. Failure policy mirrors vigil-llm's: an outage of the vector
+plane degrades the verdict to the heuristics layer (`runs.vector.available:
+false`, 60 s init-retry cooldown) rather than failing the request; a reload
+of the deployment clears the cached failure immediately.
+
 **The production image (`deadbits/vigil-llm`) is a scanner *library* over
 several detection engines** — what the stub replaces:
 - heuristic regex + **YARA** rule scanning (offline, fast);
 - a **canonical prompt-injection classifier** (BERT-family, model download);
-- **embedding-similarity scanning backed by a real vector database**:
-  inputs are embedded with sentence-transformers (or OpenAI ada-002-style
-  embeddings) and queried against a persistent on-disk **ChromaDB**
-  collection pre-loaded with corpora of known jailbreak /
-  instruction-bypass prompts (e.g. HF dataset
-  `deadbits/vigil-instruction-bypass-ada-002`); a similarity/distance
-  below threshold flags the input as injection;
+- **embedding-similarity scanning backed by a real vector database** — the
+  upstream implementation uses an *embedded on-disk* ChromaDB inside the
+  container; this platform instead runs the distributed cluster below and
+  keeps the scanner stateless;
 - optional response-side scanners (sentiment, canary/leaked-secret detection).
 
-In the shipped ConfigMap (`vigil-server-conf`) the ML scanners
-(`canonical`, `transformer`, `vector`) are **commented out** so the container
-boots offline and stays fast — enabling them requires model/corpus download
-and, for ChromaDB persistence, a **PersistentVolume** (the current Pod only
-mounts a 256Mi `emptyDir` at `/tmp`; the vector DB is on-disk inside the
-container and would be lost on pod reschedule unless a PV is mounted). The
+In the shipped ConfigMap (`vigil-server-conf`) the upstream-embedded ML
+scanners (`canonical`, `transformer`, `vector`) remain **commented out** —
+the vector layer is served by the distributed cluster, so the real image
+needs no PV and no on-disk database to gain the same detection class. The
+
+#### 5.2.1 Distributed Chroma over MinIO (namespace `chroma`)
+
+The vector plane is a full **distributed Chroma** deployment, rendered from
+chroma-core's own chart (`manifests/chroma/chart/`, vendored from
+`chroma-core/chroma@30d701a4`, values + worker configs in `manifests/chroma/`)
+and deployed by `deploy.sh` with `DEPLOY_VECTOR_DB=1` (default):
+
+| Component | Implementation | Role |
+|---|---|---|
+| SysDB coordinator (`sysdb`) | Go, catalog in **Postgres** (`postgres:5432`, DBs `sysdb`+`log`, PVC 5 Gi) | global metadata, collection catalog, segment placement; hands the storage config (MinIO endpoint/keys) to every worker |
+| Rust SysDB (`rust-sysdb-service`) | Rust rewrite of the catalog | multi-region catalog the Rust workers and frontend consult (`mcmr_sysdb`) |
+| **Log Service** (`rust-log-service`, StatefulSet) | WAL over S3 | every write is recorded here first and acknowledged — index building never blocks writes; peer discovery via `MemberList` CustomResources (CRD shipped by the chart) |
+| **Compactors** (`compaction-service` ×2, StatefulSet) | rendezvous-hash assigned | consume the log asynchronously, build HNSW/SPANN index segments, write them to object storage |
+| **Query Nodes** (`query-service` ×2, StatefulSet) | stateless search replicas | load prebuilt indexes from MinIO through local SSD/memory caches (`hostPath` `/cache`); scale `replicaCount` with read traffic |
+| Frontend (`rust-frontend-service`) | Rust gateway, REST v2 on :8000 | the only client entrypoint: auth/routing; serves `vigil` and the corpus loader |
+| Work Queue + Fn Consumer + Garbage Collector | support services | distributed task queue; index/version garbage collection |
+| **MinIO** (`minio:9000`, PVC 20 Gi) | S3 API, `chroma-storage` bucket | all WAL fragments and compacted index segments; the reason query nodes can stay stateless |
+| OTel collector | OTLP sink | chroma components export traces/metrics there; failures are non-fatal |
+
+Corpus: the Job `vigil-corpus-loader` (`images/vigil-corpus-loader/`, stdlib
+Python) downloads the pre-embedded corpora from HuggingFace and loads them
+into collections `vigil_instruction_bypass`
+(`deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2`, 8 800 vectors) and
+`vigil_jailbreak` (`deadbits/vigil-jailbreak-all-MiniLM-L6-v2`, 104 vectors)
+— 384-dim `all-MiniLM-L6-v2` embeddings, collections created with
+**cosine** space (the loader tries spann- then hnsw-shaped configs). The Job
+is idempotent (skips loaded collections; `FORCE_LOAD=1` re-adds). It is the
+only pod in the namespace with internet egress (NetworkPolicy
+`allow-corpus-loader-egress`).
+
+Namespace `chroma` is default-deny in both directions: full intra-namespace
+mesh, ingress to the frontend only from Vigil scanner pods (port 8000), DNS
+egress, and the loader's HTTPS egress. The `security-gateways` egress policy
+(`gateway-egress`) carries the mirror-image rule letting Vigil pods reach
+the frontend. Image pin: `CHROMA_IMG_TAG` (short commit SHA from the
+`chromadb` Docker Hub org — **verify CPU compatibility when bumping**: some
+main-branch builds SIGILL on non-AVX-512 hosts; see the note in
+`manifests/chroma/values-mcp-eval.yaml`).
 stub keeps **no state at all** — no DB, no cache, nothing to persist.
 
 ### 5.3 NetBird — WireGuard transport mesh
@@ -518,16 +569,21 @@ answers "how risky is this MCP server today" without a client-side join.
 | 6 | SA token | projected volume, 1 h TTL | run Pod `/token` (evaluator only) | auto-rotated | k8s credentials for status patches |
 | 7 | Occludra policy | **ConfigMap** `occludra-policy` → etcd, mounted `/conf` | gateway pods | permanent; hot-reloaded per request | 11 detectors, model allowlist, logging flags |
 | 8 | Vigil config | **ConfigMap** `vigil-server-conf` → etcd, mounted `/conf` | vigil pods | permanent | scanner profile (ML scanners off by default) |
-| 9 | **Vigil vector DB** | **ChromaDB, on-disk, persistent** — real `deadbits/vigil-llm` only (sentence-transformers/ada-002 embeddings vs known-jailbreak corpora, e.g. HF `deadbits/vigil-instruction-bypass-ada-002`) | inside vigil container (needs a **PV** if ML scanners are enabled; **absent today**: stub has no DB, ML scanners disabled) | pod lifetime today | embedded corpus of known-bad prompts |
+| 9a | **Distributed Chroma — object segments** | **MinIO** (`minio.chroma:9000`, PVC 20 Gi, bucket `chroma-storage` auto-created) | `chroma` ns, MinIO Deployment | permanent (PVC) | WAL fragments + compacted HNSW/SPANN index segments of the Vigil corpora |
+| 9b | **Distributed Chroma — catalog** | **Postgres 15** (`postgres.chroma:5432`, PVC 5 Gi) | `chroma` ns | permanent (PVC) | tenants/databases/collections/segment placement (SysDB), migrated by the chart's `sysdb-migration` Job |
+| 9c | **Vigil corpora** | collections `vigil_instruction_bypass` (8 800×384d) + `vigil_jailbreak` (104×384d), cosine space | inside Chroma (query nodes serve them; replicas stay stateless) | permanent via 9a | known injection/jailbreak prompts, HF `deadbits/*-all-MiniLM-L6-v2` |
 | 10 | LLM upstream keys | **Secret** `llm-provider-credentials` (etcd) | `mcp-evals` + mirrored `security-gateways` | permanent | decoded **only** by occludra containers; evaluator's copy only ever configures the dummy-key path |
 | 11 | NetBird identity | Secret `netbird-auth` + emptyDir `/var/lib/netbird` | sidecars/daemonset | emptyDir: pod lifetime (re-enroll on restart) | setup key, peer state, WireGuard keys |
 | 12 | OpenCode session store | files under `$XDG_DATA_HOME` | evaluator container `/tmp` emptyDir; workstation container fs | ephemeral | session transcripts/messages — deliberately throwaway |
 | 13 | Container images | `registry:2` on docker volume | host, `localhost:5001` (kind node has certs.d mirror config) | volume lifetime | occludra-gateway, vigil-stub, mcp-cloner, mcp-target-sandbox, mcp-evaluator (`:local`) |
 | 14 | Host test evidence | git-tracked files | `dlp-test-results/` in this repo | permanent | round-1 baseline, forensics captures, round-2 verification |
 
-Non-goals (explicit): no SQL/NoSQL database, no message queue, no object
-storage. Anything that must survive a pod is a Kubernetes object; everything
-else is engineered to be disposable.
+Non-goals (explicit, evaluation plane): no SQL/NoSQL application database, no
+message queue, no object storage. Anything that must survive a pod is a
+Kubernetes object; everything else is engineered to be disposable. The one
+deliberate exception is the security perimeter's **vector plane** (§5.2.1):
+a distributed Chroma cluster with its own MinIO + Postgres, walled off in
+namespace `chroma` and consumed only through the Vigil scanner.
 
 ---
 
@@ -541,7 +597,7 @@ else is engineered to be disposable.
 | Run creation | uncached (APIReader) active-run check at fire time closes the cache-lag dedup window | no double-create on reconcile races |
 | Evaluation workloads | independent batch Jobs per run; transient infra failures recreate the Job (≤2, `status.retries`); stuck-Pending pods fast-retried at 5 min | **yes** — embarrassingly parallel across servers; infra flakes recover without waiting for the next cron |
 | Occludra | HPA 2→8 (CPU 70 %), shared ConfigMap policy, PDB 50 %, rolling maxUnavailable 0, topology spread, HTTP probes + graceful shutdown + in-flight backpressure | **yes** |
-| Vigil | HPA 2→8 (CPU 70 %), PDB 50 %, topology spread, `/health` HTTP probes + startupProbe + in-flight backpressure | **yes** (real image: ChromaDB makes a replica *eventually* self-contained after corpus load; PV needed for durability) |
+| Vigil | HPA 2→8 (CPU 70 %), PDB 50 %, topology spread, `/health` HTTP probes + startupProbe + in-flight backpressure; scanner pods are stateless — the vector corpora live in the distributed Chroma (§5.2.1) | **yes** — a replacement replica re-reads corpora from the cluster, nothing to rebuild locally |
 | Mesh data plane | NetBird WireGuard peer-to-peer | **yes** — no central data chokepoint (management plane is external/SPOF) |
 | Policy distribution | kubelet ConfigMap sync (~1 min) + per-request re-read | eventually consistent, atomic per request |
 | Node capacity | Cluster Autoscaler on OpenStack (ephemeral Nova VMs, scale-out on pending pods, scale-in after 5 min idle); static on kind | **yes** on OpenStack (gated by `DEPLOY_AUTOSCALER=openstack`) |
@@ -566,6 +622,17 @@ uncovered label-flip window) and is **deleted when the run turns terminal**
 evaluator status patches are optimistic merge-patches (conflicts →
 retry/backoff, controller re-reconcile confirms); run-level `status.retries`
 bounds Job recreation so recovery cannot loop.
+
+Vector-plane availability (§5.2.1): query nodes (×2), compactors (×2), the
+log service and both SysDBs tolerate pod loss; the plane's remaining SPOFs
+are MinIO and Postgres — single-replica but PVC-backed and
+`PriorityClass mcp-eval-critical`. Their failure mode is graceful by
+construction: the Vigil vector scanner degrades to the heuristics layer
+(`runs.vector.available: false`, 60 s init-retry cooldown) and evaluations
+continue; the corpora are re-loaded idempotently by the corpus-loader Job
+once the plane recovers. Scaling paths follow chroma's own model: query
+nodes scale horizontally with read traffic (stateless), MinIO/Postgres
+scale by moving to external S3/RDS equivalents via the worker configs.
 
 ---
 
@@ -645,8 +712,18 @@ password, customer+amount all `[REDACTED]` before the LLM; both
 
 - Vigil-LLM (upstream project & scanner/vector-DB architecture):
   https://github.com/deadbits/vigil-llm · https://vigil.deadbits.ai/overview/release-blog
-  (ChromaDB persistent vector store; sentence-transformers embeddings;
-  corpora e.g. https://huggingface.co/datasets/deadbits/vigil-instruction-bypass-ada-002)
+  (upstream uses an embedded on-disk ChromaDB; this platform serves the same
+  detection class from the distributed cluster of §5.2.1)
+- Distributed Chroma (chart + component images + architecture):
+  chart vendored from https://github.com/chroma-core/chroma (`k8s/distributed-chroma`,
+  commit 30d701a4) · component images https://hub.docker.com/u/chromadb
+  (per-commit SHA tags) · architecture doc
+  https://github.com/chroma-core/chroma/blob/main/docs/mintlify/reference/architecture/distributed.mdx
+- Vigil embedding corpora (all-MiniLM-L6-v2, 384-dim, pre-embedded):
+  https://huggingface.co/datasets/deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2 ·
+  https://huggingface.co/datasets/deadbits/vigil-jailbreak-all-MiniLM-L6-v2
+- MinIO: https://min.io (S3-compatible object storage; chroma pins the release
+  by digest in `manifests/chroma/minio.yaml`)
 - OpenCode Zen: https://opencode.ai/zen/v1/models
 - NetBird: https://docs.netbird.io/
 - MCP: https://modelcontextprotocol.io/
