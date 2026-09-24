@@ -25,8 +25,21 @@
 # DISTRIBUTED Chroma cluster (manifests/chroma/ — coordinator, log service,
 # compactors, query nodes over MinIO) and the stub's vector scanner queries
 # its frontend REST API with the same all-MiniLM-L6-v2 model as the loaded
-# Vigil corpora. Set VIGIL_CHROMA_URL="" to disable the vector layer and
-# fall back to pure heuristics.
+# Vigil corpora. Set VIGIL_CHROMA_URL="" to disable the vector layer.
+#
+# The stub image (images/vigil-stub/) runs SIX engines; verdict is the OR of
+# every engine that fires, each degrading independently:
+#   heuristics   regex families                       always on (sub-ms)
+#   yara         vigil-llm rules, yara-python         always on (vendored /rules)
+#   vector       MiniLM -> distributed Chroma         VIGIL_CHROMA_URL, cos < 0.45
+#   transformer  protectai/deberta-v3-base-prompt-injection      P > 0.98
+#   canonical    protectai/deberta-v3-base-prompt-injection-v2   P > 0.85
+#   sentiment    VADER negative score                 neg > 0.7
+# All models are baked into the image (fp32 deberta — int8 quantization
+# corrupts deberta-v3, verified 2026-09-24); /health answers 503 until the
+# warmup pass finishes so probes hold the pod out of endpoints while the
+# ~1.5 GB of models load. Thresholds/toggles: VIGIL_*_THRESHOLD /
+# VIGIL_ENABLE_* env vars (upstream defaults).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -96,12 +109,18 @@ metadata:
     app.kubernetes.io/component: prompt-scanner
     app.kubernetes.io/part-of: mcp-eval-platform
 spec:
-  replicas: 2
+  # __VIGIL_REPLICAS__ / __VIGIL_MAX_UNAVAILABLE__ are substituted by
+  # deploy.sh (VIGIL_REPLICAS / VIGIL_MAX_UNAVAILABLE, defaults 2 / 0 for
+  # multi-node production). Laptop-class dev nodes running the fp32
+  # deberta engines need VIGIL_REPLICAS=1 VIGIL_MAX_UNAVAILABLE=1: each
+  # replica peaks at ~2.5 GiB RSS and a surge pod would OOM (see
+  # ARCHITECTURE.md §5.2).
+  replicas: __VIGIL_REPLICAS__
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 0
+      maxUnavailable: __VIGIL_MAX_UNAVAILABLE__
   selector:
     matchLabels:
       app.kubernetes.io/name: vigil-llm
@@ -194,12 +213,15 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           resources:
+            # Two fp32 deberta-v3 ONNX sessions dominate the footprint
+            # (~750 MiB RSS each) + MiniLM + activations; engines load
+            # sequentially at startup to keep the peak well under this.
             requests:
-              cpu: 250m
-              memory: 512Mi
+              cpu: 500m
+              memory: 1Gi
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: "2"
+              memory: 3500Mi
           # HTTP probes against the real /health route (stub and vigil-llm
           # both expose it): a hung scanner must fail its probes, which a
           # listening-socket check alone does not catch. The startupProbe
@@ -329,7 +351,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: vigil
-  minReplicas: 2
+  minReplicas: __VIGIL_HPA_MIN__
   maxReplicas: 8
   metrics:
     - type: Resource

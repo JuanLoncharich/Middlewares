@@ -119,14 +119,18 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
   the CRD status/termination message. `VIGIL_ENFORCE=monitor` downgrades
   detections to log+finding; in the default `strict` mode an *unreachable*
   scanner also fails the run (fail-closed). Set `VIGIL_ENABLED=0` to disable.
-  Detection is two-layered: deterministic heuristics plus a **vector
-  similarity scan against the distributed Chroma cluster**
-  (`manifests/chroma/`, namespace `chroma`): SysDB coordinator + log-service
-  WAL + 2 query nodes + 2 compactors over **MinIO** object storage, with the
-  Vigil embedding corpora (`deadbits/*-all-MiniLM-L6-v2`, 8 900+ vectors)
-  loaded by the `vigil-corpus-loader` Job. The scanner embeds prompts with
-  ONNX MiniLM (baked into the image) and flags cosine distance < 0.45;
-  a vector-plane outage degrades to heuristics without failing runs.
+  Detection runs **six engines** whose verdict is OR-ed (each degrades
+  independently, never failing the request): regex heuristics, vigil-llm's
+  YARA rules (vendored), a **vector similarity scan against the distributed
+  Chroma cluster** (`manifests/chroma/`, namespace `chroma`: SysDB
+  coordinator + log-service WAL + 2 query nodes + 2 compactors over
+  **MinIO**, with the Vigil corpora `deadbits/*-all-MiniLM-L6-v2`, 8 900+
+  vectors, loaded by the `vigil-corpus-loader` Job; cosine < 0.45), and two
+  fp32 deberta-v3 prompt-injection classifiers (protectai v1/v2, P > 0.98 /
+  0.85) plus a VADER sentiment signal — every model baked into the image at
+  build time. Pods scale via HPA (CPU 70 %, `VIGIL_HPA_MIN`→8); each replica
+  peaks at ~2.5 GiB RSS, so laptop-class nodes should deploy with
+  `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`.
 * **Occludra** (outbound) — every OpenCode provider is pinned to
   `occludra-service:8080/v1` (`OCCLUDRA_BASE_URL`): the gateway regex-scrubs
   PII (emails, SSNs, phone numbers, IBANs) and credential-looking strings from

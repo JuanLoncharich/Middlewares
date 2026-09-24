@@ -57,6 +57,13 @@ DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
 LOADER_IMG="$IMG_REGISTRY/vigil-corpus-loader:$IMG_TAG"
+# Vigil sizing: defaults fit multi-node production. On laptop-class single
+# nodes each vigil replica peaks at ~2.5 GiB RSS (two fp32 deberta-v3
+# engines) — set VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1
+# or the second replica OOMs during rollouts.
+VIGIL_REPLICAS="${VIGIL_REPLICAS:-2}"
+VIGIL_HPA_MIN="${VIGIL_HPA_MIN:-2}"
+VIGIL_MAX_UNAVAILABLE="${VIGIL_MAX_UNAVAILABLE:-0}"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_IMG="${VIGIL_IMG:-deadbits/vigil-llm:latest}"
@@ -174,6 +181,9 @@ fi
 substitute_gateway_images() {
   sed -e "s|ghcr.io/security-eval/occludra-gateway:latest|$OCCLUDRA_IMG|g" \
       -e "s|image: deadbits/vigil-llm:latest|image: $VIGIL_IMG|g" \
+      -e "s|__VIGIL_REPLICAS__|$VIGIL_REPLICAS|g" \
+      -e "s|__VIGIL_HPA_MIN__|$VIGIL_HPA_MIN|g" \
+      -e "s|__VIGIL_MAX_UNAVAILABLE__|$VIGIL_MAX_UNAVAILABLE|g" \
       ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"}
 }
 apply_gateway_manifest() {

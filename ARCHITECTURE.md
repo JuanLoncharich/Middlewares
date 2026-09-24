@@ -68,7 +68,7 @@ its code lives, and whether it holds state.
 | netbird node client | **DaemonSet** `netbird-node` (TUN mode, CAP_NET_ADMIN) | `security-gateways`, 1/node | `manifests/netbird-daemonset.yaml` | emptyDir state |
 | Occludra gateway | **Deployment** `occludra` (2 replicas, PDB min 1, rolling maxUnavailable 0) + **Service** `occludra-service` (ClusterIP 8080) + **Service** `occludra-np` (NodePort 30080) | `security-gateways` | `images/occludra-gateway/` (Go, single file `main.go`) | **stateless**; policy read per-request |
 | `occludra-policy` | **ConfigMap** (mounted at `/conf`, watched per-request) | `security-gateways` | `manifests/occludra-deployment.yaml` | policy source of truth (etcd) |
-| Vigil scanner | **Deployment** `vigil` (2 replicas, PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | dev: `images/vigil-stub/server.py` (Python: heuristics + ONNX MiniLM vector scanner); prod pin `deadbits/vigil-llm:latest` | **stub: stateless** (models baked at build); vector scan queries the distributed Chroma (§5.2) |
+| Vigil scanner | **Deployment** `vigil` (replicas via `VIGIL_REPLICAS`, default 2; HPA 70 % CPU, `VIGIL_HPA_MIN`→8; PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | dev: `images/vigil-stub/` (Python, six engines, models baked); prod pin `deadbits/vigil-llm:latest` | **stub: stateless** (~2.5 GiB RSS with both deberta sessions); vector scan queries the distributed Chroma (§5.2.1) |
 | Distributed Chroma | SysDB coordinator (`sysdb`) + Rust SysDB + Log Service WAL (StatefulSet) + **2 Query Nodes** + **2 Compactors** + Work Queue + Fn Consumer + Garbage Collector + Rust frontend (REST v2 :8000); chart vendored at `manifests/chroma/chart/` | `chroma` | `manifests/chroma/` (chart + values + worker/frontend configs), images `chromadb/<svc>:<sha>` | object segments in **MinIO**; catalog in **Postgres** |
 | `vigil-server-conf` | **ConfigMap** (`server.conf`, scanner enable/disable) | `security-gateways` | `manifests/vigil-deployment.yaml` | scanner profile (etcd) |
 | NetworkPolicies | **NetworkPolicy** ×5 static + **1 generated per run** (`<run>-evaluate-egress`) | `security-gateways` / `mcp-evals` | `manifests/occludra-deployment.yaml`, `workstation-nodeport.yaml`, controller §4 | — |
@@ -369,14 +369,36 @@ show wt0`) so a wedged sidecar is restarted instead of silently dropping the
 pod from the mesh; the userspace run sidecar (no TUN, no stable socket path)
 relies on the evaluator's SOCKS5 readiness gate + run-level retries instead.
 
-**Deployed implementation today is the test double** (`images/vigil-stub/server.py`,
-Debian-slim Python, UID 10004, read-only rootfs): two detection layers.
+**Deployed implementation today is the test double** (`images/vigil-stub/`,
+Debian-slim Python, UID 10004, read-only rootfs): **six detection engines**,
+verdict = OR over the engines that fire, each degrading independently
+(`runs.<engine>.available: false`, 60 s init-retry cooldown) so no single
+engine can fail a request:
 
-1. **Heuristics** (always on): deterministic regex families,
-score = 0.6 per hit (cap 1.0), detection at `VIGIL_STUB_THRESHOLD` ≥ 0.5,
-`VIGIL_STUB_ALWAYS_BLOCK=1` forces detection for abort-path drills.
+| Engine | Mechanism | Threshold / default |
+|---|---|---|
+| `heuristics` | deterministic regex families, 0.6 per hit (cap 1.0) | fires at score ≥ 0.5 (`VIGIL_STUB_THRESHOLD`); `VIGIL_STUB_ALWAYS_BLOCK=1` forces a detection for abort-path drills |
+| `yara` | vigil-llm's own rules vendored into the image (`data/yara/*.yar`, Apache-2.0) via yara-python | any rule match fires (10 rules: instruction bypass, secrets, ReAct patterns, …) |
+| `vector` | all-MiniLM-L6-v2 (int8 ONNX, baked) → distributed Chroma (§5.2.1) | cosine distance < 0.45 (`VIGIL_VECTOR_THRESHOLD`) |
+| `transformer` | protectai/deberta-v3-base-prompt-injection (the vigil-llm config's model lineage), fp32 ONNX baked | P(INJECTION) > 0.98 (`VIGIL_TRANSFORMER_THRESHOLD`) |
+| `canonical` | protectai/deberta-v3-base-prompt-injection-v2 — stands in for vigil-llm's retired `canonical` classifier, an independent training run | P(INJECTION) > 0.85 (`VIGIL_CANONICAL_THRESHOLD`) |
+| `sentiment` | VADER negative-sentiment signal (upstream-identical semantics) | neg > 0.7 (`VIGIL_SENTIMENT_THRESHOLD`) |
 
-| Scanner (stub) | Pattern (abridged) |
+All model artifacts are baked at build (no runtime downloads, container
+boots offline); deberta models ship **fp32 on purpose** — dynamic int8
+quantization corrupts deberta-v3's disentangled attention (verified:
+obvious injections scored 0.003 post-quantization). The engines warm up
+sequentially at startup (~20 s) and `/health` answers 503 until the pass
+completes, so probes hold the pod out of the endpoints while the ~1.5 GiB
+of models load. Measured on the deployed stack: paraphrased injections fire
+heuristics+transformer+canonical+vector, the DAN jailbreak fires
+transformer+canonical+vector (0.41 against the jailbreak corpus), a pasted
+RSA key fires yara+transformer+canonical, benign prompts pass clean;
+~1–3 s per scan with all six engines.
+
+Heuristic families (the `heuristics` engine):
+
+| Pattern (abridged) |
 |---|---|
 | `ignore-instructions` | `(ignore\|forget\|disregard\|drop\|override\|bypass)` … ≤40 chars … `(instructions\|prompts\|rules\|directives)` |
 | `reveal-system-prompt` | `(reveal\|print\|output\|repeat\|show\|display\|expose\|disclose\|leak\|dump)` … `(system prompt\|your prompt\|initial/hidden/operating instructions)` |
@@ -387,17 +409,14 @@ score = 0.6 per hit (cap 1.0), detection at `VIGIL_STUB_THRESHOLD` ≥ 0.5,
 | `hidden-instruction` | `[system]`, `(system note)`, `<\|im_start\|>` |
 | `credential-harvest` | `api key\|password\|secret\|token [:=] ≥8 chars` (requires the separator — "password is X" passes here; that path is Occludra's job on egress) |
 
-2. **Vector scanner** (active when `VIGIL_CHROMA_URL` is set, the deploy.sh
-default): the prompt is embedded with **all-MiniLM-L6-v2** (quantized ONNX
-baked into the image — no runtime model download) and queried against the
-**distributed Chroma cluster** (§5.2.1) over its REST v2 frontend. A cosine
-distance below `VIGIL_VECTOR_THRESHOLD` (0.45) against the loaded Vigil
-corpora flags the input. Measured separation on the deployed stack:
-paraphrased injections ≈ 0.23–0.27, jailbreak role-hijacks ≈ 0.41, benign
-prompts ≥ 0.73. Failure policy mirrors vigil-llm's: an outage of the vector
-plane degrades the verdict to the heuristics layer (`runs.vector.available:
-false`, 60 s init-retry cooldown) rather than failing the request; a reload
-of the deployment clears the cached failure immediately.
+The `vector` engine (active when `VIGIL_CHROMA_URL` is set, the deploy.sh
+default) embeds the prompt and queries the **distributed Chroma cluster**
+(§5.2.1) over its REST v2 frontend. Measured separation on the deployed
+stack: paraphrased injections ≈ 0.23–0.27, jailbreak role-hijacks ≈ 0.41,
+benign prompts ≥ 0.73. Failure policy mirrors vigil-llm's: an outage of any
+engine — including the whole vector plane — degrades that engine's verdict
+(`runs.<engine>.available: false`, 60 s init-retry cooldown) rather than
+failing the request; a reload of the deployment clears cached failures.
 
 **The production image (`deadbits/vigil-llm`) is a scanner *library* over
 several detection engines** — what the stub replaces:
@@ -443,6 +462,13 @@ into collections `vigil_instruction_bypass`
 is idempotent (skips loaded collections; `FORCE_LOAD=1` re-adds). It is the
 only pod in the namespace with internet egress (NetworkPolicy
 `allow-corpus-loader-egress`).
+
+Vigil sizing note: each replica peaks at **~2.5 GiB RSS** (two fp32
+deberta-v3 sessions + MiniLM + runtime). `VIGIL_REPLICAS` / `VIGIL_HPA_MIN`
+/ `VIGIL_MAX_UNAVAILABLE` (deploy.sh; defaults 2 / 2 / 0) exist because
+laptop-class single-node clusters cannot hold a surge replica alongside the
+first one — there, `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`
+keeps the six-engine scanner deployable; production nodes size for 2+.
 
 Namespace `chroma` is default-deny in both directions: full intra-namespace
 mesh, ingress to the frontend only from Vigil scanner pods (port 8000), DNS

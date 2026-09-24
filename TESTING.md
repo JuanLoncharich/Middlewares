@@ -34,6 +34,13 @@ OPENCODE_API_KEY=<tu-zen-key> \
 ./deploy.sh
 ```
 
+> **Nodo laptop (RAM limitada)**: cada réplica de vigil pica ~2.5 GiB RSS
+> (dos clasificadores deberta-v3 fp32 + MiniLM). En un nodo único chico
+> agregá `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1` al
+> comando anterior o la segunda réplica muere por OOM durante los rollouts.
+> `AUTOSCALE_METRICS=1` instala metrics-server para que el HPA (CPU 70 %,
+> min `VIGIL_HPA_MIN` → 8) tenga métricas reales.
+
 Qué hace: construye y pushea las imágenes al registry local de kind,
 instala operador (ahora **2 réplicas con leader election**), el **vector DB
 distribuido** (Chroma sobre MinIO en namespace `chroma`, `DEPLOY_VECTOR_DB=1`
