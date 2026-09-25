@@ -5,6 +5,15 @@
 > Minikube está detenido (`minikube status` → Stopped). Toda esta guía usa
 > kind; para minikube solo cambia `IMG_REGISTRY` por un registry que ese
 > cluster pueda resolver.
+>
+> **El cluster NO arranca solo al prender la máquina**: `docker.service` está
+> habilitado al boot y kind crea el nodo con `--restart=on-failure` (y el
+> registry local con `always`), así que sin esta medida el cluster entero
+> revive con el sistema. `hack/disable-cluster-autostart.sh` pone las
+> políticas en `no` — correrlo una vez por instalación; **volver a correrlo
+> si recreás el cluster** (`kind create cluster` re-aplica `on-failure`).
+> Para levantar el cluster a mano: `docker start mcp-test-control-plane
+> kind-registry` (esperá ~30s a que etcd/apiserver estén listos).
 
 ## 0. Estado actual y qué código corre
 
