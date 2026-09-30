@@ -173,7 +173,7 @@ function readEnv(): RunnerEnv {
     opencodePort: optionalInt("OPENCODE_PORT", 4096),
     dryRun,
     // --- Vigil-LLM (inbound scanner) ---
-    vigilUrl: env["VIGIL_URL"] ?? "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze",
+    vigilUrl: env["VIGIL_URL"] ?? "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze/prompt",
     // Disabled by default in DRY_RUN (no gateways reachable) unless forced on.
     vigilEnabled: flag("VIGIL_ENABLED", !dryRun),
     vigilEnforce: rawEnforce === "strict",
@@ -1425,6 +1425,11 @@ async function main(): Promise<number> {
     // retries during the run — without it the CR would stay non-terminal
     // even though the verdict exists.
     await status.flushTerminalPatch();
+    // Persist the full report into a ConfigMap so it survives the Job pod's
+    // ttlSecondsAfterFinished (the /output emptyDir dies with the pod). This
+    // single call site covers completed, degraded-continuation and
+    // failed-with-partial-report runs alike; best-effort like writeReport.
+    await status.persistReport(report);
     const phase: RunPhase = report.phase === "Completed" ? "Completed" : "Failed";
     writeTerminationMessage({
       phase,

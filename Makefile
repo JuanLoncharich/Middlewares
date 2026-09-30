@@ -1,8 +1,9 @@
 # Image URL to use all building/pushing image targets
-IMG ?= ghcr.io/security-eval/mcp-eval-operator:latest
-CLONER_IMG ?= ghcr.io/security-eval/mcp-cloner:latest
-TARGET_IMG ?= ghcr.io/security-eval/mcp-target-sandbox:latest
-EVALUATOR_IMG ?= ghcr.io/security-eval/mcp-evaluator:latest
+# Tag 20260930 is the frozen first-party tag — never ship :latest.
+IMG ?= ghcr.io/security-eval/mcp-eval-operator:20260930
+CLONER_IMG ?= ghcr.io/security-eval/mcp-cloner:20260930
+TARGET_IMG ?= ghcr.io/security-eval/mcp-target-sandbox:20260930
+EVALUATOR_IMG ?= ghcr.io/security-eval/mcp-evaluator:20260930
 
 CONTROLLER_GEN_VERSION ?= v0.15.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)

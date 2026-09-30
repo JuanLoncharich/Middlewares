@@ -61,16 +61,16 @@ spec:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8443
-        image: ghcr.io/security-eval/mcp-eval-operator:latest
+        image: ghcr.io/security-eval/mcp-eval-operator:20260930
         imagePullPolicy: Always
         name: manager
         env:
         - name: CLONER_IMAGE
-          value: ghcr.io/security-eval/mcp-cloner:latest
+          value: ghcr.io/security-eval/mcp-cloner:20260930
         - name: TARGET_IMAGE
-          value: ghcr.io/security-eval/mcp-target-sandbox:latest
+          value: ghcr.io/security-eval/mcp-target-sandbox:20260930
         - name: EVALUATOR_IMAGE
-          value: ghcr.io/security-eval/mcp-evaluator:latest
+          value: ghcr.io/security-eval/mcp-evaluator:20260930
         - name: RUNNER_SERVICE_ACCOUNT
           value: mcp-eval-runner
         - name: LLM_SECRET_NAME
@@ -83,7 +83,7 @@ spec:
         - name: MESH_ENFORCE
           value: "true"
         - name: NETBIRD_IMAGE
-          value: netbirdio/netbird:latest
+          value: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
         # MUST point at your NetBird management server; evaluation pods enroll
         # against it with the setup key in Secret mcp-evals/netbird-auth.
         - name: NETBIRD_MANAGEMENT_URL
@@ -108,6 +108,26 @@ spec:
         # Set VIGIL_URL / OCCLUDRA_BASE_URL explicitly to override either.
         - name: NETBIRD_DNS_DOMAIN
           value: netbird.selfhosted
+        # Optional security-gateway tuning knobs, passed through to the
+        # evaluator verbatim ONLY when set (the runner validates values and
+        # applies its own defaults: enabled / enforce / 10000ms / 65536B /
+        # enabled). Uncomment to override.
+        # - name: VIGIL_ENABLED
+        #   value: "true"
+        # - name: VIGIL_ENFORCE
+        #   value: "monitor"
+        # - name: VIGIL_TIMEOUT_MS
+        #   value: "10000"
+        # - name: VIGIL_MAX_PAYLOAD_BYTES
+        #   value: "65536"
+        # - name: OCCLUDRA_ENABLED
+        #   value: "true"
+        # RuntimeClass for evaluation pods (e.g. gVisor — the README's
+        # mitigation for the target's loopback reachability). The RuntimeClass
+        # object must exist in the cluster; pods referencing a missing one
+        # stay Pending. Uncomment to enable.
+        # - name: RUNTIME_CLASS_NAME
+        #   value: gvisor
         ports:
         - containerPort: 8443
           name: metrics

@@ -14,7 +14,7 @@ MCPServer ──schedule──▶ MCPEvaluationRun ──▶ batch/v1 Job (one P
                                                └─ ctr   evaluator  @opencode-ai/sdk runner, patches status
 OpenCodeAgent ×4 ─── referenced by agentSuite ──▶ fetched by the evaluator at run time
 
-evaluator ──Vigil /analyze──▶ vigil   (security-gateways, WireGuard mesh)
+evaluator ──Vigil /analyze/prompt──▶ vigil   (security-gateways, WireGuard mesh)
 evaluator ──LLM calls──────▶ occludra┐ (security-gateways, WireGuard mesh)
                             └─PII scrub──▶ upstream LLM
 ```
@@ -45,6 +45,44 @@ evaluator ──LLM calls──────▶ occludra┐ (security-gateways, W
 Prerequisites on the deploying machine: `kubectl` (configured for the target
 cluster), `docker` with push access to a registry the cluster can pull from.
 
+## What you must provide (not in this repo)
+
+The platform ships **no credentials** — these are yours to supply:
+
+| Value | What | When required |
+|---|---|---|
+| `OPENCODE_API_KEY` | OpenCode Zen API key (free tier works with `*-free` models) | **required for any run to produce results.** `deploy.sh` writes it into `mcp-evals/llm-provider-credentials` unless `SKIP_SECRET=1`. Missing key or no credits → evaluations fail at the LLM stage (auth/CreditsError); cloning, sandboxing and the Vigil scan still run, so the plumbing is testable, but `finalScore` stays 0/Failed. A key set by a previous deploy survives in the secret; **fresh clusters must set it**. |
+| `IMG_REGISTRY` | a registry the cluster can pull from: `ghcr.io/<you>` (after `docker login`) or ephemeral `ttl.sh/<name>` for local tests — ttl.sh images expire after 24 h | always |
+| `NETBIRD_SETUP_KEY` (+ `NETBIRD_MANAGEMENT_URL`) | NetBird enrollment key for the WireGuard mesh | mesh mode only — `deploy.sh` hard-fails without it; not needed with `MESH_ENFORCE=false` |
+| `NETBIRD_OIDC_CONFIG_ENDPOINT` | IdP well-known URL | only for `DEPLOY_NETBIRD_CP=1` |
+| `OS_*` variables | OpenStack credentials | only for `DEPLOY_AUTOSCALER=openstack` |
+
+Local bring-up without mesh or a Zen key (existing secret reused if present):
+
+```bash
+IMG_REGISTRY=ttl.sh/midd-$(date +%s) MESH_ENFORCE=false SKIP_SECRET=1 ./deploy.sh
+```
+
+
+## What you must provide (not in this repo)
+
+The platform ships **no credentials**. Before (or at) deploy time you supply:
+
+| Value | What | When required |
+|---|---|---|
+| `OPENCODE_API_KEY` | OpenCode Zen API key (free tier works with `*-free` models) | **required for any run to produce results.** `deploy.sh` writes it into `mcp-evals/llm-provider-credentials` unless `SKIP_SECRET=1`. Without it (or without credits) evaluations fail at the LLM stage with an auth/CreditsError — cloning, sandboxing and the Vigil scan still work, so you can validate the plumbing, but `finalScore` stays `0`/`Failed`. A key from a previous deploy survives in the secret; fresh clusters must set it. |
+| `IMG_REGISTRY` | a registry the cluster can pull from (`ghcr.io/<you>` after `docker login`, or an ephemeral `ttl.sh/<name>` for local testing — images expire after 24 h) | always |
+| `NETBIRD_SETUP_KEY` (+ `NETBIRD_MANAGEMENT_URL`) | NetBird enrollment key for the WireGuard mesh | mesh mode only (`deploy.sh` hard-fails without it); not needed with `MESH_ENFORCE=false` |
+| `NETBIRD_OIDC_CONFIG_ENDPOINT` | IdP well-known URL | only for `DEPLOY_NETBIRD_CP=1` |
+| `OS_*` variables | OpenStack credentials | only for `DEPLOY_AUTOSCALER=openstack` |
+
+For a quick local bring-up without mesh or a Zen key:
+
+```bash
+IMG_REGISTRY=ttl.sh/midd-$(date +%s) MESH_ENFORCE=false SKIP_SECRET=1 ./deploy.sh
+```
+
+
 ### Fast path
 
 ```bash
@@ -65,13 +103,13 @@ existing secret untouched.
 # 1. Images
 export IMG_REGISTRY=ghcr.io/<you>
 make docker-build-all docker-push \
-  IMG=$IMG_REGISTRY/mcp-eval-operator:latest \
-  CLONER_IMG=$IMG_REGISTRY/mcp-cloner:latest \
-  TARGET_IMG=$IMG_REGISTRY/mcp-target-sandbox:latest \
-  EVALUATOR_IMG=$IMG_REGISTRY/mcp-evaluator:latest
-docker push $IMG_REGISTRY/mcp-cloner:latest \
-  && docker push $IMG_REGISTRY/mcp-target-sandbox:latest \
-  && docker push $IMG_REGISTRY/mcp-evaluator:latest
+  IMG=$IMG_REGISTRY/mcp-eval-operator:20260930 \
+  CLONER_IMG=$IMG_REGISTRY/mcp-cloner:20260930 \
+  TARGET_IMG=$IMG_REGISTRY/mcp-target-sandbox:20260930 \
+  EVALUATOR_IMG=$IMG_REGISTRY/mcp-evaluator:20260930
+docker push $IMG_REGISTRY/mcp-cloner:20260930 \
+  && docker push $IMG_REGISTRY/mcp-target-sandbox:20260930 \
+  && docker push $IMG_REGISTRY/mcp-evaluator:20260930
 # point the operator at your images
 sed -i "s|ghcr.io/security-eval|$IMG_REGISTRY|g" config/manager/manager.yaml
 
@@ -79,7 +117,7 @@ sed -i "s|ghcr.io/security-eval|$IMG_REGISTRY|g" config/manager/manager.yaml
 make deploy            # = kubectl kustomize config/default | kubectl apply -f - ; kubectl apply -f config/rbac/runner_role.yaml
 
 # 3. Evaluation namespace, NetworkPolicies, agent personas, sample server
-#    (edit the 10.96.0.1/32 API-server CIDR in config/samples/networkpolicy.yaml first)
+#    (no CIDR editing needed — the operator resolves the API-server endpoint IPs per-run)
 make samples           # = kubectl apply -k config/samples
 kubectl -n mcp-evals create secret generic llm-provider-credentials --from-literal=OPENCODE_API_KEY=<zen-key>
 
@@ -113,23 +151,32 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
 
 * **Vigil-LLM** (inbound) — before any untrusted MCP payload (initialize
   instructions, tool descriptions, fuzz/probe responses) enters a prompt, the
-  evaluator POSTs it to `vigil-service:5000/analyze`. A verdict of
+  evaluator POSTs it to `vigil-service:5000/analyze/prompt`. A verdict of
   *injection detected* aborts the run, scores it `0` with
   `riskCategory=Malicious`, records a `Critical` finding and surfaces through
   the CRD status/termination message. `VIGIL_ENFORCE=monitor` downgrades
   detections to log+finding; in the default `strict` mode an *unreachable*
   scanner also fails the run (fail-closed). Set `VIGIL_ENABLED=0` to disable.
-  Detection runs **six engines** whose verdict is OR-ed (each degrades
-  independently, never failing the request): regex heuristics, vigil-llm's
-  YARA rules (vendored), a **vector similarity scan against the distributed
-  Chroma cluster** (`manifests/chroma/`, namespace `chroma`: SysDB
-  coordinator + log-service WAL + 2 query nodes + 2 compactors over
-  **MinIO**, with the Vigil corpora `deadbits/*-all-MiniLM-L6-v2`, 8 900+
-  vectors, loaded by the `vigil-corpus-loader` Job; cosine < 0.45), and two
-  fp32 deberta-v3 prompt-injection classifiers (protectai v1/v2, P > 0.98 /
-  0.85) plus a VADER sentiment signal — every model baked into the image at
-  build time. Pods scale via HPA (CPU 70 %, `VIGIL_HPA_MIN`→8); each replica
-  peaks at ~2.5 GiB RSS, so laptop-class nodes should deploy with
+  The deployment runs the real **vigil-llm** image — `VIGIL_IMG`, built by
+  `deploy.sh` from the pinned upstream source (`VIGIL_SRC_REPO`@
+  `VIGIL_SRC_REF`, commit `f2b4c134d0…`) into
+  `$IMG_REGISTRY/vigil-llm:$IMG_TAG`; upstream publishes no image of its
+  own, only a Dockerfile. Override `VIGIL_IMG` to run a prebuilt/mirrored
+  image your cluster can pull (`SKIP_BUILD=1` + `VIGIL_IMG` is the air-gap
+  path); models download from HuggingFace at boot. The `vigil-server-conf`
+  ConfigMap follows the pinned commit's INI config schema (mounted at
+  `/app/conf/server.conf`) with the **transformer** prompt-injection
+  classifier (`laiyer/deberta-v3-base-prompt-injection`), **YARA** rules
+  (bundled with the image) and the **vectordb** similarity scanner enabled;
+  response-side scanners stay off the evaluation path — the runner feeds raw
+  untrusted payloads, not model responses. The vector plane is the **distributed Chroma cluster**
+  (`manifests/chroma/`, namespace `chroma`: SysDB coordinator + log-service
+  WAL + 2 query nodes + 2 compactors over **MinIO**, with the Vigil corpora
+  `deadbits/*-all-MiniLM-L6-v2`, 8 900+ vectors, loaded by the
+  `vigil-corpus-loader` Job) — point the scanner at its frontend per the
+  pinned image version's config. Pods scale via HPA (CPU 70 %,
+  `VIGIL_HPA_MIN`→8) with a PDB at 50 %; classifier replicas are
+  memory-hungry, so laptop-class nodes should deploy with
   `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`.
 * **Occludra** (outbound) — every OpenCode provider is pinned to
   `occludra-service:8080/v1` (`OCCLUDRA_BASE_URL`): the gateway regex-scrubs
@@ -151,12 +198,17 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
 Runner knobs (all injected by the operator, all overridable per Deployment):
 `MESH_PROXY` (default `socks5://127.0.0.1:1080`, empty = direct),
 `MESH_BRIDGE_PORT` (18080), `MESH_READY_TIMEOUT_MS` (60000),
-`VIGIL_URL`, `VIGIL_ENABLED`, `VIGIL_ENFORCE`,
-`VIGIL_TIMEOUT_MS`, `VIGIL_MAX_PAYLOAD_BYTES`, `OCCLUDRA_BASE_URL`,
-`OCCLUDRA_ENABLED`. The operator derives `VIGIL_URL` / `OCCLUDRA_BASE_URL`
-from the mode: in mesh mode they become the NetBird peer names under
-`NETBIRD_DNS_DOMAIN` (default `netbird.selfhosted` — must match your
-management server's DNS domain, since the per-run policy blocks the
+`VIGIL_URL` (derived, ends in `/analyze/prompt`), `OCCLUDRA_BASE_URL`, plus
+optional pass-throughs read from the operator Deployment's env and forwarded
+verbatim only when set (the runner applies its own defaults otherwise):
+`VIGIL_ENABLED`, `VIGIL_ENFORCE` (`monitor` downgrades detections to
+log+finding), `VIGIL_TIMEOUT_MS`, `VIGIL_MAX_PAYLOAD_BYTES`,
+`OCCLUDRA_ENABLED`, and `RUNTIME_CLASS_NAME` — pin the evaluation pods to a
+sandbox runtime such as gVisor (the RuntimeClass object must exist in the
+cluster; see *Security model*). The operator derives `VIGIL_URL` /
+`OCCLUDRA_BASE_URL` from the mode: in mesh mode they become the NetBird peer
+names under `NETBIRD_DNS_DOMAIN` (default `netbird.selfhosted` — must match
+your management server's DNS domain, since the per-run policy blocks the
 cluster-local service path); with `MESH_ENFORCE=false` they fall back to the
 in-cluster `*.security-gateways.svc.cluster.local` services.
 
@@ -172,9 +224,18 @@ in-cluster `*.security-gateways.svc.cluster.local` services.
 | `Failed` | either | `status.message` names the stage/agent and the error class |
 
 The evaluator patches `status.agentResults[<agent>]` after each agent, so
-partial results survive a later failure. The full report is also written to
-`/output/evaluation-report.json` inside the Pod and summarised in the
-container's termination message.
+partial results survive a later failure. The full report is written to
+`/output/evaluation-report.json` inside the Pod, summarised in the
+container's termination message, and **persisted to a ConfigMap
+`<run>-report`** (owner-referenced to the run, so it is garbage-collected
+with it):
+
+```bash
+kubectl -n mcp-evals get configmap <run>-report -o jsonpath='{.data.report\.json}' | jq .
+```
+
+Reports above ~900 KiB fall back to `summary.json` + `report.truncated.json`
+keys (ConfigMaps cap at ~1 MiB).
 
 **Degraded continuation:** a persona that fails (LLM timeout, structured-output
 exhaustion, target unavailable) no longer aborts the run — its error is
@@ -256,10 +317,10 @@ The untrusted MCP server is the threat. Controls, from outermost in:
    `/tmp` and the `/ipc` emptyDir are writable. Its only I/O is stdio bound to
    `/ipc/stdin` + `/ipc/stdout` FIFOs (or `127.0.0.1:<port>` for SSE), which
    never leaves the Pod's network namespace.
-5. **Evaluator container** — same locked securityContext; the OpenCode agents
-   are given read-only file tools (`edit`/`bash`/`webfetch` denied) so an
-   injected instruction in the target's source or output cannot make the
-   evaluator act on the cluster or filesystem.
+5. **Evaluator container** — same locked securityContext; the OpenCode
+   personas run tool-free (every tool permission denied), so an injected
+   instruction in the target's source or output cannot make the evaluator act
+   on the cluster or filesystem.
 
 Residual risk to be aware of: because the target shares the Pod's network
 namespace, during the `evaluate` phase it can reach the same endpoints the

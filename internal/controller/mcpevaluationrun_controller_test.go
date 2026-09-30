@@ -20,6 +20,7 @@ import (
 	"os"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,7 +50,7 @@ func meshImages() ImageConfig {
 		NetBirdEgressCIDRs:   []string{"10.0.0.0/8", "192.168.0.0/16"},
 		MeshProxyURL:         "socks5://127.0.0.1:1080",
 		MeshBridgePort:       18080,
-		VigilURL:             "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze",
+		VigilURL:             "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze/prompt",
 		OccludraBaseURL:      "http://occludra-service.security-gateways.svc.cluster.local:8080/v1",
 	}
 }
@@ -218,7 +219,7 @@ func TestImageConfigEndpointDerivation(t *testing.T) {
 	os.Setenv("VIGIL_URL", "")
 	os.Setenv("OCCLUDRA_BASE_URL", "")
 	images := ImageConfigFromEnv()
-	if images.VigilURL != "http://vigil.mesh.example.internal:5000/analyze" {
+	if images.VigilURL != "http://vigil.mesh.example.internal:5000/analyze/prompt" {
 		t.Errorf("mesh-mode VIGIL_URL = %q", images.VigilURL)
 	}
 	if images.OccludraBaseURL != "http://occludra.mesh.example.internal:8080/v1" {
@@ -298,5 +299,156 @@ func TestInitContainersDoneWithNativeSidecar(t *testing.T) {
 	pod.Status.InitContainerStatuses[0] = corev1.ContainerStatus{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
 	if initContainersDone(pod) {
 		t.Fatal("running regular init container must block")
+	}
+}
+
+// ---- security-gateway tuning knobs + RuntimeClass wiring ----
+
+// evaluatorContainer returns the evaluator container of a built Job.
+func evaluatorContainer(t *testing.T, job *batchv1.Job) *corev1.Container {
+	t.Helper()
+	for i := range job.Spec.Template.Spec.Containers {
+		if job.Spec.Template.Spec.Containers[i].Name == containerEvaluator {
+			return &job.Spec.Template.Spec.Containers[i]
+		}
+	}
+	t.Fatal("evaluator container missing")
+	return nil
+}
+
+// findEnv returns the named env var's value and whether it is present at all
+// (unlike envValue it tolerates absence, for "must be omitted" assertions).
+func findEnv(container corev1.Container, name string) (string, bool) {
+	for _, env := range container.Env {
+		if env.Name == name {
+			return env.Value, true
+		}
+	}
+	return "", false
+}
+
+func TestBuildJobInjectsSecurityGatewayKnobs(t *testing.T) {
+	run := testRun()
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "filesystem-mcp", Namespace: "mcp-evals"},
+		Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+	}
+
+	cases := []struct {
+		name    string
+		apply   func(*ImageConfig)
+		envName string
+		want    string
+	}{
+		{"vigil enabled flag", func(c *ImageConfig) { c.VigilEnabled = "0" }, "VIGIL_ENABLED", "0"},
+		{"vigil enforce mode", func(c *ImageConfig) { c.VigilEnforce = "monitor" }, "VIGIL_ENFORCE", "monitor"},
+		{"vigil timeout", func(c *ImageConfig) { c.VigilTimeoutMs = "2500" }, "VIGIL_TIMEOUT_MS", "2500"},
+		{"vigil max payload", func(c *ImageConfig) { c.VigilMaxPayloadBytes = "4096" }, "VIGIL_MAX_PAYLOAD_BYTES", "4096"},
+		{"occludra enabled flag", func(c *ImageConfig) { c.OccludraEnabled = "false" }, "OCCLUDRA_ENABLED", "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			images := meshImages()
+			tc.apply(&images)
+			r := &MCPEvaluationRunReconciler{Images: images}
+			evaluator := evaluatorContainer(t, r.buildJob(run, server))
+			got, ok := findEnv(*evaluator, tc.envName)
+			if !ok {
+				t.Fatalf("%s must be injected into the evaluator env when the operator env var is set", tc.envName)
+			}
+			if got != tc.want {
+				t.Fatalf("%s = %q, want %q (pass-through verbatim)", tc.envName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildJobOmitsUnsetSecurityGatewayKnobs(t *testing.T) {
+	run := testRun()
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "filesystem-mcp", Namespace: "mcp-evals"},
+		Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+	}
+
+	r := &MCPEvaluationRunReconciler{Images: meshImages()}
+	evaluator := evaluatorContainer(t, r.buildJob(run, server))
+	// Unset knobs must be absent entirely so the evaluator's built-in
+	// defaults (enabled / strict / 10000ms / 65536B / enabled) apply.
+	for _, envName := range []string{
+		"VIGIL_ENABLED", "VIGIL_ENFORCE", "VIGIL_TIMEOUT_MS", "VIGIL_MAX_PAYLOAD_BYTES", "OCCLUDRA_ENABLED",
+	} {
+		if v, ok := findEnv(*evaluator, envName); ok {
+			t.Errorf("%s must be absent when the operator env var is unset, got %q", envName, v)
+		}
+	}
+}
+
+func TestImageConfigSecurityGatewayKnobsFromEnv(t *testing.T) {
+	// Unset: pass-throughs stay empty (runner defaults apply) and no
+	// RuntimeClass is configured.
+	for _, key := range []string{
+		"VIGIL_ENABLED", "VIGIL_ENFORCE", "VIGIL_TIMEOUT_MS", "VIGIL_MAX_PAYLOAD_BYTES",
+		"OCCLUDRA_ENABLED", "RUNTIME_CLASS_NAME",
+	} {
+		os.Setenv(key, "")
+	}
+	images := ImageConfigFromEnv()
+	if images.VigilEnabled != "" || images.VigilEnforce != "" || images.VigilTimeoutMs != "" ||
+		images.VigilMaxPayloadBytes != "" || images.OccludraEnabled != "" {
+		t.Errorf("unset gateway knobs must stay empty, got %+v", images)
+	}
+	if images.RuntimeClassName != "" {
+		t.Errorf("unset RUNTIME_CLASS_NAME must stay empty, got %q", images.RuntimeClassName)
+	}
+
+	// Set: captured verbatim — the runner does its own validation.
+	t.Setenv("VIGIL_ENABLED", "1")
+	t.Setenv("VIGIL_ENFORCE", "monitor")
+	t.Setenv("VIGIL_TIMEOUT_MS", "2500")
+	t.Setenv("VIGIL_MAX_PAYLOAD_BYTES", "4096")
+	t.Setenv("OCCLUDRA_ENABLED", "false")
+	t.Setenv("RUNTIME_CLASS_NAME", "gvisor")
+	images = ImageConfigFromEnv()
+	if images.VigilEnabled != "1" {
+		t.Errorf("VIGIL_ENABLED = %q, want \"1\"", images.VigilEnabled)
+	}
+	if images.VigilEnforce != "monitor" {
+		t.Errorf("VIGIL_ENFORCE = %q, want \"monitor\"", images.VigilEnforce)
+	}
+	if images.VigilTimeoutMs != "2500" {
+		t.Errorf("VIGIL_TIMEOUT_MS = %q, want \"2500\"", images.VigilTimeoutMs)
+	}
+	if images.VigilMaxPayloadBytes != "4096" {
+		t.Errorf("VIGIL_MAX_PAYLOAD_BYTES = %q, want \"4096\"", images.VigilMaxPayloadBytes)
+	}
+	if images.OccludraEnabled != "false" {
+		t.Errorf("OCCLUDRA_ENABLED = %q, want \"false\"", images.OccludraEnabled)
+	}
+	if images.RuntimeClassName != "gvisor" {
+		t.Errorf("RUNTIME_CLASS_NAME = %q, want \"gvisor\"", images.RuntimeClassName)
+	}
+}
+
+func TestBuildJobRuntimeClassName(t *testing.T) {
+	run := testRun()
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "filesystem-mcp", Namespace: "mcp-evals"},
+		Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+	}
+
+	// Set: the pod template pins the RuntimeClass (e.g. gVisor — the README's
+	// loopback-reachability mitigation).
+	images := meshImages()
+	images.RuntimeClassName = "gvisor"
+	r := &MCPEvaluationRunReconciler{Images: images}
+	job := r.buildJob(run, server)
+	if got := job.Spec.Template.Spec.RuntimeClassName; got == nil || *got != "gvisor" {
+		t.Fatalf("pod template RuntimeClassName = %v, want gvisor", got)
+	}
+
+	// Unset: no runtimeClassName on the pod template.
+	job = (&MCPEvaluationRunReconciler{Images: meshImages()}).buildJob(run, server)
+	if job.Spec.Template.Spec.RuntimeClassName != nil {
+		t.Fatalf("pod template RuntimeClassName must stay nil when unset, got %q", *job.Spec.Template.Spec.RuntimeClassName)
 	}
 }

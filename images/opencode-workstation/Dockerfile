@@ -7,8 +7,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 
-# OpenCode AI CLI
-RUN npm install -g opencode-ai
+# OpenCode AI CLI (pinned — a floating install breaks image rebuilds silently)
+RUN npm install -g opencode-ai@1.18.33
 
 # Non-root user (the base image's `node` user already owns uid 1000; replace
 # it with `programmer` so the required name/uid pair is available).

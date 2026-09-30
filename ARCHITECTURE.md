@@ -64,11 +64,11 @@ its code lives, and whether it holds state.
 | target sandbox | **container** (`target`) of the run Pod, UID 10002 | `mcp-evals` | `images/target/` (bash supervisor) | ephemeral, jailed |
 | evaluator | **container** (`evaluator`) of the run Pod, UID 10001 | `mcp-evals` | `runner/` (TypeScript → `dist/evaluator.js`) | ephemeral; writes results to 4 places (§8.1) |
 | OpenCode child server | **in-process subprocess** spawned by the SDK inside the evaluator container (`opencode serve`, loopback 4096+) | evaluator container | npm `opencode-ai` | session files in container `/tmp` |
-| netbird run sidecar | **sidecar container** (userspace WireGuard) | run Pod | `netbirdio/netbird:latest` | emptyDir `/var/lib/netbird` |
+| netbird run sidecar | **sidecar container** (userspace WireGuard) | run Pod | `netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f` | emptyDir `/var/lib/netbird` |
 | netbird node client | **DaemonSet** `netbird-node` (TUN mode, CAP_NET_ADMIN) | `security-gateways`, 1/node | `manifests/netbird-daemonset.yaml` | emptyDir state |
 | Occludra gateway | **Deployment** `occludra` (2 replicas, PDB min 1, rolling maxUnavailable 0) + **Service** `occludra-service` (ClusterIP 8080) + **Service** `occludra-np` (NodePort 30080) | `security-gateways` | `images/occludra-gateway/` (Go, single file `main.go`) | **stateless**; policy read per-request |
 | `occludra-policy` | **ConfigMap** (mounted at `/conf`, watched per-request) | `security-gateways` | `manifests/occludra-deployment.yaml` | policy source of truth (etcd) |
-| Vigil scanner | **Deployment** `vigil` (replicas via `VIGIL_REPLICAS`, default 2; HPA 70 % CPU, `VIGIL_HPA_MIN`→8; PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | dev: `images/vigil-stub/` (Python, six engines, models baked); prod pin `deadbits/vigil-llm:latest` | **stub: stateless** (~2.5 GiB RSS with both deberta sessions); vector scan queries the distributed Chroma (§5.2.1) |
+| Vigil scanner | **Deployment** `vigil` (replicas via `VIGIL_REPLICAS`, default 2; HPA 70 % CPU, `VIGIL_HPA_MIN`→8; PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | `$IMG_REGISTRY/vigil-llm:$IMG_TAG` — built by `deploy.sh` from pinned upstream source `VIGIL_SRC_REPO@VIGIL_SRC_REF` (`VIGIL_IMG` overrides for mirrored images; upstream publishes no image) | stateless scanner pods, config via `vigil-server-conf` (§5.2); vector plane = distributed Chroma (§5.2.1) |
 | Distributed Chroma | SysDB coordinator (`sysdb`) + Rust SysDB + Log Service WAL (StatefulSet) + **2 Query Nodes** + **2 Compactors** + Work Queue + Fn Consumer + Garbage Collector + Rust frontend (REST v2 :8000); chart vendored at `manifests/chroma/chart/` | `chroma` | `manifests/chroma/` (chart + values + worker/frontend configs), images `chromadb/<svc>:<sha>` | object segments in **MinIO**; catalog in **Postgres** |
 | `vigil-server-conf` | **ConfigMap** (`server.conf`, scanner enable/disable) | `security-gateways` | `manifests/vigil-deployment.yaml` | scanner profile (etcd) |
 | NetworkPolicies | **NetworkPolicy** ×5 static + **1 generated per run** (`<run>-evaluate-egress`) | `security-gateways` / `mcp-evals` | `manifests/occludra-deployment.yaml`, `workstation-nodeport.yaml`, controller §4 | — |
@@ -360,78 +360,54 @@ pass-through.
 **Kind**: Deployment ×2 (PDB) + ClusterIP `vigil-service:5000` + NodePort
 `vigil-np:30500`. Contract: `POST /analyze {"prompt": "…"}` →
 `{"injection_detected": bool, "confidence": float (0–1),
-"status": "blocked"\|"allowed", "scanners": [names], "runs": {…}}`;
-`GET /health` (also the probe target, with a startupProbe absorbing slow
-corpus-loading boots). Content is never logged (`log_payloads: false`).
+"status": "blocked"\|"allowed", "scanners": [names], "runs": {…}}`.
+Probes are version-agnostic **tcpSocket** checks on the REST port with a
+generous startupProbe: the pinned image is not publicly pullable, so no HTTP
+health route could be verified empirically (upstream docs also document no
+`/health` endpoint). Content is never logged (`log_payloads: false`).
 The netbird TUN sidecars on both gateways are liveness-probed with the same
 exec check the DaemonSet uses (`test -S /var/run/netbird/wt0.sock || ip link
 show wt0`) so a wedged sidecar is restarted instead of silently dropping the
 pod from the mesh; the userspace run sidecar (no TUN, no stable socket path)
 relies on the evaluator's SOCKS5 readiness gate + run-level retries instead.
 
-**Deployed implementation today is the test double** (`images/vigil-stub/`,
-Debian-slim Python, UID 10004, read-only rootfs): **six detection engines**,
-verdict = OR over the engines that fire, each degrading independently
-(`runs.<engine>.available: false`, 60 s init-retry cooldown) so no single
-engine can fail a request:
+**Deployed implementation is the real vigil-llm image**
+(built by `deploy.sh` from pinned upstream source `VIGIL_SRC_REPO@VIGIL_SRC_REF`
+into `$IMG_REGISTRY/vigil-llm:$IMG_TAG`; `VIGIL_IMG` overrides for mirrored
+images — the vendored Python
+test double that previously stood in for it was deleted; no scanner behavior
+is toggled via env knobs). Scanners are
+configured exclusively through the `vigil-server-conf` ConfigMap
+(config mounted at `/app/conf/server.conf`, the path the pinned commit's
+baked entrypoint passes to `vigil-server.py`); the shipped profile enables
+the **input scanners** the pinned commit provides:
 
-| Engine | Mechanism | Threshold / default |
+| Scanner | Mechanism | Shipped config |
 |---|---|---|
-| `heuristics` | deterministic regex families, 0.6 per hit (cap 1.0) | fires at score ≥ 0.5 (`VIGIL_STUB_THRESHOLD`); `VIGIL_STUB_ALWAYS_BLOCK=1` forces a detection for abort-path drills |
-| `yara` | vigil-llm's own rules vendored into the image (`data/yara/*.yar`, Apache-2.0) via yara-python | any rule match fires (10 rules: instruction bypass, secrets, ReAct patterns, …) |
-| `vector` | all-MiniLM-L6-v2 (int8 ONNX, baked) → distributed Chroma (§5.2.1) | cosine distance < 0.45 (`VIGIL_VECTOR_THRESHOLD`) |
-| `transformer` | protectai/deberta-v3-base-prompt-injection (the vigil-llm config's model lineage), fp32 ONNX baked | P(INJECTION) > 0.98 (`VIGIL_TRANSFORMER_THRESHOLD`) |
-| `canonical` | protectai/deberta-v3-base-prompt-injection-v2 — stands in for vigil-llm's retired `canonical` classifier, an independent training run | P(INJECTION) > 0.85 (`VIGIL_CANONICAL_THRESHOLD`) |
-| `sentiment` | VADER negative-sentiment signal (upstream-identical semantics) | neg > 0.7 (`VIGIL_SENTIMENT_THRESHOLD`) |
+| `transformer` | transformer prompt-injection classifier | enabled, model `laiyer/deberta-v3-base-prompt-injection`, threshold 0.98 |
+| `yara` | YARA security rules bundled with the image (`/app/data/yara`) | enabled |
+| `vectordb` | embedding similarity against a known injection corpus | enabled, cosine distance threshold 0.4 (MiniLM embedder; see §5.2.1 for the real vector plane) |
+| `sentiment` / `similarity` | response-side signals | configured upstream-default but inert on the evaluation path — the runner only calls `/analyze/prompt` with raw untrusted payloads, never `/analyze/response` |
 
-All model artifacts are baked at build (no runtime downloads, container
-boots offline); deberta models ship **fp32 on purpose** — dynamic int8
-quantization corrupts deberta-v3's disentangled attention (verified:
-obvious injections scored 0.003 post-quantization). The engines warm up
-sequentially at startup (~20 s) and `/health` answers 503 until the pass
-completes, so probes hold the pod out of the endpoints while the ~1.5 GiB
-of models load. Measured on the deployed stack: paraphrased injections fire
-heuristics+transformer+canonical+vector, the DAN jailbreak fires
-transformer+canonical+vector (0.41 against the jailbreak corpus), a pasted
-RSA key fires yara+transformer+canonical, benign prompts pass clean;
-~1–3 s per scan with all six engines.
+(The pinned commit has no `heuristics`/`canonical` scanners and no
+payload-logging kill switch; scan payloads can appear in the container's
+`server.log` on matches.)
 
-Heuristic families (the `heuristics` engine):
+Per-scanner thresholds beyond those shown are the image's own defaults; the
+config layout mirrors vigil-llm's documented `server.conf` — **verify
+against the image version you pin** (the upstream format has changed across
+releases).
 
-| Pattern (abridged) |
-|---|---|
-| `ignore-instructions` | `(ignore\|forget\|disregard\|drop\|override\|bypass)` … ≤40 chars … `(instructions\|prompts\|rules\|directives)` |
-| `reveal-system-prompt` | `(reveal\|print\|output\|repeat\|show\|display\|expose\|disclose\|leak\|dump)` … `(system prompt\|your prompt\|initial/hidden/operating instructions)` |
-| `role-hijack` | `you are now a/an …` |
-| `disregard-safety` | `disregard (all\|any) (safety\|content) …` |
-| `exfiltration` | `curl/wget/fetch/POST http…` + env/HOME/PATH/TOKEN/KEY |
-| `exfil-marker` | `send (all\|the) (data\|content\|files) to http…` |
-| `hidden-instruction` | `[system]`, `(system note)`, `<\|im_start\|>` |
-| `credential-harvest` | `api key\|password\|secret\|token [:=] ≥8 chars` (requires the separator — "password is X" passes here; that path is Occludra's job on egress) |
-
-The `vector` engine (active when `VIGIL_CHROMA_URL` is set, the deploy.sh
-default) embeds the prompt and queries the **distributed Chroma cluster**
-(§5.2.1) over its REST v2 frontend. Measured separation on the deployed
-stack: paraphrased injections ≈ 0.23–0.27, jailbreak role-hijacks ≈ 0.41,
-benign prompts ≥ 0.73. Failure policy mirrors vigil-llm's: an outage of any
-engine — including the whole vector plane — degrades that engine's verdict
-(`runs.<engine>.available: false`, 60 s init-retry cooldown) rather than
-failing the request; a reload of the deployment clears cached failures.
-
-**The production image (`deadbits/vigil-llm`) is a scanner *library* over
-several detection engines** — what the stub replaces:
-- heuristic regex + **YARA** rule scanning (offline, fast);
-- a **canonical prompt-injection classifier** (BERT-family, model download);
-- **embedding-similarity scanning backed by a real vector database** — the
-  upstream implementation uses an *embedded on-disk* ChromaDB inside the
-  container; this platform instead runs the distributed cluster below and
-  keeps the scanner stateless;
-- optional response-side scanners (sentiment, canary/leaked-secret detection).
-
-In the shipped ConfigMap (`vigil-server-conf`) the upstream-embedded ML
-scanners (`canonical`, `transformer`, `vector`) remain **commented out** —
-the vector layer is served by the distributed cluster, so the real image
-needs no PV and no on-disk database to gain the same detection class. The
+The `vector` scanner is where the platform's **distributed Chroma cluster**
+(§5.2.1) plugs in: the `vigil-corpus-loader` Job loads the Vigil embedding
+corpora into it, and if the pinned image version exposes a remote-Chroma
+setting in its config the scanner is pointed at the cluster's frontend
+(`rust-frontend-service.chroma:8000`). Upstream's default is an *embedded
+on-disk* ChromaDB inside the container and the vendored schema shipped here
+has no remote-endpoint knob — confirm the key for your image version before
+relying on the remote path. Upstream semantics degrade a scanner that fails
+(its verdict is marked unavailable) instead of failing the request; the
+strict/monitor enforcement of the final verdict happens evaluator-side.
 
 #### 5.2.1 Distributed Chroma over MinIO (namespace `chroma`)
 
@@ -463,12 +439,14 @@ is idempotent (skips loaded collections; `FORCE_LOAD=1` re-adds). It is the
 only pod in the namespace with internet egress (NetworkPolicy
 `allow-corpus-loader-egress`).
 
-Vigil sizing note: each replica peaks at **~2.5 GiB RSS** (two fp32
-deberta-v3 sessions + MiniLM + runtime). `VIGIL_REPLICAS` / `VIGIL_HPA_MIN`
+Vigil sizing note: the scanner's per-replica footprint is governed by the
+models the pinned image loads at boot (classifier + embedding engines), not
+by a platform constant — size requests/limits from the image you pin.
+`VIGIL_REPLICAS` / `VIGIL_HPA_MIN`
 / `VIGIL_MAX_UNAVAILABLE` (deploy.sh; defaults 2 / 2 / 0) exist because
 laptop-class single-node clusters cannot hold a surge replica alongside the
 first one — there, `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`
-keeps the six-engine scanner deployable; production nodes size for 2+.
+keeps the scanner deployable; production nodes size for 2+.
 
 Namespace `chroma` is default-deny in both directions: full intra-namespace
 mesh, ingress to the frontend only from Vigil scanner pods (port 8000), DNS
@@ -477,8 +455,9 @@ egress, and the loader's HTTPS egress. The `security-gateways` egress policy
 the frontend. Image pin: `CHROMA_IMG_TAG` (short commit SHA from the
 `chromadb` Docker Hub org — **verify CPU compatibility when bumping**: some
 main-branch builds SIGILL on non-AVX-512 hosts; see the note in
-`manifests/chroma/values-mcp-eval.yaml`).
-stub keeps **no state at all** — no DB, no cache, nothing to persist.
+`manifests/chroma/values-mcp-eval.yaml`). The vigil scanner pods themselves
+keep **no state at all** — config from the ConfigMap, corpora in the vector
+plane, nothing to persist.
 
 ### 5.3 NetBird — WireGuard transport mesh
 **Kinds**: DaemonSet + per-pod sidecars; management server is **external**
@@ -518,8 +497,8 @@ the sidecar and falls back to in-cluster service DNS names.
 A plain Docker container (deliberately *outside* Kubernetes) that behaves
 like a developer laptop whose only internet is the security perimeter.
 
-- **Image** `opencode-workstation:latest` (`images/opencode-workstation/`):
-  `node:22-bookworm-slim` + git/curl/jq + `npm i -g opencode-ai` (1.18.31);
+- **Image** `opencode-workstation:20260930` (`images/opencode-workstation/`):
+  `node:22-bookworm-slim` + git/curl/jq + `npm i -g opencode-ai@1.18.33`;
   user `programmer` uid 1000 (base `node` user removed to free the uid).
 - **Entrypoint** renders `~/.config/opencode/opencode.json` from
   `opencode.json.template`: provider `opencode` with
@@ -594,14 +573,14 @@ answers "how risky is this MCP server today" without a client-side join.
 | 5 | Evaluator report | emptyDir | run Pod `/output` | pod lifetime (TTL 600 s) | `evaluation-report.json` (§7.2) |
 | 6 | SA token | projected volume, 1 h TTL | run Pod `/token` (evaluator only) | auto-rotated | k8s credentials for status patches |
 | 7 | Occludra policy | **ConfigMap** `occludra-policy` → etcd, mounted `/conf` | gateway pods | permanent; hot-reloaded per request | 11 detectors, model allowlist, logging flags |
-| 8 | Vigil config | **ConfigMap** `vigil-server-conf` → etcd, mounted `/conf` | vigil pods | permanent | scanner profile (ML scanners off by default) |
+| 8 | Vigil config | **ConfigMap** `vigil-server-conf` → etcd, mounted `/conf` | vigil pods | permanent | scanner profile (all input scanners enabled) |
 | 9a | **Distributed Chroma — object segments** | **MinIO** (`minio.chroma:9000`, PVC 20 Gi, bucket `chroma-storage` auto-created) | `chroma` ns, MinIO Deployment | permanent (PVC) | WAL fragments + compacted HNSW/SPANN index segments of the Vigil corpora |
 | 9b | **Distributed Chroma — catalog** | **Postgres 15** (`postgres.chroma:5432`, PVC 5 Gi) | `chroma` ns | permanent (PVC) | tenants/databases/collections/segment placement (SysDB), migrated by the chart's `sysdb-migration` Job |
 | 9c | **Vigil corpora** | collections `vigil_instruction_bypass` (8 800×384d) + `vigil_jailbreak` (104×384d), cosine space | inside Chroma (query nodes serve them; replicas stay stateless) | permanent via 9a | known injection/jailbreak prompts, HF `deadbits/*-all-MiniLM-L6-v2` |
 | 10 | LLM upstream keys | **Secret** `llm-provider-credentials` (etcd) | `mcp-evals` + mirrored `security-gateways` | permanent | decoded **only** by occludra containers; evaluator's copy only ever configures the dummy-key path |
 | 11 | NetBird identity | Secret `netbird-auth` + emptyDir `/var/lib/netbird` | sidecars/daemonset | emptyDir: pod lifetime (re-enroll on restart) | setup key, peer state, WireGuard keys |
 | 12 | OpenCode session store | files under `$XDG_DATA_HOME` | evaluator container `/tmp` emptyDir; workstation container fs | ephemeral | session transcripts/messages — deliberately throwaway |
-| 13 | Container images | `registry:2` on docker volume | host, `localhost:5001` (kind node has certs.d mirror config) | volume lifetime | occludra-gateway, vigil-stub, mcp-cloner, mcp-target-sandbox, mcp-evaluator (`:local`) |
+| 13 | Container images | `registry:2` on docker volume | host, `localhost:5001` (kind node has certs.d mirror config) | volume lifetime | occludra-gateway, vigil-llm (real image mirrored in), mcp-cloner, mcp-target-sandbox, mcp-evaluator (`:local`) |
 | 14 | Host test evidence | git-tracked files | `dlp-test-results/` in this repo | permanent | round-1 baseline, forensics captures, round-2 verification |
 
 Non-goals (explicit, evaluation plane): no SQL/NoSQL application database, no
@@ -623,7 +602,7 @@ namespace `chroma` and consumed only through the Vigil scanner.
 | Run creation | uncached (APIReader) active-run check at fire time closes the cache-lag dedup window | no double-create on reconcile races |
 | Evaluation workloads | independent batch Jobs per run; transient infra failures recreate the Job (≤2, `status.retries`); stuck-Pending pods fast-retried at 5 min | **yes** — embarrassingly parallel across servers; infra flakes recover without waiting for the next cron |
 | Occludra | HPA 2→8 (CPU 70 %), shared ConfigMap policy, PDB 50 %, rolling maxUnavailable 0, topology spread, HTTP probes + graceful shutdown + in-flight backpressure | **yes** |
-| Vigil | HPA 2→8 (CPU 70 %), PDB 50 %, topology spread, `/health` HTTP probes + startupProbe + in-flight backpressure; scanner pods are stateless — the vector corpora live in the distributed Chroma (§5.2.1) | **yes** — a replacement replica re-reads corpora from the cluster, nothing to rebuild locally |
+| Vigil | HPA 2→8 (CPU 70 %), PDB 50 %, topology spread, tcpSocket probes + generous startupProbe (no verified HTTP health route on the pinned image); scanner pods are stateless and do not self-limit — the vector corpora live in the distributed Chroma (§5.2.1) | **yes** — a replacement replica re-reads its config and the cluster-side corpora, nothing to rebuild locally |
 | Mesh data plane | NetBird WireGuard peer-to-peer | **yes** — no central data chokepoint (management plane is external/SPOF) |
 | Policy distribution | kubelet ConfigMap sync (~1 min) + per-request re-read | eventually consistent, atomic per request |
 | Node capacity | Cluster Autoscaler on OpenStack (ephemeral Nova VMs, scale-out on pending pods, scale-in after 5 min idle); static on kind | **yes** on OpenStack (gated by `DEPLOY_AUTOSCALER=openstack`) |
@@ -669,7 +648,7 @@ scale by moving to external S3/RDS equivalents via the worker configs.
 | Operator (manager) | reconcile of N servers × M runs; every run's Job/NP/pod transitions | The default single reconcile worker would serialize everything; workers are now 8 (run ctrl) / 4 (server ctrl), each reconcile is stateless. List/watch goes through the informer cache; the uncached fire-time list is one extra read per actual fire | Vertical: CPU/mem 500m/512Mi. Horizontal replicas add standby only (leader election) — throughput comes from workers. Retry storms bounded by the default exponential rate limiter |
 | MCPEvaluationRun Jobs | one pod per run; each ~1.1 vCPU / 1 GiB requests | Pods go Pending when nodes fill — this is the signal the Cluster Autoscaler consumes | Embarrassingly parallel; bounded per-server by the single-active-run rule, cluster-wide by node capacity / autoscaler MAX |
 | Occludra | every LLM completion of every agent of every run (regex scrub CPU + long-lived SSE streams) | Up to HPA max 8 replicas; beyond per-replica `OCCLUDRA_MAX_INFLIGHT=64` in-flight it answers 503 + Retry-After (clients back off) instead of exhausting memory | HPA CPU 70 %, 2→8, PDB 50 %; backpressure as the last resort |
-| Vigil | every untrusted payload scan (surface, fuzz, probes) of every run | Same envelope: HPA to 8 replicas; stub saturates at `VIGIL_STUB_MAX_INFLIGHT=64` with 503 + Retry-After (the evaluator's Vigil client retries ≥5xx) | HPA CPU 70 %, 2→8, PDB 50 %; backpressure as the last resort |
+| Vigil | every untrusted payload scan (surface, fuzz, probes) of every run | HPA to 8 replicas; Vigil does not self-limit — per-replica capacity is governed by the image and the HPA, so saturation shows up as latency/queueing until new replicas are Ready (the evaluator's Vigil client retries ≥5xx) | HPA CPU 70 %, 2→8, PDB 50 %; backpressure = HPA + evaluator 5xx backoff (Vigil itself no longer answers 503) |
 | NetBird | userspace WireGuard inside each eval pod (sidecar) and per gateway pod | Per-pod resource, scales 1:1 with pods; TUN sidecars liveness-probed | No central data plane to scale (management plane is the documented external SPOF) |
 | API server / etcd | CR patches (status per agent), Jobs, per-run NPs, events | controller-runtime informer caches absorb reads; writes are merge-patches, retries with backoff. Metrics-server adds kubelet scrape load | Cluster-infra concern (multi-master on production OpenStack; single-node kind accepted locally) |
 | Upstream LLM (Zen) | N runs × 4 agents streaming completions | 429s from the provider surface as agent errors → per-agent degradation, never a lost run | External quota; degradation semantics absorb it safely |
@@ -704,16 +683,18 @@ tool_choice normalization → Authorization swapped to gateway key →
 The upstream sees: gateway IP, gateway key, scrubbed text, `tool_choice:"auto"`.
 
 **Workstation injection probe**: `curl $VIGIL/analyze` → NodePort 30500 →
-heuristic scan → verdict JSON.
+scan by the enabled scanner set → verdict JSON.
 
 ---
 
 ## 11. Deployment & operations
 
-`deploy.sh` knobs: `IMG_REGISTRY` (required), `IMG_TAG=latest`,
+`deploy.sh` knobs: `IMG_REGISTRY` (required), `IMG_TAG=20260930` (frozen),
 `OPENCODE_API_KEY` (required unless `SKIP_SECRET=1`), `SKIP_BUILD=1`,
-`OCCLUDRA_IMG`, `VIGIL_IMG` (default `deadbits/vigil-llm:latest`; if pointed
-at the stub path it builds/pushes `images/vigil-stub`). Builds 5 images,
+`OCCLUDRA_IMG`, `VIGIL_SRC_REPO`/`VIGIL_SRC_REF` (upstream vigil-llm source
+built into `$IMG_REGISTRY/vigil-llm:$IMG_TAG`),
+`VIGIL_IMG` (override for a prebuilt/mirrored vigil image — with
+`SKIP_BUILD=1` this is the air-gap path). Builds 6 images,
 pushes, applies CRDs+manager (`make deploy`), security layers (including the
 shared `PriorityClass mcp-eval-critical`), samples, secret, triggers first
 run. With `MESH_ENFORCE=true` (default) `NETBIRD_SETUP_KEY` is **required** —
@@ -725,9 +706,9 @@ Local dev loop: images `:local` in `kind-registry` → rebuild via
 `kubectl -n mcp-evals annotate mcpserver filesystem-mcp
 security.eval.io/trigger-now=true` (new run) → `kubectl -n mcp-evals get
 mcprun -w`. Workstation rebuild:
-`docker build -t opencode-workstation:latest images/opencode-workstation &&
+`docker build -t opencode-workstation:20260930 images/opencode-workstation &&
 docker rm -f opencode-programmer && docker run -d --name opencode-programmer
---network kind --hostname programmers-laptop opencode-workstation:latest`.
+--network kind --hostname programmers-laptop opencode-workstation:20260930`.
 
 Reference evidence: run `filesystem-mcp-run-vnrsr` Completed (4 agents,
 score 47, Caution); DLP round-2 all-green (`dlp-test-results/run2/`): api-key,
