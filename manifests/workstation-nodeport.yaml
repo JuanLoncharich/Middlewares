@@ -8,10 +8,14 @@
 # from external docker containers is dropped unless explicitly allowed here.
 #
 # Scope deliberately tight: only the docker bridge subnet the kind cluster
-# itself runs on (the `kind` network, 172.21.0.0/16 — adjust if your docker
-# network differs), only the two gateway ports. This is the operator /
+# itself runs on (the `kind` network, __WORKSTATION_CIDR__ — substituted by
+# deploy.sh from WORKSTATION_CIDR, default 172.21.0.0/16; adjust for a
+# different docker network), only the two gateway ports. This is the operator /
 # smoke-test / workstation path, NOT the evaluation path: evaluation pods
 # keep using the NetBird mesh and remain blocked from these ClusterIPs.
+#
+# Applied by deploy.sh only with WORKSTATION_NODEPORT=1 (off by default —
+# the security perimeter is not exposed without opting in).
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
@@ -65,7 +69,7 @@ spec:
     # the pod ports post-DNAT with their original source IP preserved.
     - from:
         - ipBlock:
-            cidr: 172.21.0.0/16
+            cidr: __WORKSTATION_CIDR__
       ports:
         - protocol: TCP
           port: 8080

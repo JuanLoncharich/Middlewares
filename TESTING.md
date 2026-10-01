@@ -37,16 +37,28 @@ Esto es exactamente el modo legacy soportado por el operador.
 
 ```bash
 IMG_REGISTRY=localhost:5001 \
-VIGIL_IMG=localhost:5001/vigil-stub:local \
+VIGIL_IMG=localhost:5001/vigil-llm:20260930 \
 MESH_ENFORCE=false \
 OPENCODE_API_KEY=<tu-zen-key> \
 ./deploy.sh
 ```
 
-> **Nodo laptop (RAM limitada)**: cada réplica de vigil pica ~2.5 GiB RSS
-> (dos clasificadores deberta-v3 fp32 + MiniLM). En un nodo único chico
+> **Vigil ya no se construye localmente como stub**: el stub (el servidor Python
+> vendido en `images/` que lo reemplazaba) fue
+> eliminado y el deploy construye la imagen real de vigil-llm desde el commit
+> fijado (`VIGIL_SRC_REPO`@`VIGIL_SRC_REF`) — upstream no publica ninguna
+> imagen. Si tu nodo no puede construir/clonar, mirroréala a tu registry
+> (`docker pull <tu-fuente>/vigil-llm && docker tag <tu-fuente>/vigil-llm
+> localhost:5001/vigil-llm:20260930 && docker push localhost:5001/vigil-llm:20260930`)
+> y pasá `VIGIL_IMG=<referencia-alcanzable-por-el-cluster>` (con `SKIP_BUILD=1`)
+> — el valor por defecto es `$IMG_REGISTRY/vigil-llm:$IMG_TAG` (20260930).
+
+> **Nodo laptop (RAM limitada)**: las réplicas de vigil cargan sus modelos de
+> clasificación al arranque y son memory-hungry (el footprint exacto depende
+> de la imagen que pinées vía `VIGIL_IMG`). En un nodo único chico
 > agregá `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1` al
-> comando anterior o la segunda réplica muere por OOM durante los rollouts.
+> comando anterior o la segunda réplica puede morir por OOM durante los
+> rollouts.
 > `AUTOSCALE_METRICS=1` instala metrics-server para que el HPA (CPU 70 %,
 > min `VIGIL_HPA_MIN` → 8) tenga métricas reales.
 
@@ -64,8 +76,9 @@ gateways (con HPAs — instala metrics-server si pasás también
 > tag, probá antes `docker run --rm chromadb/query-service:<tag>` — no debe
 > salir con código 132. Verificación end-to-end del scanner vectorial:
 > `kubectl -n security-gateways exec -i deploy/vigil -- python3 -` con un
-> POST a `http://localhost:5000/analyze` — una inyección debe reportar
-> `runs.vector.is_injection=true` con distancia < 0.45.
+> POST a `http://localhost:5000/analyze` — una inyección debe disparar el
+> scanner `vector` (los campos exactos de la respuesta dependen de la
+> versión de la imagen; el umbral configurado en `vigil-server-conf` es 0.8).
 
 Si cambiaste código Go/TS desde el último deploy, no pases `SKIP_BUILD`.
 
@@ -100,17 +113,25 @@ kubectl -n mcp-evals logs -l security.eval.io/server=mcp-evil-demo -c evaluator 
 
 El workstation es el contenedor Docker "laptop del programador": su única
 salida a LLMs es Occludra (NodePort 30080) y su escáner es Vigil (30500).
+
+> **Estos NodePorts no se exponen por defecto**: desplegá con
+> `WORKSTATION_NODEPORT=1` para crear los Services `occludra-np` (30080) /
+> `vigil-np` (30500) y la NetworkPolicy de ingreso (requiere
+> `DEPLOY_SECURITY_GATEWAYS=1`; vale también para las pruebas de la sección
+> 4). Si la subred docker del host no es `172.21.0.0/16`, pasá además
+> `WORKSTATION_CIDR=<subred>`.
+
 Dos formas de entrar:
 
 ```bash
 # (a) reconstruir con SSH habilitado y correr publicado en 2222
-docker build -t opencode-workstation:latest images/opencode-workstation
+docker build -t opencode-workstation:20260930 images/opencode-workstation
 docker rm -f opencode-programmer 2>/dev/null || true
 docker run -d --name opencode-programmer \
   --network kind --hostname programmers-laptop \
   --user root -p 2222:22 \
   -e SSH_PASSWORD=cambiame \
-  opencode-workstation:latest
+  opencode-workstation:20260930
 
 # entrar por SSH (usuario `programmer`)
 ssh programmer@127.0.0.1 -p 2222        # password: cambiame (o $SSH_PASSWORD)
@@ -162,7 +183,7 @@ exactamente lo que esta función existe para detectar.
 | Readiness real | `kubectl -n mcp-eval-system get pods` tras escalar faux-API outage | ready refleja conectividad |
 | Reintento de infra | `kubectl -n mcp-evals delete pod <run-pod> --force` (simula eviction con `kubectl drain` en multi-nodo) | condición `Retried`, Job recreado, run no muere |
 | Degradación por agente | `kubectl -n mcp-evals edit opencodeagent mcp-fuzz-tester` (poné un `modelID` inválido como `zzz-nope`) + `trigger-now` | run **Completed degradado**: mensaje `degraded: 1/4 agent(s) failed`, resultados del resto intactos |
-| Backpressure de Vigil | `kubectl -n security-gateways set env deploy/vigil VIGIL_STUB_MAX_INFLIGHT=1` + muchos triggers | 503 en logs del runner con retry, sin runs perdidos |
+| Backpressure de Vigil | ya no existe límite propio (el in-flight limiter del viejo stub desapareció): saturá con muchos triggers concurrentes y mirá el HPA escalar | sin 503 propios de Vigil — la contrapresión depende del HPA (CPU 70 %) + backoff 5xx del evaluador; Occludra mantiene el suyo (`OCCLUDRA_MAX_INFLIGHT`, 503 + Retry-After) |
 | Marcador de proxy | sección 4 | todo mensaje termina en ` (proxy)` |
 | Cleanup de NetworkPolicy | `kubectl -n mcp-evals get netpol` después de que terminen runs | sin policies `<run>-evaluate-egress` huérfanas |
 

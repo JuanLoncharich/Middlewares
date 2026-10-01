@@ -4,52 +4,26 @@ Attaches a personal machine (RTX GPU) to the k0s cluster **only when you run
 `gpu-node up`**, runs the GPU build of the Vigil scanner on it, and removes
 every trace with `gpu-node down`. Nothing starts at boot.
 
-## What runs on the GPU
+## What runs on the GPU — being redone for the real Vigil
 
-Only the two deberta classifiers inside Vigil run on CUDA (measured on an
-RTX 5060 Ti: 28 ms -> 3 ms per full 256-token window, verdicts identical to
-CPU). MiniLM stays on CPU: its int8 export is *slower* on CUDA and its
-embeddings would drift from what the Chroma thresholds were calibrated on.
-The cosine/HNSW search stays in Chroma (CPU, 8.9k vectors). The CPU `vigil`
-Deployment stays as the always-on fallback, and the GPU scanner returns the
-**same verdicts** as the CPU one.
+The first GPU workload was the ONNX-based Vigil *stub* (deberta forward passes
+on CUDA, 8-10x faster, identical verdicts). Commit 1173676 replaced the stub
+with the real `vigil-llm` (torch/transformers), so that scanner and its
+measurements were removed from the tree; they remain in commit e61b9fc
+(`images/vigil-stub/{ortutil,windowing}.py`, `Dockerfile.gpu`,
+`hack/gpu-node/{bench-onnx,calibrate-windows,calibrate-vector}.py`).
 
-| Piece | File |
-|---|---|
-| Provider selection (`cpu`/`auto`/`cuda`, per-model override, VRAM soft cap, startup warm-up) | `images/vigil-stub/ortutil.py` |
-| GPU image | `images/vigil-stub/Dockerfile.gpu` |
-| GPU scanner Deployment + its own Service (required nodeAffinity) | `manifests/vigil-gpu-deployment.yaml` |
-| Evaluator prefers the GPU scanner, falls back to CPU | `runner/src/vigil.ts` (`VIGIL_GPU_URL`), operator env `VIGIL_GPU_URL` |
-| Node on/off | `gpu-node` (+ `gpu-node.conf`) |
-| CPU vs CUDA correctness + latency | `bench-onnx.py` |
+Findings that still hold for any detector placed here:
+* only big transformer forward passes benefit from the GPU; similarity search
+  over ~9k vectors is microseconds on CPU and does not;
+* whole-payload windowed scoring with prompt-trained classifiers false-alarms
+  on code/JSON/config — never let it decide verdicts without calibration;
+* the PC is ~26 ms from the cluster: the gain is offloading the small nodes,
+  not end-to-end latency.
 
-Latency caveat: the PC is ~26 ms from the cluster, so a scan through it is not
-faster end to end than a local CPU pod; the gain is CPU/RAM moved off the
-cluster's small nodes and headroom for heavier detectors.
-
-## Whole-payload scanning: measured, and why it is report-only
-
-The deberta models read the first 256 tokens and MiniLM the first 128 of each
-payload; the evaluator sends up to 64 KiB (~16-26k tokens). `windowing.py` can
-classify the whole payload as one batch (`VIGIL_MAX_WINDOWS`,
-`VIGIL_VECTOR_MAX_WINDOWS`; ~1.5 s per 55 KiB payload on the GPU; CPU is ~185 ms
-per window, i.e. ~20 s — not feasible). **It never changes a verdict**, because
-on real data it does not help:
-
-* `calibrate-windows.py` (8 benign repo payloads x 8 planted injections):
-  worst-window score is >= 0.99 on 2-6 of 8 *benign* payloads (Go source,
-  `go.sum`, Python, shell, JSON) for the two deberta models; `transformer`
-  detects essentially none of the planted injections.
-* `calibrate-vector.py` (MiniLM -> real Vigil corpora): 0 false alarms but
-  0/192 detections; alone, only 1 of 8 paraphrased injections is within 0.45
-  of the corpus.
-
-So today no ML/vector engine reliably finds a paraphrased injection buried in
-a large structured payload; the regex/YARA engines already scan the whole
-text. Windowed scores (`window_score`, `window_distance`, `windows`,
-`truncated`) are emitted when enabled, for calibrating on real platform
-traffic. Needs a model trained on tool output / natural-language-field
-extraction before it can be enforced.
+Next step: a CUDA build of the real vigil-llm (torch device selection), pinned
+here with the same required nodeAffinity + toleration, behind `VIGIL_GPU_URL`
+(the evaluator already prefers it and falls back to the CPU Vigil).
 
 ## Network (already done)
 
@@ -84,7 +58,6 @@ gpu-node install                   # sudo: k0s binary (sha256-verified), unit+sl
 gpu-node cluster-prep              # RuntimeClass, device plugin, 2 DaemonSets kept off the node  [done]
 #   Calico must advertise the ZeroTier address for the PC — see "Calico" below            [pending]
 #   the platform (deploy.sh) must exist: security-gateways namespace, vigil SA, vigil-service [pending]
-gpu-node deploy-gpu                # vigil-gpu Deployment (replicas 0) + vigil-gpu-service
 gpu-node up                        # attach: firewall+routes, k0s, Ready, GPU advertised,
                                    #         image import (first time), scanner scaled to 1
 gpu-node smoke                     # nvidia-smi in a pod on the node

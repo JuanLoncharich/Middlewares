@@ -102,7 +102,7 @@ spec:
             type: DirectoryOrCreate
       containers:
         - name: netbird
-          image: netbirdio/netbird:latest
+          image: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
           imagePullPolicy: Always
           env:
             - name: NETBIRD_MANAGEMENT_URL
@@ -161,7 +161,7 @@ metadata:
 # buildNetBirdSidecar() in internal/controller/mcpevaluationrun_controller.go.
 #
 #   - name: netbird
-#     image: netbirdio/netbird:latest
+#     image: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
 #     imagePullPolicy: Always
 #     env:
 #       - name: NETBIRD_MANAGEMENT_URL

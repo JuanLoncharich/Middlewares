@@ -26,7 +26,7 @@ ENV NODE_ENV=production \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g --no-audit --no-fund opencode-ai@latest \
+ && npm install -g --no-audit --no-fund opencode-ai@1.18.33 \
  && npm cache clean --force \
  && groupadd -g 10001 evaluator \
  && useradd -u 10001 -g 10001 -M -d /tmp -s /usr/sbin/nologin evaluator

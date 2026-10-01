@@ -4,10 +4,10 @@
 # Every untrusted MCP payload (tool descriptions, initialize instructions,
 # fuzz/probe responses) is POSTed by the evaluator to
 # http://vigil-service:5000/analyze BEFORE it reaches any LLM prompt. Vigil
-# runs heuristic pattern matching, YARA signatures and (optionally)
-# transformer/embedding similarity classifiers and returns a verdict; a
-# "blocked" verdict aborts the evaluation and marks the MCPEvaluationRun
-# Failed with riskCategory=Malicious.
+# runs heuristic pattern matching, YARA signatures and transformer/embedding
+# similarity classifiers and returns a verdict; a "blocked" verdict aborts
+# the evaluation and marks the MCPEvaluationRun Failed with
+# riskCategory=Malicious.
 #
 # Deployed in security-gateways (see occludra-deployment.yaml for the namespace
 # rationale — the netbird sidecar needs CAP_NET_ADMIN). Namespace-wide ingress
@@ -17,29 +17,41 @@
 # Mesh identity: `vigil.<mesh-domain>` (NetBird peer name `vigil`).
 # Non-mesh path: ClusterIP vigil-service:5000 for operators/smoke tests only.
 # ---------------------------------------------------------------------------
-# Scanner configuration. Key layout mirrors vigil-llm's documented
-# server.conf — verify against the image version you pin.
+# Scanner configuration — format of vigil-llm at the pinned commit
+# f2b4c134d060bae81d29fad07003f3c657e63fc8 (the image deploy.sh builds from
+# VIGIL_SRC_REPO@VIGIL_SRC_REF). At that commit the config is INI
+# (configparser), read from /app/conf/server.conf — the path upstream's baked
+# entrypoint passes to vigil-server.py. The [embedding] and [vectordb]
+# sections MUST exist: Vigil always initializes both at boot.
 #
-# VECTORS: the real vigil-llm runs its `vector` scanner against an embedded
-# on-disk ChromaDB inside the container. This platform instead ships the
-# DISTRIBUTED Chroma cluster (manifests/chroma/ — coordinator, log service,
-# compactors, query nodes over MinIO) and the stub's vector scanner queries
-# its frontend REST API with the same all-MiniLM-L6-v2 model as the loaded
-# Vigil corpora. Set VIGIL_CHROMA_URL="" to disable the vector layer.
+# Input scanners enabled on the pinned commit's scan endpoint
+# /analyze/prompt: transformer (prompt-injection classifier
+# laiyer/deberta-v3-base-prompt-injection), yara (rules baked into the image
+# at /app/data/yara) and vectordb (embedding similarity, cosine distance
+# threshold). The pinned commit has no `heuristics`/`canonical` scanners.
+# output_scanners keep upstream's defaults; they only run on
+# /analyze/response, which the evaluation path never calls.
 #
-# The stub image (images/vigil-stub/) runs SIX engines; verdict is the OR of
-# every engine that fires, each degrading independently:
-#   heuristics   regex families                       always on (sub-ms)
-#   yara         vigil-llm rules, yara-python         always on (vendored /rules)
-#   vector       MiniLM -> distributed Chroma         VIGIL_CHROMA_URL, cos < 0.45
-#   transformer  protectai/deberta-v3-base-prompt-injection      P > 0.98
-#   canonical    protectai/deberta-v3-base-prompt-injection-v2   P > 0.85
-#   sentiment    VADER negative score                 neg > 0.7
-# All models are baked into the image (fp32 deberta — int8 quantization
-# corrupts deberta-v3, verified 2026-09-24); /health answers 503 until the
-# warmup pass finishes so probes hold the pod out of endpoints while the
-# ~1.5 GB of models load. Thresholds/toggles: VIGIL_*_THRESHOLD /
-# VIGIL_ENABLE_* env vars (upstream defaults).
+# ENDPOINT NOTE: at this commit upstream serves /analyze/prompt (and
+# /analyze/response) — there is NO bare /analyze route. The operator injects
+# VIGIL_URL ending in /analyze/prompt and the runner parses this build's
+# ResponseModel verdicts natively (detections = non-empty per-scanner
+# "matches"); pass a custom VIGIL_URL only to override the host, keeping the
+# /analyze/prompt suffix.
+#
+# EMBEDDING: model=all-MiniLM-L6-v2 — a local SentenceTransformer, so no
+# OpenAI key is needed (upstream's `openai` profile requires one). Models
+# download from HuggingFace at boot; the tmp emptyDir doubles as that cache.
+# CAVEAT: upstream's entrypoint also pre-loads its ada-002 (1536-dim)
+# corpora into the on-disk ChromaDB; against the 384-dim MiniLM embedder
+# those vectors mismatch and vectordb queries degrade to no-matches
+# (upstream's fail-soft scanner semantics). The platform's REAL vector plane
+# is the distributed Chroma cluster (manifests/chroma/ — coordinator, log
+# service, compactors, query nodes over MinIO): the vigil-corpus-loader Job
+# loads the Vigil embedding corpora there (collections
+# vigil_instruction_bypass / vigil_jailbreak). If a later vigil pin gains a
+# remote-Chroma config knob, point the vectordb scanner at
+# rust-frontend-service.chroma:8000.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -50,54 +62,50 @@ metadata:
     app.kubernetes.io/component: prompt-scanner
 data:
   server.conf: |
-    # Vigil-LLM server configuration (basic profile).
-    name: "vigil-server"
+    # Vigil-LLM server configuration for vigil-llm@
+    # f2b4c134d060bae81d29fad07003f3c657e63fc8 (INI / configparser format —
+    # NOT YAML; older/newer upstream releases parse a different schema).
+    [main]
+    use_cache = true
+    cache_max = 500
 
-    rest:
-      host: 0.0.0.0
-      port: 5000
+    [embedding]
+    # Local SentenceTransformer embedder: the platform ships no OpenAI key,
+    # and this matches the MiniLM family of the corpora loaded into the
+    # distributed Chroma cluster. Downloaded from HuggingFace at boot.
+    model = all-MiniLM-L6-v2
 
-    # Scanner definitions. Each entry maps to a module under vigil/scanners/.
-    scanners:
-      # Fast regex/heuristic signatures — always on.
-      heuristics:
-        enabled: true
-        patterns:
-          - "signatures/heuristics/*.yml"
+    [vectordb]
+    collection = vigil-local
+    # Writable path: the container root filesystem is read-only; /tmp is an
+    # emptyDir.
+    db_dir = /tmp/vigil-vdb
+    n_results = 5
 
-      # YARA rules shipped with the image (default security signatures).
-      yara:
-        enabled: true
-        rules:
-          - "signatures/yara/*.yar"
+    [auto_update]
+    # Do not mutate the corpus from scan traffic — deterministic scans.
+    enabled = false
+    threshold = 3
 
-      # Canonical prompt-injection classifier (requires model download).
-      # canonical:
-      #   enabled: true
+    [scanners]
+    input_scanners = transformer,yara,vectordb
+    output_scanners = similarity,sentiment
 
-      # Embedding similarity against a known injection corpus.
-      # transformer:
-      #   enabled: true
-      #   model: "instructionaldetection"
-      # vector:
-      #   enabled: true
-      #   threshold: 0.8
-      #
-      # NOTE: the commented `vector` block above belongs to the REAL
-      # vigil-llm image (embedded on-disk ChromaDB). The stub deployed here
-      # instead queries the distributed Chroma cluster when
-      # VIGIL_CHROMA_URL is set (see the Deployment env) — no on-disk
-      # database and no PV needed for the vector path.
+    [scanner:yara]
+    rules_dir = /app/data/yara
 
-      # Response-similarity and sentiment scanners stay off for evaluations:
-      # the runner feeds raw untrusted payloads, not model responses.
-      sentiment:
-        enabled: false
+    [scanner:vectordb]
+    threshold = 0.4
 
-    logging:
-      level: "INFO"
-      # Do not persist scanned payloads: they are untrusted content.
-      log_payloads: false
+    [scanner:transformer]
+    model = laiyer/deberta-v3-base-prompt-injection
+    threshold = 0.98
+
+    [scanner:similarity]
+    threshold = 0.4
+
+    [scanner:sentiment]
+    threshold = 0.7
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -111,10 +119,11 @@ metadata:
 spec:
   # __VIGIL_REPLICAS__ / __VIGIL_MAX_UNAVAILABLE__ are substituted by
   # deploy.sh (VIGIL_REPLICAS / VIGIL_MAX_UNAVAILABLE, defaults 2 / 0 for
-  # multi-node production). Laptop-class dev nodes running the fp32
-  # deberta engines need VIGIL_REPLICAS=1 VIGIL_MAX_UNAVAILABLE=1: each
-  # replica peaks at ~2.5 GiB RSS and a surge pod would OOM (see
-  # ARCHITECTURE.md §5.2).
+  # multi-node production). The vigil-llm image loads its classifier models
+  # at boot and is memory-hungry per replica: laptop-class single-node
+  # clusters should set VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1
+  # VIGIL_MAX_UNAVAILABLE=1 so a surge pod cannot OOM the node (see
+  # ARCHITECTURE.md §5.2 — size for the pinned image's model footprint).
   replicas: __VIGIL_REPLICAS__
   strategy:
     type: RollingUpdate
@@ -159,6 +168,12 @@ spec:
             name: vigil-server-conf
         - name: tmp
           emptyDir:
+            # Doubles as the writable HOME: the HuggingFace model cache
+            # (deberta-v3-base classifier + MiniLM embedder + nltk data) and
+            # the on-disk ChromaDB all land here at boot.
+            sizeLimit: 2Gi
+        - name: logs
+          emptyDir:
             sizeLimit: 256Mi
         - name: netbird-state
           emptyDir:
@@ -170,41 +185,44 @@ spec:
       containers:
         # ----------------------------------------------------------- scanner
         - name: vigil
-          image: deadbits/vigil-llm:latest
+          # Placeholder rewritten by deploy.sh (VIGIL_IMG): the default is
+          # built from VIGIL_SRC_REPO@VIGIL_SRC_REF — upstream publishes no
+          # vigil-llm image.
+          image: ghcr.io/security-eval/vigil-llm:20260930
           imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 5000
               protocol: TCP
           env:
-            - name: VIGIL_CONF
-              value: /conf/server.conf
+            # No VIGIL_CONF knob exists upstream: the image's baked entrypoint
+            # runs `python vigil-server.py -c conf/server.conf` (WORKDIR /app)
+            # and its dataset loader hardcodes /app/conf/server.conf — hence
+            # the /app/conf mount below.
             - name: HOME
               value: /tmp
-              # Some builds resolve the config path relative to CWD; both are
-              # provided so either lookup succeeds.
-            - name: VIGIL_CONFIG_PATH
-              value: /conf/server.conf
-              # Vector scanner -> distributed Chroma frontend (manifests/chroma/).
-              # Unset/empty disables the layer; a dead cluster degrades the
-              # verdict to heuristics with a 60s init-retry cooldown.
-            - name: VIGIL_CHROMA_URL
-              value: http://rust-frontend-service.chroma.svc.cluster.local:8000
-            - name: VIGIL_VECTOR_THRESHOLD
-              value: "0.45"
+              # HOME under /tmp gives the HuggingFace model caches a writable
+              # directory (the root filesystem is read-only).
           volumeMounts:
-            # subPath so the image's own conf/ siblings stay visible.
+            # Upstream reads /app/conf/server.conf (baked entrypoint
+            # argument); the mount shadows the image's own conf/ siblings,
+            # which are not read at runtime.
             - name: config
-              mountPath: /conf
+              mountPath: /app/conf
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            # vigil-server.py opens logs/server.log relative to WORKDIR
+            # /app; the emptyDir keeps that writable under
+            # readOnlyRootFilesystem.
+            - name: logs
+              mountPath: /app/logs
           securityContext:
             runAsNonRoot: true
             runAsUser: 10004
             runAsGroup: 10004
-            # Vigil writes nothing outside /tmp; if your build writes compiled
-            # caches next to the code, drop this to false.
+            # Vigil writes only to /tmp (model/vector-store caches) and
+            # /app/logs (server.log).
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             privileged: false
@@ -213,41 +231,40 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           resources:
-            # Two fp32 deberta-v3 ONNX sessions dominate the footprint
-            # (~750 MiB RSS each) + MiniLM + activations; engines load
-            # sequentially at startup to keep the peak well under this.
+            # Classifier workloads (transformer classifier + MiniLM embedder,
+            # downloaded at boot) are CPU- and memory-hungry per replica; size
+            # for the pinned image's model footprint and let the HPA
+            # (CPU 70 %) add replicas.
             requests:
               cpu: 500m
               memory: 1Gi
             limits:
               cpu: "2"
               memory: 3500Mi
-          # HTTP probes against the real /health route (stub and vigil-llm
-          # both expose it): a hung scanner must fail its probes, which a
-          # listening-socket check alone does not catch. The startupProbe
-          # absorbs slow boots (the real image may load scanner corpora)
-          # without tripping liveness during the ramp.
+          # Probes are version-agnostic tcpSocket checks on the REST port:
+          # the pinned image is not publicly pullable, so no HTTP health
+          # route could be verified empirically (upstream docs also document
+          # no /health endpoint). The generous startupProbe absorbs slow
+          # boots (model/corpus loading) without tripping liveness during
+          # the ramp.
           startupProbe:
-            httpGet:
-              path: /health
-              port: 5000
+            tcpSocket:
+              port: http
             periodSeconds: 5
             failureThreshold: 60
           livenessProbe:
-            httpGet:
-              path: /health
-              port: 5000
+            tcpSocket:
+              port: http
             periodSeconds: 20
             failureThreshold: 3
           readinessProbe:
-            httpGet:
-              path: /health
-              port: 5000
+            tcpSocket:
+              port: http
             periodSeconds: 10
             failureThreshold: 2
         # ---------------------------------------------------- netbird (TUN)
         - name: netbird
-          image: netbirdio/netbird:latest
+          image: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
           imagePullPolicy: Always
           env:
             - name: NETBIRD_MANAGEMENT_URL
@@ -336,9 +353,9 @@ metadata:
 # Horizontal scaling of the inbound scanner: every untrusted payload
 # (advertised surface, fuzz responses, probe outputs) of every run is POSTed
 # here, so scanner load grows linearly with concurrent evaluation runs.
-# Scale on CPU; the stub's in-flight limiter (VIGIL_STUB_MAX_INFLIGHT)
-# backpressures with 503+Retry-After until new replicas are Ready. Requires
-# metrics-server (deploy.sh installs it with AUTOSCALE_METRICS=1).
+# Scale on CPU; Vigil does not self-limit — backpressure relies on this HPA
+# plus the evaluator's 5xx retry/backoff. Requires metrics-server (deploy.sh
+# installs it with AUTOSCALE_METRICS=1).
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

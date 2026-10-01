@@ -84,7 +84,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: management
-          image: netbirdio/netbird:latest
+          image: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
           imagePullPolicy: Always
           command: ["netbird", "management"]
           args:
@@ -239,7 +239,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: signal
-          image: netbirdio/netbird:latest
+          image: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
           imagePullPolicy: Always
           command: ["netbird", "signal"]
           args:
@@ -323,7 +323,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: relay
-          image: netbirdio/netbird:latest
+          image: netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f
           imagePullPolicy: Always
           command: ["netbird", "relay"]
           args:

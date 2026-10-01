@@ -49,7 +49,7 @@ spec:
       type: RuntimeDefault
   initContainers:
     - name: cloner
-      image: ghcr.io/security-eval/mcp-cloner:latest
+      image: ghcr.io/security-eval/mcp-cloner:20260930
       imagePullPolicy: IfNotPresent
       env:
         - name: REPO_URL
@@ -92,7 +92,7 @@ spec:
   containers:
     # ---------------------------------------------------------------- target
     - name: target
-      image: ghcr.io/security-eval/mcp-target-sandbox:latest
+      image: ghcr.io/security-eval/mcp-target-sandbox:20260930
       imagePullPolicy: IfNotPresent
       env:
         - name: MCP_TRANSPORT
@@ -134,7 +134,7 @@ spec:
           mountPath: /tmp
     # ------------------------------------------------------------- evaluator
     - name: evaluator
-      image: ghcr.io/security-eval/mcp-evaluator:latest
+      image: ghcr.io/security-eval/mcp-evaluator:20260930
       imagePullPolicy: IfNotPresent
       env:
         - name: RUN_NAME

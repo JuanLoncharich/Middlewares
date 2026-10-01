@@ -12,7 +12,6 @@
 #                        object, undo firewall + routes
 #   gpu-node status      what is currently attached
 #   gpu-node smoke       run nvidia-smi in a pod on the node
-#   gpu-node deploy-gpu  apply the vigil-gpu Deployment + Service (needs the platform's namespace)
 #   gpu-node cluster-prep / cluster-revert
 #                        one-time, reversible cluster changes (asks first)
 #
@@ -138,6 +137,21 @@ net_down() {
 }
 
 # --------------------------------------------------------------------- up/down
+# ------------------------------------------------------------------ GPU image
+# The GPU workload's image is imported straight into the node's own containerd
+# (kept across down/up: only the first `up` pays for it). Generic: whatever
+# GPU_IMAGE_LOCAL / GPU_IMAGE_REF name in gpu-node.conf.
+load_image() {
+  if sudo k0s ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "$GPU_IMAGE_REF"; then
+    log "image $GPU_IMAGE_REF already in the node's containerd"; return
+  fi
+  docker image inspect "$GPU_IMAGE_LOCAL" >/dev/null 2>&1 || die "local image $GPU_IMAGE_LOCAL not found (build the GPU workload image first)"
+  log "importing $GPU_IMAGE_LOCAL into k0s containerd as $GPU_IMAGE_REF (first time only)"
+  docker tag "$GPU_IMAGE_LOCAL" "$GPU_IMAGE_REF"
+  docker save "$GPU_IMAGE_REF" | sudo k0s ctr -n k8s.io images import -
+  docker rmi "$GPU_IMAGE_REF" >/dev/null 2>&1 || true   # drop only the extra tag
+}
+
 up() {
   preflight || die "preflight failed; fix the FAIL lines above (nothing was changed)"
   local ip; ip="$(zt_ip)"
@@ -242,7 +256,6 @@ case "${1:-}" in
   down)      down_cmd ;;
   status)    status ;;
   smoke)     smoke ;;
-  deploy-gpu)     deploy_gpu ;;
   cluster-prep)   cluster_prep ;;
   cluster-revert) cluster_revert ;;
   *) sed -n '2,23p' "$0"; exit 2 ;;

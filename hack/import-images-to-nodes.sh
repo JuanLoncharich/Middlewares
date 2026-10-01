@@ -28,13 +28,13 @@ CTR_BIN="/usr/bin/ctr"
 IMAGES=("$@")
 if [ ${#IMAGES[@]} -eq 0 ]; then
   IMAGES=(
-    ghcr.io/security-eval/mcp-eval-operator:latest
-    ghcr.io/security-eval/mcp-cloner:latest
-    ghcr.io/security-eval/mcp-target-sandbox:latest
-    ghcr.io/security-eval/mcp-evaluator:latest
-    ghcr.io/security-eval/occludra-gateway:latest
-    ghcr.io/security-eval/vigil-stub:latest
-    ghcr.io/security-eval/vigil-corpus-loader:latest
+    ghcr.io/security-eval/mcp-eval-operator:20260930
+    ghcr.io/security-eval/mcp-cloner:20260930
+    ghcr.io/security-eval/mcp-target-sandbox:20260930
+    ghcr.io/security-eval/mcp-evaluator:20260930
+    ghcr.io/security-eval/occludra-gateway:20260930
+    ghcr.io/security-eval/vigil-llm:20260930
+    ghcr.io/security-eval/vigil-corpus-loader:20260930
     # Vector DB plane (see manifests/chroma/): keep CHROMA_IMG_TAG in sync
     # with deploy.sh / manifests/chroma/values-mcp-eval.yaml.
     chromadb/sysdb-service:dff1d8a

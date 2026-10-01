@@ -5,7 +5,7 @@
  * descriptions, fuzz/probe responses) to the Vigil REST API BEFORE the content
  * is formatted into any LLM prompt:
  *
- *   POST http://vigil-service:5000/analyze   {"prompt": "<untrusted payload>"}
+ *   POST <VIGIL_URL>/analyze/prompt   {"prompt": "<untrusted payload>"}
  *
  * Response parsing is written against the integration contract
  * (`injection_detected: boolean`) and degrades gracefully across the verdict
@@ -185,7 +185,29 @@ export class VigilClient {
       };
     }
 
-    // 2) status-based shape ({status: "blocked"|"allowed", runs: {...}}).
+    // 2) Per-scanner matches shape — upstream vigil-llm ResponseModel
+    // (pinned f2b4c13): status is always "success"/"partial_success"/"failed"
+    // and detections are signalled by results: {"scanner:yara": {"matches": [...]}}.
+    // Checked BEFORE the status shape below, whose "success" would otherwise
+    // read as clean.
+    const scanResults = parsed["results"];
+    if (isRecord(scanResults)) {
+      const triggered = Object.entries(scanResults)
+        .filter(([name, r]) =>
+          name !== "scanner:sentiment" &&
+          isRecord(r) &&
+          Array.isArray(r["matches"]) &&
+          r["matches"].length > 0)
+        .map(([name]) => name);
+      return {
+        injectionDetected: triggered.length > 0,
+        confidence: readConfidence(parsed),
+        triggeredScanners: triggered,
+        raw: parsed,
+      };
+    }
+
+    // 3) status-based shape ({status: "blocked"|"allowed", runs: {...}}).
     const status = typeof parsed["status"] === "string" ? parsed["status"].toLowerCase() : undefined;
     if (status !== undefined) {
       return {
@@ -196,7 +218,7 @@ export class VigilClient {
       };
     }
 
-    // 3) decision-based shape ({decision: {block: true, ...}} or a string).
+    // 4) decision-based shape ({decision: {block: true, ...}} or a string).
     const decision = parsed["decision"];
     if (isRecord(decision) && typeof decision["block"] === "boolean") {
       return {
@@ -216,7 +238,7 @@ export class VigilClient {
       };
     }
 
-    // 4) verdict string fallback ({verdict: "..."}).
+    // 5) verdict string fallback ({verdict: "..."}).
     const verdict = parsed["verdict"];
     if (typeof verdict === "string") {
       const v = verdict.toLowerCase();

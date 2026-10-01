@@ -5,7 +5,7 @@ Bridges git's CGI `git-http-backend` to http.server (ThreadingHTTPServer) and
 wraps everything in TLS. Smart HTTP is required because the platform's cloner
 clones with `--depth 1`, which the dumb HTTP transport does not support.
 Bodies are fully buffered — fixture repos are a few KB, this is a TEST DOUBLE
-in the same spirit as images/vigil-stub, not a production git host.
+for local evaluation only, not a production git host.
 """
 
 import functools

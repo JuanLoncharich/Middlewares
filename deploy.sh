@@ -9,18 +9,44 @@
 #
 # Env:
 #   IMG_REGISTRY       registry prefix for the images (required)
-#   IMG_TAG            image tag (default: latest)
+#   IMG_TAG            image tag (default: 20260930 — frozen; never ship :latest)
 #   OPENCODE_API_KEY   written into Secret mcp-evals/llm-provider-credentials (required unless SKIP_SECRET=1)
 #   ANTHROPIC_API_KEY  optionally added to the same Secret when using provider `anthropic`
-#   APISERVER_CIDR     ClusterIP of the kubernetes service, e.g. 10.96.0.1/32 (default: auto-detected)
-#   APISERVER_ENDPOINTS  space-separated endpoint IPs of the kubernetes service (default: auto-detected; needed because the CNI sees post-DNAT addresses)
 #   SKIP_BUILD=1       skip docker build/push
 #   SKIP_SECRET=1      do not (re)create the LLM secret
 #   TRIGGER=0          do not trigger a run at the end
 #   ---- security layers (Vigil / Occludra / NetBird) ----
 #   DEPLOY_SECURITY_GATEWAYS=0   skip the security-gateways namespace (default: deploy it)
+#   MESH_ENFORCE=false           legacy mode: strip the NetBird sidecars and let the evaluator
+#                                reach the gateways via in-cluster ClusterIP services
+#                                (default: true — every run's egress is mesh-only)
+#   IMAGE_PULL_POLICY            when set, forces this pull policy on the operator, gateways and
+#                                run images — e.g. IfNotPresent for air-gap deploys whose images
+#                                were imported straight into the nodes (hack/import-images-to-nodes.sh)
+#   VIGIL_SRC_REPO               vigil-llm upstream repo built by this script (default
+#                                https://github.com/deadbits/vigil-llm)
+#   VIGIL_SRC_REF                vigil-llm commit pinned for the build (default
+#                                f2b4c134d060bae81d29fad07003f3c657e63fc8)
+#   VIGIL_IMG                    Vigil scanner image (default $IMG_REGISTRY/vigil-llm:$IMG_TAG,
+#                                built here from VIGIL_SRC_REPO@VIGIL_SRC_REF — upstream
+#                                publishes no image, only a Dockerfile). Override for a
+#                                prebuilt/mirrored image; SKIP_BUILD=1 + VIGIL_IMG is the
+#                                air-gap path. Upstream semantics: classifier/embedding
+#                                models download from HuggingFace at boot; the
+#                                vigil-server-conf ConfigMap is mounted at
+#                                /app/conf/server.conf (the baked entrypoint runs
+#                                `python vigil-server.py -c conf/server.conf` with
+#                                WORKDIR /app); REST API on port 5000, POST
+#                                /analyze/prompt.
 #   NETBIRD_MANAGEMENT_URL       your NetBird management server (default placeholder is substituted)
 #   NETBIRD_SETUP_KEY            setup key written into Secret netbird-auth (both namespaces)
+#   ---- workstation exposure (opt-in) ----
+#   WORKSTATION_NODEPORT=1       publish Occludra (30080) and Vigil (30500) as NodePorts plus an
+#                                ingress NetworkPolicy, so docker containers on the programmer's
+#                                workstation reach the gateways (TESTING.md §3-4). Default: off —
+#                                the security perimeter stays ClusterIP/mesh-only.
+#   WORKSTATION_CIDR             source CIDR allowed to those NodePorts (default: 172.21.0.0/16,
+#                                the `kind` docker bridge — adjust to your docker network)
 #   ---- scaling ----
 #   AUTOSCALE_METRICS=1          install metrics-server (required by the gateways' HPAs; kind needs this)
 #   DEPLOY_AUTOSCALER=openstack  deploy Cluster Autoscaler (ephemeral Nova VMs). Requires OS_* env vars:
@@ -43,7 +69,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 : "${IMG_REGISTRY:?set IMG_REGISTRY, e.g. ghcr.io/myorg}"
-IMG_TAG="${IMG_TAG:-latest}"
+# Frozen default — never ship :latest.
+IMG_TAG="${IMG_TAG:-20260930}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_SECRET="${SKIP_SECRET:-0}"
 TRIGGER="${TRIGGER:-1}"
@@ -57,16 +84,21 @@ DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
 LOADER_IMG="$IMG_REGISTRY/vigil-corpus-loader:$IMG_TAG"
-# Vigil sizing: defaults fit multi-node production. On laptop-class single
-# nodes each vigil replica peaks at ~2.5 GiB RSS (two fp32 deberta-v3
-# engines) — set VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1
-# or the second replica OOMs during rollouts.
+WORKSTATION_NODEPORT="${WORKSTATION_NODEPORT:-0}"
+WORKSTATION_CIDR="${WORKSTATION_CIDR:-172.21.0.0/16}"
+# Vigil sizing: defaults fit multi-node production. The real vigil-llm image
+# loads its classifier models at boot and is memory-hungry per replica — on
+# laptop-class single nodes set VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1
+# VIGIL_MAX_UNAVAILABLE=1 or a surge replica can OOM the node during
+# rollouts.
 VIGIL_REPLICAS="${VIGIL_REPLICAS:-2}"
 VIGIL_HPA_MIN="${VIGIL_HPA_MIN:-2}"
 VIGIL_MAX_UNAVAILABLE="${VIGIL_MAX_UNAVAILABLE:-0}"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
-VIGIL_IMG="${VIGIL_IMG:-deadbits/vigil-llm:latest}"
+VIGIL_SRC_REPO="${VIGIL_SRC_REPO:-https://github.com/deadbits/vigil-llm}"
+VIGIL_SRC_REF="${VIGIL_SRC_REF:-f2b4c134d060bae81d29fad07003f3c657e63fc8}"
+VIGIL_IMG="${VIGIL_IMG:-$IMG_REGISTRY/vigil-llm:$IMG_TAG}"
 
 IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
@@ -87,13 +119,19 @@ if [ "$SKIP_BUILD" != "1" ]; then
     log "Building Occludra gateway image"
     docker build -t "$OCCLUDRA_IMG" images/occludra-gateway
     docker push "$OCCLUDRA_IMG"
-    case "$VIGIL_IMG" in
-      *vigil-stub*)
-        log "Building Vigil stub image (heuristics + ONNX MiniLM for the vector scanner)"
-        docker build -t "$VIGIL_IMG" images/vigil-stub
-        docker push "$VIGIL_IMG"
-        ;;
-    esac
+    # Vigil: upstream (deadbits/vigil-llm) publishes no image — only a
+    # Dockerfile — so build it from the pinned source commit
+    # (VIGIL_SRC_REPO@VIGIL_SRC_REF). VIGIL_IMG overrides the destination tag;
+    # with SKIP_BUILD=1 it points at a prebuilt/mirrored image (air-gap path).
+    log "Building Vigil gateway image from pinned upstream source"
+    VIGIL_SRC_DIR="$(mktemp -d)"
+    git init -q "$VIGIL_SRC_DIR"
+    git -C "$VIGIL_SRC_DIR" remote add origin "$VIGIL_SRC_REPO"
+    git -C "$VIGIL_SRC_DIR" fetch --depth 1 origin "$VIGIL_SRC_REF"
+    git -C "$VIGIL_SRC_DIR" checkout --quiet FETCH_HEAD
+    docker build -t "$VIGIL_IMG" "$VIGIL_SRC_DIR"
+    rm -rf "$VIGIL_SRC_DIR"
+    docker push "$VIGIL_IMG"
   fi
   if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
     log "Building Vigil corpus loader image"
@@ -107,10 +145,10 @@ log "Installing CRDs, RBAC and operator (namespace mcp-eval-system)"
 # before the Deployment is applied (fresh-cluster ordering bug).
 kubectl apply -f manifests/priorityclass.yaml
 kubectl kustomize config/default \
-  | sed -e "s|ghcr.io/security-eval/mcp-eval-operator:latest|$IMG|g" \
-        -e "s|ghcr.io/security-eval/mcp-cloner:latest|$CLONER_IMG|g" \
-        -e "s|ghcr.io/security-eval/mcp-target-sandbox:latest|$TARGET_IMG|g" \
-        -e "s|ghcr.io/security-eval/mcp-evaluator:latest|$EVALUATOR_IMG|g" \
+  | sed -e "s|ghcr.io/security-eval/mcp-eval-operator:20260930|$IMG|g" \
+        -e "s|ghcr.io/security-eval/mcp-cloner:20260930|$CLONER_IMG|g" \
+        -e "s|ghcr.io/security-eval/mcp-target-sandbox:20260930|$TARGET_IMG|g" \
+        -e "s|ghcr.io/security-eval/mcp-evaluator:20260930|$EVALUATOR_IMG|g" \
         -e "s|https://netbird.example.com:443|$NETBIRD_MANAGEMENT_URL|g" \
   | kubectl apply -f -
 kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager MESH_ENFORCE="$MESH_ENFORCE" >/dev/null
@@ -125,40 +163,10 @@ fi
 kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager --timeout=180s
 
 log "Applying evaluation namespace, NetworkPolicies, agent personas and sample MCPServer (namespace mcp-evals)"
-APISERVER_CIDR="${APISERVER_CIDR:-$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}')/32}"
-# Egress to the API server must also allow the real `default/kubernetes`
-# endpoint IPs: kube-proxy DNATs ClusterIP traffic to them before the CNI
-# evaluates policy (post-DNAT matching on Calico / kube-router). Rendered as
-# ipBlock list items in place of the __APISERVER_ENDPOINTS__ marker (kept as
-# a plain string so the manifest itself stays parseable by kustomize).
-APISERVER_ENDPOINTS="${APISERVER_ENDPOINTS:-$(kubectl get endpoints kubernetes -n default -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{" "}{end}' 2>/dev/null)}"
-if [ -z "${APISERVER_ENDPOINTS// /}" ]; then
-  APISERVER_ENDPOINTS="$(kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{range .items[*].endpoints[*]}{range .addresses[*]}{.address}{" "}{end}{end}')"
-fi
-if [ -z "${APISERVER_ENDPOINTS// /}" ]; then
-  echo "ERROR: no kubernetes service endpoint IPs found; cannot build evaluate-phase policy" >&2
-  exit 1
-fi
-kubectl kustomize config/samples \
-  | APISERVER_CIDR="$APISERVER_CIDR" ENDPOINT_IPS="$APISERVER_ENDPOINTS" awk '
-    {
-      if (match($0, /^ *- __APISERVER_ENDPOINTS__$/)) {
-        indent = substr($0, 1, RLENGTH - length("- __APISERVER_ENDPOINTS__"))
-        n = split(ENVIRON["ENDPOINT_IPS"], ips, /[[:space:]]+/)
-        printed = 0
-        for (i = 1; i <= n; i++) {
-          if (ips[i] == "") continue
-          print indent "- ipBlock:"
-          print indent "    cidr: " ips[i] "/32"
-          printed = 1
-        }
-        if (!printed) { print "ERROR: empty endpoint IP list" > "/dev/stderr"; exit 1 }
-        next
-      }
-      gsub(/10\.96\.0\.1\/32/, ENVIRON["APISERVER_CIDR"])
-      print
-    }' \
-  | kubectl apply -f -
+# The evaluate-phase egress policy is generated per-run by the operator with
+# the API-server endpoint IPs resolved at reconcile time — config/samples
+# needs no CIDR/endpoint substitution here.
+kubectl kustomize config/samples | kubectl apply -f -
 kubectl apply -f config/rbac/runner_role.yaml
 
 if [ "$SKIP_SECRET" != "1" ]; then
@@ -179,8 +187,8 @@ fi
 # Rewrite the gateway image references for this deployment (stdin → stdout).
 # With IMAGE_PULL_POLICY set (air-gap), gateways must not pull either.
 substitute_gateway_images() {
-  sed -e "s|ghcr.io/security-eval/occludra-gateway:latest|$OCCLUDRA_IMG|g" \
-      -e "s|image: deadbits/vigil-llm:latest|image: $VIGIL_IMG|g" \
+  sed -e "s|ghcr.io/security-eval/occludra-gateway:20260930|$OCCLUDRA_IMG|g" \
+      -e "s|image: ghcr.io/security-eval/vigil-llm:20260930|image: $VIGIL_IMG|g" \
       -e "s|__VIGIL_REPLICAS__|$VIGIL_REPLICAS|g" \
       -e "s|__VIGIL_HPA_MIN__|$VIGIL_HPA_MIN|g" \
       -e "s|__VIGIL_MAX_UNAVAILABLE__|$VIGIL_MAX_UNAVAILABLE|g" \
@@ -189,6 +197,11 @@ substitute_gateway_images() {
 apply_gateway_manifest() {
   substitute_gateway_images < "$1" | kubectl apply -f -
 }
+
+# Vigil deploys the vigil-llm image (VIGIL_IMG): built here from the pinned
+# upstream source by default, or a mirrored image via VIGIL_IMG override. The
+# vigil-server-conf ConfigMap ships the config the pinned upstream expects, so
+# the manifest needs no stub-vs-real filtering.
 
 # With MESH_ENFORCE=false the gateways are ordinary in-cluster services:
 #  - netbird sidecars are stripped (no management server → crashloop →
@@ -314,6 +327,21 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
     fi
   else
     echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Workstation exposure (opt-in): NodePort Services for Occludra/Vigil plus an
+# ingress NetworkPolicy for the host docker bridge, so containers on the
+# programmer's workstation reach the gateways directly (TESTING.md §3-4).
+# Off by default — the security perimeter stays ClusterIP/mesh-only.
+# ---------------------------------------------------------------------------
+if [ "$WORKSTATION_NODEPORT" = "1" ]; then
+  if [ "$DEPLOY_SECURITY_GATEWAYS" != "1" ]; then
+    echo "WARNING: WORKSTATION_NODEPORT=1 but DEPLOY_SECURITY_GATEWAYS=0 — no gateways to expose, skipping." >&2
+  else
+    log "Exposing gateway NodePorts to workstation subnet $WORKSTATION_CIDR"
+    sed "s|__WORKSTATION_CIDR__|$WORKSTATION_CIDR|g" manifests/workstation-nodeport.yaml | kubectl apply -f -
   fi
 fi
 

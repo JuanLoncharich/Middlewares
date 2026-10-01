@@ -153,6 +153,25 @@ type ImageConfig struct {
 	// NetBirdDNSDomain is the DNS domain the NetBird management server hands
 	// out for peer names (vigil / occludra — pinned via NETBIRD_HOSTNAME).
 	NetBirdDNSDomain string
+
+	// Optional security-gateway tuning knobs (VIGIL_ENABLED, VIGIL_ENFORCE,
+	// VIGIL_TIMEOUT_MS, VIGIL_MAX_PAYLOAD_BYTES, OCCLUDRA_ENABLED). They are
+	// verbatim pass-throughs: the evaluator (runner/src/evaluator.ts) does its
+	// own validation and applies its own defaults (enabled / enforce /
+	// 10000ms / 65536B / enabled). Empty means the env var is not injected
+	// into the evaluator container at all.
+	VigilEnabled         string
+	VigilEnforce         string
+	VigilTimeoutMs       string
+	VigilMaxPayloadBytes string
+	OccludraEnabled      string
+
+	// RuntimeClassName, when set (RUNTIME_CLASS_NAME), pins the evaluation
+	// pod's runtimeClassName (e.g. a gVisor RuntimeClass — the README's
+	// mitigation for the target's loopback reachability). The operator does
+	// not verify the RuntimeClass exists in the cluster; pods referencing a
+	// missing one stay Pending, which is the deployer's responsibility.
+	RuntimeClassName string
 }
 
 // Security-layer endpoint defaults. The cluster-local service names are the
@@ -161,7 +180,7 @@ type ImageConfig struct {
 // SOCKS proxy cannot dial ClusterIPs, so the defaults become the mesh peer
 // DNS names — which is why they are derived, not hardcoded.
 const (
-	vigilServiceLocal    = "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze"
+	vigilServiceLocal    = "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze/prompt"
 	occludraServiceLocal = "http://occludra-service.security-gateways.svc.cluster.local:8080/v1"
 	defaultNetBirdDomain = "netbird.selfhosted"
 )
@@ -175,7 +194,7 @@ func ImageConfigFromEnv() ImageConfig {
 	vigilURL := os.Getenv("VIGIL_URL")
 	if strings.TrimSpace(vigilURL) == "" {
 		if meshEnforce {
-			vigilURL = "http://vigil." + dnsDomain + ":5000/analyze"
+			vigilURL = "http://vigil." + dnsDomain + ":5000/analyze/prompt"
 		} else {
 			vigilURL = vigilServiceLocal
 		}
@@ -190,16 +209,16 @@ func ImageConfigFromEnv() ImageConfig {
 	}
 
 	return ImageConfig{
-		ClonerImage:          envOr("CLONER_IMAGE", "ghcr.io/security-eval/mcp-cloner:latest"),
-		TargetImage:          envOr("TARGET_IMAGE", "ghcr.io/security-eval/mcp-target-sandbox:latest"),
-		EvaluatorImage:       envOr("EVALUATOR_IMAGE", "ghcr.io/security-eval/mcp-evaluator:latest"),
+		ClonerImage:          envOr("CLONER_IMAGE", "ghcr.io/security-eval/mcp-cloner:20260930"),
+		TargetImage:          envOr("TARGET_IMAGE", "ghcr.io/security-eval/mcp-target-sandbox:20260930"),
+		EvaluatorImage:       envOr("EVALUATOR_IMAGE", "ghcr.io/security-eval/mcp-evaluator:20260930"),
 		RunnerServiceAccount: envOr("RUNNER_SERVICE_ACCOUNT", "mcp-eval-runner"),
 		LLMSecretName:        envOr("LLM_SECRET_NAME", "llm-provider-credentials"),
 		LLMSecretKey:         envOr("LLM_SECRET_KEY", "ANTHROPIC_API_KEY"),
 		ImagePullPolicy:      imagePullPolicyFromEnv(),
 
 		MeshEnforce:          meshEnforce,
-		NetBirdImage:         envOr("NETBIRD_IMAGE", "netbirdio/netbird:latest"),
+		NetBirdImage:         envOr("NETBIRD_IMAGE", "netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f"),
 		NetBirdManagementURL: envOr("NETBIRD_MANAGEMENT_URL", "https://netbird.example.com:443"),
 		NetBirdSecretName:    envOr("NETBIRD_SECRET_NAME", "netbird-auth"),
 		NetBirdSecretKey:     envOr("NETBIRD_SECRET_KEY", "setup-key"),
@@ -210,6 +229,16 @@ func ImageConfigFromEnv() ImageConfig {
 		VigilGPUURL:          strings.TrimSpace(os.Getenv("VIGIL_GPU_URL")),
 		OccludraBaseURL:      occludraURL,
 		NetBirdDNSDomain:     dnsDomain,
+
+		// Optional knobs: gateway tuning values pass through verbatim (the
+		// runner validates them), so they are read raw and only injected when
+		// non-empty; the RuntimeClass name is trimmed via envOr.
+		VigilEnabled:         os.Getenv("VIGIL_ENABLED"),
+		VigilEnforce:         os.Getenv("VIGIL_ENFORCE"),
+		VigilTimeoutMs:       os.Getenv("VIGIL_TIMEOUT_MS"),
+		VigilMaxPayloadBytes: os.Getenv("VIGIL_MAX_PAYLOAD_BYTES"),
+		OccludraEnabled:      os.Getenv("OCCLUDRA_ENABLED"),
+		RuntimeClassName:     envOr("RUNTIME_CLASS_NAME", ""),
 	}
 }
 
@@ -1274,8 +1303,11 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	if r.Images.VigilGPUURL != "" {
 		evaluator.Env = append(evaluator.Env, corev1.EnvVar{Name: "VIGIL_GPU_URL", Value: r.Images.VigilGPUURL})
 	}
+	// Optional gateway tuning knobs: injected only when the operator set them,
+	// so the evaluator's built-in defaults stay authoritative otherwise.
+	evaluator.Env = append(evaluator.Env, gatewayKnobEnv(r.Images)...)
 
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobNameFor(run),
 			Namespace: run.Namespace,
@@ -1323,6 +1355,12 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 			},
 		},
 	}
+	// RuntimeClassName pins the pod sandbox runtime (e.g. gVisor) when the
+	// operator deployment configured one; empty keeps the cluster default.
+	if r.Images.RuntimeClassName != "" {
+		job.Spec.Template.Spec.RuntimeClassName = ptr.To(r.Images.RuntimeClassName)
+	}
+	return job
 }
 
 // meshProxyEnv renders the evaluator's MESH_PROXY value. An empty value is
@@ -1332,6 +1370,32 @@ func meshProxyEnv(images ImageConfig) string {
 		return ""
 	}
 	return images.MeshProxyURL
+}
+
+// gatewayKnobEnv renders the optional security-gateway tuning knobs as
+// evaluator env entries. Values pass through verbatim — the evaluator
+// (runner/src/evaluator.ts) validates "1/0/true/false" flags and numeric
+// limits itself and applies its own defaults — so unset knobs are omitted
+// entirely rather than injected empty.
+func gatewayKnobEnv(images ImageConfig) []corev1.EnvVar {
+	knobs := []struct {
+		name  string
+		value string
+	}{
+		{"VIGIL_ENABLED", images.VigilEnabled},
+		{"VIGIL_ENFORCE", images.VigilEnforce},
+		{"VIGIL_TIMEOUT_MS", images.VigilTimeoutMs},
+		{"VIGIL_MAX_PAYLOAD_BYTES", images.VigilMaxPayloadBytes},
+		{"OCCLUDRA_ENABLED", images.OccludraEnabled},
+	}
+	var env []corev1.EnvVar
+	for _, k := range knobs {
+		if k.value == "" {
+			continue
+		}
+		env = append(env, corev1.EnvVar{Name: k.name, Value: k.value})
+	}
+	return env
 }
 
 // buildNetBirdSidecar renders the userspace NetBird client injected into every
