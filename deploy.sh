@@ -52,6 +52,17 @@
 #   DEPLOY_AUTOSCALER=openstack  deploy Cluster Autoscaler (ephemeral Nova VMs). Requires OS_* env vars:
 #                                OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME OS_USER_DOMAIN_NAME
 #                                OS_REGION_NAME AUTOSCALER_NODE_GROUP (+ optional AUTOSCALER_MIN/AUTOSCALER_MAX)
+#   ---- GPU node: scale-to-zero GPU Vigil (hack/gpu-node) ----
+#   DEPLOY_KEDA=1                install KEDA (chart kedacore/keda@KEDA_CHART_VERSION, namespace keda,
+#                                values manifests/keda/values-mcp-eval.yaml)
+#   VIGIL_GPU=1                  deploy the GPU Vigil (hack/gpu-node/manifests/vigil-gpu.yaml) pinned to the
+#                                on-demand GPU node, scaled 0<->1 by KEDA from the operator's /active-runs,
+#                                and point the evaluator at it (VIGIL_GPU_URL, CPU Vigil stays the fallback).
+#                                Requires KEDA. Build the image with hack/gpu-node/build-vigil-gpu.sh.
+#   VIGIL_GPU_IMG                GPU Vigil image (default $IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG)
+#   VIGIL_GPU_MEM_LIMIT          GPU Vigil host-RAM limit (default 3Gi; must fit gpu-node's MEM_LIMIT_GIB)
+#   VIGIL_PROFILE=lite           in-cluster CPU Vigil runs only the YARA scanner (much less RAM); meant as
+#                                the fallback when the full scanner lives on the GPU node. Default: full.
 #   ---- SPOF elimination ----
 #   IN_CLUSTER_REGISTRY=1        deploy the in-cluster registry (manifests/registry.yaml)
 #   DEPLOY_NETBIRD_CP=1          self-host the NetBird control plane in-cluster (requires an OIDC IdP;
@@ -99,6 +110,13 @@ OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_SRC_REPO="${VIGIL_SRC_REPO:-https://github.com/deadbits/vigil-llm}"
 VIGIL_SRC_REF="${VIGIL_SRC_REF:-f2b4c134d060bae81d29fad07003f3c657e63fc8}"
 VIGIL_IMG="${VIGIL_IMG:-$IMG_REGISTRY/vigil-llm:$IMG_TAG}"
+DEPLOY_KEDA="${DEPLOY_KEDA:-0}"
+KEDA_CHART_VERSION="${KEDA_CHART_VERSION:-2.21.0}"
+VIGIL_GPU="${VIGIL_GPU:-0}"
+VIGIL_GPU_IMG="${VIGIL_GPU_IMG:-$IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG}"
+VIGIL_GPU_MEM_LIMIT="${VIGIL_GPU_MEM_LIMIT:-3Gi}"
+VIGIL_PROFILE="${VIGIL_PROFILE:-full}"
+case "$VIGIL_PROFILE" in full|lite) ;; *) echo "VIGIL_PROFILE must be full or lite" >&2; exit 1 ;; esac
 
 IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
@@ -187,11 +205,18 @@ fi
 # Rewrite the gateway image references for this deployment (stdin → stdout).
 # With IMAGE_PULL_POLICY set (air-gap), gateways must not pull either.
 substitute_gateway_images() {
+  # VIGIL_PROFILE=lite: the in-cluster Vigil keeps only the YARA scanner (the
+  # full transformer/vectordb set runs on the GPU node, see VIGIL_GPU).
+  local profile_args=()
+  if [ "$VIGIL_PROFILE" = lite ]; then
+    profile_args=(-e "s|input_scanners = transformer,yara,vectordb|input_scanners = yara|")
+  fi
   sed -e "s|ghcr.io/security-eval/occludra-gateway:20260930|$OCCLUDRA_IMG|g" \
       -e "s|image: ghcr.io/security-eval/vigil-llm:20260930|image: $VIGIL_IMG|g" \
       -e "s|__VIGIL_REPLICAS__|$VIGIL_REPLICAS|g" \
       -e "s|__VIGIL_HPA_MIN__|$VIGIL_HPA_MIN|g" \
       -e "s|__VIGIL_MAX_UNAVAILABLE__|$VIGIL_MAX_UNAVAILABLE|g" \
+      ${profile_args[@]+"${profile_args[@]}"} \
       ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"}
 }
 apply_gateway_manifest() {
@@ -426,6 +451,34 @@ region = $OS_REGION_NAME" \
       -e "s|__AUTOSCALER_NODE_GROUP__|$AUTOSCALER_NODE_GROUP|g" \
       manifests/cluster-autoscaler-openstack.yaml | kubectl apply -f -
   echo "Autoscaler: workers scale $AUTOSCALER_MIN..$AUTOSCALER_MAX in node group '$AUTOSCALER_NODE_GROUP'; idle VMs are deleted after 5m."
+fi
+
+# ---------------------------------------------------------------------------
+# GPU node: KEDA + scale-to-zero GPU Vigil (see hack/gpu-node/README.md).
+# ---------------------------------------------------------------------------
+if [ "$DEPLOY_KEDA" = "1" ]; then
+  log "Installing KEDA $KEDA_CHART_VERSION (namespace keda)"
+  helm upgrade --install keda keda --repo https://kedacore.github.io/charts \
+    --version "$KEDA_CHART_VERSION" -n keda --create-namespace \
+    -f manifests/keda/values-mcp-eval.yaml --wait --timeout 5m
+fi
+
+if [ "$VIGIL_GPU" = "1" ]; then
+  kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1 \
+    || { echo "ERROR: VIGIL_GPU=1 needs KEDA (DEPLOY_KEDA=1)" >&2; exit 1; }
+  log "Deploying the scale-to-zero GPU Vigil ($VIGIL_GPU_IMG)"
+  # Keep the ScaledObject's current pause state: a re-deploy must not pause a
+  # GPU Vigil that `gpu-node up` has already released (new objects start paused).
+  was_paused="$(kubectl -n security-gateways get scaledobject vigil-gpu \
+    -o jsonpath='{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}' 2>/dev/null || echo 0)"
+  existed="$(kubectl -n security-gateways get scaledobject vigil-gpu -o name 2>/dev/null || true)"
+  sed -e "s|__VIGIL_GPU_IMG__|$VIGIL_GPU_IMG|g" -e "s|__VIGIL_GPU_MEM_LIMIT__|$VIGIL_GPU_MEM_LIMIT|g" \
+    hack/gpu-node/manifests/vigil-gpu.yaml | kubectl apply -f -
+  if [ -n "$existed" ] && [ -z "$was_paused" ]; then
+    kubectl -n security-gateways annotate scaledobject vigil-gpu autoscaling.keda.sh/paused-replicas- >/dev/null
+  fi
+  kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager \
+    VIGIL_GPU_URL="http://vigil-gpu-service.security-gateways.svc.cluster.local:5000/analyze/prompt" >/dev/null
 fi
 
 log "Done. Watch progress with:"

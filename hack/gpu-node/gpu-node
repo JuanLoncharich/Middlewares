@@ -37,6 +37,12 @@ die()  { printf '\033[1;31m[gpu-node] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 zt_ip() { ip -4 -o addr show dev "$ZT_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
 node_exists() { "${KC[@]}" get node "$NODE_NAME" >/dev/null 2>&1; }
 deploy_exists() { "${KC[@]}" -n "$GPU_NAMESPACE" get deploy "$GPU_DEPLOYMENT" >/dev/null 2>&1; }
+# KEDA owns the GPU workload's replica count (ScaledObject of the same name,
+# 0 <-> 1 from the operator's /active-runs). Attaching releases the pause;
+# detaching pins it to 0 first, so a detached PC never leaves a Pending pod.
+scaledobject_exists() { "${KC[@]}" -n "$GPU_NAMESPACE" get scaledobject "$GPU_DEPLOYMENT" >/dev/null 2>&1; }
+keda_pause() { "${KC[@]}" -n "$GPU_NAMESPACE" annotate --overwrite scaledobject "$GPU_DEPLOYMENT" autoscaling.keda.sh/paused-replicas=0 >/dev/null; }
+keda_resume() { "${KC[@]}" -n "$GPU_NAMESPACE" annotate scaledobject "$GPU_DEPLOYMENT" autoscaling.keda.sh/paused-replicas- >/dev/null; }
 
 # --------------------------------------------------------------- preflight --
 preflight() {
@@ -169,9 +175,13 @@ up() {
   until [ "$("${KC[@]}" get node "$NODE_NAME" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}' 2>/dev/null)" = "1" ]; do
     sleep 3; t=$((t+3)); [ $t -lt "$READY_TIMEOUT" ] || die "GPU not advertised — is the nvidia device plugin DaemonSet applied? (see README)"
   done
-  if deploy_exists; then
+  if deploy_exists && scaledobject_exists; then
     load_image
-    log "starting $GPU_DEPLOYMENT"
+    log "releasing KEDA pause on $GPU_DEPLOYMENT (scales 0<->1 with active evaluations; idle = 0)"
+    keda_resume
+  elif deploy_exists; then
+    load_image
+    log "starting $GPU_DEPLOYMENT (no KEDA ScaledObject: always on while attached)"
     "${KC[@]}" -n "$GPU_NAMESPACE" scale deploy "$GPU_DEPLOYMENT" --replicas=1 >/dev/null
     "${KC[@]}" -n "$GPU_NAMESPACE" rollout status deploy "$GPU_DEPLOYMENT" --timeout="${READY_TIMEOUT}s"
   else
@@ -183,9 +193,14 @@ up() {
 
 down_cmd() {
   trap - ERR
+  if scaledobject_exists; then
+    log "pausing KEDA on $GPU_DEPLOYMENT at 0 replicas"
+    keda_pause || true
+  fi
   if deploy_exists; then
-    log "scaling $GPU_DEPLOYMENT to 0"
     "${KC[@]}" -n "$GPU_NAMESPACE" scale deploy "$GPU_DEPLOYMENT" --replicas=0 >/dev/null || true
+    "${KC[@]}" -n "$GPU_NAMESPACE" wait --for=delete pod -l "app.kubernetes.io/name=vigil-llm-gpu" \
+        --timeout=60s >/dev/null 2>&1 || true
   fi
   if node_exists; then
     log "cordon + drain node/$NODE_NAME"
@@ -211,7 +226,7 @@ status() {
   echo "   routes:"; ip route | grep -E "$(IFS='|'; echo "${NODES_LAN[*]}")" | sed 's/^/     /' || true
   echo "== cluster"
   "${KC[@]}" get node "$NODE_NAME" -o wide 2>&1 | sed 's/^/   /' || true
-  "${KC[@]}" -n "$GPU_NAMESPACE" get deploy,pod -l app.kubernetes.io/component=prompt-scanner-gpu -o wide 2>&1 | sed 's/^/   /' || true
+  "${KC[@]}" -n "$GPU_NAMESPACE" get scaledobject,deploy,pod -l app.kubernetes.io/name=vigil-llm-gpu -o wide 2>&1 | sed 's/^/   /' || true
 }
 
 smoke() {

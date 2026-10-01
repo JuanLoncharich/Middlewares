@@ -1,0 +1,24 @@
+# KEDA (chart kedacore/keda, pinned in deploy.sh: KEDA_CHART_VERSION) sized for
+# the small k0s workers. KEDA only drives one ScaledObject here: the GPU Vigil
+# on the on-demand GPU node (hack/gpu-node/manifests/vigil-gpu.yaml), polling
+# the operator's /active-runs every 15 s.
+resources:
+  operator:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  metricServer:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+# Admission webhooks only validate ScaledObjects at apply time; with a single
+# reviewed ScaledObject in Git they are not worth a third pod on these nodes.
+webhooks:
+  enabled: false
+# Never on the GPU PC (it comes and goes) — the taint already prevents it;
+# keep the control-plane node free too.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: security.eval.io/gpu
+              operator: DoesNotExist

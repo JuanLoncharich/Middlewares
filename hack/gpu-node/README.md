@@ -4,26 +4,51 @@ Attaches a personal machine (RTX GPU) to the k0s cluster **only when you run
 `gpu-node up`**, runs the GPU build of the Vigil scanner on it, and removes
 every trace with `gpu-node down`. Nothing starts at boot.
 
-## What runs on the GPU — being redone for the real Vigil
+## What runs on the GPU: the full Vigil, scaled to zero when idle
 
-The first GPU workload was the ONNX-based Vigil *stub* (deberta forward passes
-on CUDA, 8-10x faster, identical verdicts). Commit 1173676 replaced the stub
-with the real `vigil-llm` (torch/transformers), so that scanner and its
-measurements were removed from the tree; they remain in commit e61b9fc
-(`images/vigil-stub/{ortutil,windowing}.py`, `Dockerfile.gpu`,
-`hack/gpu-node/{bench-onnx,calibrate-windows,calibrate-vector}.py`).
+```
+              operator (mcp-eval-system)
+              GET :8082/active-runs -> {"activeRuns": N}   (non-terminal MCPEvaluationRuns)
+                         │ polled every 15 s
+                         ▼
+   KEDA (ns keda) ── ScaledObject vigil-gpu: N>0 -> 1 replica, idle 10 min -> 0
+                         │
+                         ▼
+   vigil-gpu (security-gateways) ── pinned to this PC (required nodeAffinity + toleration)
+        full vigil-llm: transformer on CUDA, yara, vectordb; HF cache on the PC's disk
+                         ▲
+   evaluator ── VIGIL_GPU_URL first ──┘   falls back to ──► vigil-service (in-cluster)
+```
 
-Findings that still hold for any detector placed here:
-* only big transformer forward passes benefit from the GPU; similarity search
-  over ~9k vectors is microseconds on CPU and does not;
-* whole-payload windowed scoring with prompt-trained classifiers false-alarms
-  on code/JSON/config — never let it decide verdicts without calibration;
-* the PC is ~26 ms from the cluster: the gain is offloading the small nodes,
-  not end-to-end latency.
+| Piece | File |
+|---|---|
+| GPU image: same pinned vigil-llm source, CUDA torch 2.7 (Blackwell), transformer pipeline on GPU | `images/vigil-gpu/Dockerfile`, `build-vigil-gpu.sh` |
+| ConfigMap + Deployment (replicas owned by KEDA) + Service + ScaledObject | `manifests/vigil-gpu.yaml` |
+| Operator `/active-runs` (KEDA metrics-api trigger) | `internal/controller/activity.go`, Service `mcp-eval-operator-activity` |
+| KEDA install values (small, no webhooks, never on the PC) | `manifests/keda/values-mcp-eval.yaml` |
+| Evaluator prefers the GPU Vigil, falls back to the CPU one | `runner/src/vigil.ts` (`VIGIL_GPU_URL`) |
 
-Next step: a CUDA build of the real vigil-llm (torch device selection), pinned
-here with the same required nodeAffinity + toleration, behind `VIGIL_GPU_URL`
-(the evaluator already prefers it and falls back to the CPU Vigil).
+Why a custom metric and not KEDA's pod-count trigger: `kubernetes-workload`
+only counts pods in the ScaledObject's own namespace, and evaluation pods
+(`mcp-evals`) and the scanner (`security-gateways`) live apart.
+
+States:
+
+| Situation | GPU Vigil | Who scans |
+|---|---|---|
+| PC detached (`gpu-node down`) | ScaledObject **paused at 0** | in-cluster Vigil |
+| PC attached, no evaluation for 10 min | **0** (GPU + RAM free) | — |
+| Evaluation starts | 0 -> 1; ready during the run's clone phase | GPU Vigil (CPU Vigil until it is Ready) |
+
+`VIGIL_PROFILE=lite` (deploy.sh) shrinks the in-cluster fallback to YARA only,
+for when the full scanner should live on this PC. The evaluation report records
+which endpoint answered each scan.
+
+Lessons that still hold (measured with the earlier ONNX stub, commit e61b9fc):
+only big transformer forward passes benefit from the GPU; similarity search
+over ~9k vectors is microseconds on CPU; whole-payload windowed scoring with
+prompt-trained classifiers false-alarms on code/JSON; the PC is ~26 ms away,
+so the gain is offloading the small nodes, not latency.
 
 ## Network (already done)
 
@@ -56,6 +81,8 @@ gpu-node preflight                 # read-only; shows what is missing
 gpu-node install                   # sudo: k0s binary (sha256-verified), unit+slice,
                                    #       containerd NVIDIA runtime, join token          [done]
 gpu-node cluster-prep              # RuntimeClass, device plugin, 2 DaemonSets kept off the node  [done]
+hack/gpu-node/build-vigil-gpu.sh   # build vigil-llm-gpu:local (same pinned source, CUDA torch)
+DEPLOY_KEDA=1 VIGIL_GPU=1 [VIGIL_PROFILE=lite] ./deploy.sh ...   # KEDA + paused GPU Vigil + VIGIL_GPU_URL
 #   Calico must advertise the ZeroTier address for the PC — see "Calico" below            [pending]
 #   the platform (deploy.sh) must exist: security-gateways namespace, vigil SA, vigil-service [pending]
 gpu-node up                        # attach: firewall+routes, k0s, Ready, GPU advertised,
