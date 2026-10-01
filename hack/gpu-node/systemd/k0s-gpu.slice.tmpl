@@ -1,0 +1,12 @@
+# Everything the GPU node runs (k0s, containerd, kubelet AND pods) lives in
+# this slice, so one set of limits bounds the whole node and stopping the
+# slice removes every process it started.
+[Unit]
+Description=k0s GPU worker resources (CPU/RAM cap)
+
+[Slice]
+CPUQuota=__CPU_QUOTA__%
+MemoryHigh=__MEM_HIGH__
+MemoryMax=__MEM_MAX__
+MemorySwapMax=0
+TasksMax=8192

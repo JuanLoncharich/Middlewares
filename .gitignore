@@ -8,3 +8,6 @@ config/samples/git-credentials-secret.yaml
 .DS_Store
 .zcode/
 __pycache__/
+
+# gpu-node per-machine overrides
+hack/gpu-node/gpu-node.local.conf

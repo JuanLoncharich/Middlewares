@@ -1,0 +1,16 @@
+# Selects the "nvidia" containerd runtime that install registers in
+# /etc/k0s/containerd.d/nvidia.toml. Scheduling pins it to the GPU node, so
+# pods that ask for this class can only land where the runtime exists.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+scheduling:
+  nodeSelector:
+    security.eval.io/gpu: nvidia
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule

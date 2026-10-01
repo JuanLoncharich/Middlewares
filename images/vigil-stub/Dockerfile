@@ -27,7 +27,7 @@ RUN python /tmp/download-models.py && rm /tmp/download-models.py
 # Vendored YARA rules (deadbits/vigil-llm data/yara, Apache-2.0).
 COPY rules/ /rules/
 
-COPY server.py scanners.py embedder.py /app/
+COPY server.py scanners.py embedder.py ortutil.py windowing.py /app/
 
 RUN addgroup --gid 10004 vigil && adduser --uid 10004 --gid 10004 vigil
 USER 10004:10004

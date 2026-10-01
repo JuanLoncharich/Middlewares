@@ -1,0 +1,7 @@
+# Merged into k0s's containerd config (/etc/k0s/containerd.d/).
+# Registers the "nvidia" runtime that the RuntimeClass of the same name selects.
+version = 2
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+  runtime_type = "io.containerd.runc.v2"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+    BinaryName = "/usr/bin/nvidia-container-runtime"

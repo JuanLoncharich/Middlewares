@@ -1,7 +1,8 @@
 """Detection engines for the Vigil-compatible scanner stub.
 
 Six scanners, mirroring vigil-llm's engine set (same detection semantics,
-thresholds and defaults; model-based engines run ONNX on CPU):
+thresholds and defaults; model-based engines run ONNX on CPU by default,
+or on CUDA when VIGIL_ORT_PROVIDER=auto|cuda, see ortutil.py):
 
   heuristics   regex families (always on)                       [stub-native]
   yara         YARA rules, vendored from vigil-llm data/yara/   [upstream rules]
@@ -21,6 +22,8 @@ the /analyze request. Verdict = OR over the engines that fired.
 import os
 import threading
 import time
+
+import windowing
 
 
 # --------------------------------------------------------------------- utils
@@ -216,33 +219,49 @@ class VectorScanner(LazyEngine):
             return {"available": False, "reason": self._error}, False
         try:
             # _embedder is the lazy factory (shared MiniLM encoder).
-            vector = self._embedder().encode(text)
-            best = None  # (distance, collection, document)
+            meta = None
+            if windowing.VECTOR_MAX_WINDOWS > 1:
+                vectors, meta = self._embedder().encode_windows(text, windowing.VECTOR_MAX_WINDOWS)
+            else:
+                vectors = [self._embedder().encode(text)]
+            best = None   # (distance, collection, document) — first window: the verdict
+            worst = None  # smallest distance over ALL windows — reported only
+            vectors_groups = list(windowing.batches(vectors, 64))
             for name, coll_id in self._collection_ids.items():
                 url = f"{CHROMA_URL}/api/v2/tenants/{CHROMA_TENANT}/databases/{CHROMA_DATABASE}/collections/{coll_id}/query"
-                data = self._json.dumps({"query_embeddings": [vector], "n_results": VECTOR_N_RESULTS}).encode()
-                req = self._urllib.Request(url, data=data, method="POST",
-                                           headers={"Content-Type": "application/json"})
-                with self._urllib.urlopen(req, timeout=10) as resp:
-                    res = self._json.loads(resp.read())
-                distances = (res.get("distances") or [[]])[0] or []
-                documents = (res.get("documents") or [[]])[0] or []
-                for distance, doc in zip(distances, documents):
-                    if best is None or distance < best[0]:
-                        best = (float(distance), name, doc)
+                # One request carries many query embeddings: the whole payload
+                # costs one round trip per collection (groups of 64 at most).
+                for group in vectors_groups:
+                    data = self._json.dumps({"query_embeddings": group, "n_results": VECTOR_N_RESULTS}).encode()
+                    req = self._urllib.Request(url, data=data, method="POST",
+                                               headers={"Content-Type": "application/json"})
+                    with self._urllib.urlopen(req, timeout=10) as resp:
+                        res = self._json.loads(resp.read())
+                    for qi, (distances, documents) in enumerate(zip(res.get("distances") or [], res.get("documents") or [])):
+                        is_first = (group is vectors_groups[0] and qi == 0)
+                        for distance, doc in zip(distances or [], documents or []):
+                            if is_first and (best is None or distance < best[0]):
+                                best = (float(distance), name, doc)        # decision: first window only
+                            if worst is None or distance < worst:
+                                worst = float(distance)                    # report: any window
             if best is None:
                 return {"available": True, "is_injection": False, "score": 0.0}, False
             distance, collection, document = best
             matched = distance < VECTOR_THRESHOLD
-            return {
+            run = {
                 "available": True,
                 "is_injection": matched,
                 "score": round(1.0 - distance, 3),
                 "distance": round(distance, 4),
                 "threshold": VECTOR_THRESHOLD,
                 "matched_collection": collection,
-                "nearest_document": document[:160],
-            }, matched
+                "nearest_document": (document or "")[:160],
+            }
+            if meta is not None:
+                run.update(meta)
+                if worst is not None:
+                    run["window_distance"] = round(worst, 4)
+            return run, matched
         except Exception as err:  # noqa: BLE001
             return {"available": False, "reason": str(err)[:200]}, False
 
@@ -259,18 +278,21 @@ VIGIL_ENABLE_CANONICAL = os.environ.get("VIGIL_ENABLE_CANONICAL", "1") == "1"
 class _OnnxTextClassifier:
     """Shared ONNX text-classification backend (tokenizers + onnxruntime)."""
 
-    def __init__(self, model_path, tokenizer_path, max_tokens):
+    def __init__(self, model_path, tokenizer_path, max_tokens, label):
         import numpy as np
         from tokenizers import Tokenizer
         import onnxruntime as ort
+        from ortutil import create_session
 
         self.np = np
+        self.max_tokens = max_tokens
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
         self.tokenizer.enable_truncation(max_length=max_tokens)
-        self.session = ort.InferenceSession(
-            model_path,
-            providers=["CPUExecutionProvider"],
-        )
+        # Untruncated twin for windowed scans of the whole payload.
+        self.tokenizer_full = Tokenizer.from_file(tokenizer_path)
+        self.tokenizer_full.no_truncation()
+        self.tokenizer_full.no_padding()
+        self.session = create_session(ort, model_path, label)
         self.input_names = {i.name for i in self.session.get_inputs()}
 
     def probability_of_index(self, text, class_index):
@@ -284,6 +306,29 @@ class _OnnxTextClassifier:
             feed["token_type_ids"] = np.zeros_like(ids)
         logits = self.session.run(None, feed)[0][0]  # (num_classes,)
         return _softmax2([float(v) for v in logits])[class_index]
+
+    def probability_windows(self, text, class_index, max_windows):
+        """P(class_index) over the WHOLE text: every overlapping window is
+        classified (batched, one session.run per VIGIL_BATCH_SIZE windows) and
+        the worst window wins. Returns (p_max, meta)."""
+        np = self.np
+        cls_id, sep_id, pad_id = windowing.special_ids(self.tokenizer_full)
+        ids = self.tokenizer_full.encode(text, add_special_tokens=False).ids
+        wins, truncated = windowing.split(ids, self.max_tokens - 2, windowing.OVERLAP, max_windows)
+        probs = []
+        for chunk in windowing.batches(wins, windowing.BATCH_SIZE):
+            input_ids, mask = windowing.pad_batch(np, chunk, cls_id, sep_id, pad_id)
+            feed = {"input_ids": input_ids, "attention_mask": mask}
+            if "token_type_ids" in self.input_names:
+                feed["token_type_ids"] = np.zeros_like(input_ids)
+            logits = self.session.run(None, feed)[0]  # (n, num_classes)
+            e = np.exp(logits - logits.max(axis=1, keepdims=True))
+            probs.extend((e[:, class_index] / e.sum(axis=1)).tolist())
+        worst = max(range(len(probs)), key=probs.__getitem__)
+        return probs[worst], {
+            "windows": len(wins), "truncated": truncated,
+            "worst_window": worst, "tokens": len(ids),
+        }
 
 
 class DebertaScanner(LazyEngine):
@@ -306,7 +351,19 @@ class DebertaScanner(LazyEngine):
             os.path.join(MODEL_DIR, self._subdir, "model.onnx"),
             os.path.join(MODEL_DIR, self._subdir, "tokenizer.json"),
             TRANSFORMER_MAX_TOKENS,
+            self.name,
         )
+
+    def warm(self):
+        """One throwaway inference. On CUDA the first run JIT-compiles kernels
+        (~40 s on a cold container, measured on Blackwell); doing it during
+        startup keeps that latency out of the first real scan — /health stays
+        503 until warmup finishes."""
+        if self._enabled and self._ready:
+            self._clf.probability_of_index("warm-up probe", 1)
+            if windowing.MAX_WINDOWS > 1:
+                # different batch shapes compile separate CUDA kernels/plans
+                self._clf.probability_windows("warm-up probe " * 2000, 1, windowing.BATCH_SIZE)
 
     def scan(self, text):
         if not self._enabled:
@@ -314,14 +371,24 @@ class DebertaScanner(LazyEngine):
         if not self._init():
             return {"available": False, "reason": self._error}, False
         try:
+            # The verdict ALWAYS comes from the first window, exactly like the
+            # CPU build, so GPU and CPU pods decide identically.
             p_injection = self._clf.probability_of_index(text, 1)
             matched = p_injection > self._threshold
-            return {
+            run = {
                 "available": True,
                 "is_injection": matched,
                 "score": round(p_injection, 4),
                 "threshold": self._threshold,
-            }, matched
+            }
+            if windowing.MAX_WINDOWS > 1:
+                # Report-only whole-payload scan (see windowing.py): measured on
+                # real code/config/JSON, the worst-window score false-alarms far
+                # too often to block on (hack/gpu-node/calibrate-windows.py).
+                p_worst, meta = self._clf.probability_windows(text, 1, windowing.MAX_WINDOWS)
+                run.update(meta)
+                run["window_score"] = round(p_worst, 4)
+            return run, matched
         except Exception as err:  # noqa: BLE001
             return {"available": False, "reason": str(err)[:200]}, False
 

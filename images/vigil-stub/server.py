@@ -42,6 +42,9 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import ortutil
+import windowing
+
 from scanners import (
     CHROMA_URL,
     DebertaScanner,
@@ -118,6 +121,9 @@ class Scanner:
             for engine in self.engines.values():
                 try:
                     engine._init()
+                    warm = getattr(engine, "warm", None)
+                    if warm:
+                        warm()
                 except Exception:  # noqa: BLE001 - warmup must never crash
                     pass
             self.warmup_done = True
@@ -169,7 +175,13 @@ class Handler(BaseHTTPRequestHandler):
             # probes keep the pod out of the endpoints while models load.
             code = 200 if self.warm_ready() else 503
             self._send(code, {"status": "ok" if code == 200 else "warming-up",
-                              "engines": SCANNER.status()})
+                              "engines": SCANNER.status(),
+                              "onnx_providers": dict(ortutil.USED),
+                              "onnx_provider_mode": ortutil.MODE,
+                              "windowing": {"max_windows": windowing.MAX_WINDOWS,
+                                            "vector_max_windows": windowing.VECTOR_MAX_WINDOWS,
+                                            "overlap_tokens": windowing.OVERLAP,
+                                            "batch_size": windowing.BATCH_SIZE}})
         else:
             self._send(404, {"error": "not found"})
 
