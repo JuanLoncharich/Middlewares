@@ -174,6 +174,7 @@ function readEnv(): RunnerEnv {
     dryRun,
     // --- Vigil-LLM (inbound scanner) ---
     vigilUrl: env["VIGIL_URL"] ?? "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze",
+    vigilGpuUrl: env["VIGIL_GPU_URL"]?.trim() || undefined,
     // Disabled by default in DRY_RUN (no gateways reachable) unless forced on.
     vigilEnabled: flag("VIGIL_ENABLED", !dryRun),
     vigilEnforce: rawEnforce === "strict",
@@ -217,6 +218,14 @@ interface OpencodeHandle {
   close: () => void;
 }
 
+/** Providers OpenCode already knows (catalog entries); everything else is a custom OpenAI-compatible endpoint. */
+const CATALOG_PROVIDERS = new Set(["opencode", "anthropic"]);
+const CUSTOM_MODEL_CONTEXT = 128_000;
+const CUSTOM_MODEL_OUTPUT = 8_192;
+function isCustomProvider(providerID: string): boolean {
+  return !CATALOG_PROVIDERS.has(providerID);
+}
+
 async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEnv, signal: AbortSignal): Promise<OpencodeHandle> {
   const modelRef = `${agent.spec.model.providerID}/${agent.spec.model.modelID}`;
   // Agents must never mutate /workspace or reach the network via tools: the
@@ -234,10 +243,26 @@ async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEn
   // the cluster. The call itself is carried by the NetBird mesh through the
   // HTTP_PROXY bridge exported by main() (see the mesh bootstrap there).
   if (env.occludraEnabled) {
+    const providerID = agent.spec.model.providerID;
     config.provider = {
-      [agent.spec.model.providerID]: {
-        options: { baseURL: env.occludraBaseUrl },
-      },
+      [providerID]: isCustomProvider(providerID)
+        ? {
+            // Not in OpenCode's catalog (e.g. NVIDIA NIM): declare it as an
+            // OpenAI-compatible endpoint that lives BEHIND Occludra. The API
+            // key here is a placeholder — Occludra replaces Authorization
+            // with the real upstream key, which never enters this pod.
+            npm: "@ai-sdk/openai-compatible",
+            name: providerID,
+            options: { baseURL: env.occludraBaseUrl, apiKey: "egress-via-occludra" },
+            models: {
+              [agent.spec.model.modelID]: {
+                name: agent.spec.model.modelID,
+                tool_call: false,
+                limit: { context: CUSTOM_MODEL_CONTEXT, output: CUSTOM_MODEL_OUTPUT },
+              },
+            },
+          }
+        : { options: { baseURL: env.occludraBaseUrl } },
     };
   } else {
     log.warn("Occludra disabled — LLM traffic bypasses the security gateway", { agent: agent.metadata.name });
@@ -318,19 +343,22 @@ function extractJsonFromTextParts(parts: Array<{ type: string; text?: string }>)
 // a `tool_choice` that several providers (incl. OpenCode Zen free tier) reject
 // with 400 the moment OTHER tools are also advertised, and the evaluation
 // evidence is pre-collected with file:line context anyway. See README.
-function toolsForKind(kind: AgentKind): Record<string, boolean> {
+function toolsForKind(kind: AgentKind, freeTierGate: boolean): Record<string, boolean> {
   // OpenCode Zen's free-tier gate rejects /responses bodies that carry no
   // tool definitions named bash+read ("free tier can only be used from
   // within OpenCode"). Advertising the minimum pair satisfies the gate
   // while the boot config's permission:"deny" keeps every execution
   // refused (verified against opencode 1.18.31 — see
   // dlp-test-results/forensics/).
-  const freeTierGate = { bash: true, read: true };
+  // Only the Zen provider has that gate. Other providers (custom, e.g. NVIDIA
+  // NIM) get NO tools: models there otherwise loop calling the denied tools
+  // and the prompt never returns (measured with z-ai/glm-5.3).
+  const gate = freeTierGate ? { bash: true, read: true } : { bash: false, read: false };
   if (kind === "static") {
-    return { ...freeTierGate, edit: false, write: false, patch: false, glob: false, grep: false, list: false, webfetch: false, websearch: false, task: false, todowrite: false, skill: false };
+    return { ...gate, edit: false, write: false, patch: false, glob: false, grep: false, list: false, webfetch: false, websearch: false, task: false, todowrite: false, skill: false };
   }
   return {
-    ...freeTierGate,
+    ...gate,
     edit: false,
     write: false,
     patch: false,
@@ -406,7 +434,7 @@ async function runAgentPrompt(
       directory,
       model: { providerID: agent.spec.model.providerID, modelID: agent.spec.model.modelID },
       system: agent.spec.systemPrompt,
-      tools: toolsForKind(kind),
+      tools: toolsForKind(kind, !isCustomProvider(agent.spec.model.providerID)),
       format: { type: "json_schema", schema: agent.spec.outputFormat.schema, retryCount },
       parts: [{ type: "text", text: contractedMessage }],
     });
@@ -840,7 +868,7 @@ async function scanUntrusted(state: RunState, source: string, payload: string): 
   }
 
   if (!verdict.injectionDetected) {
-    log.info("vigil scan clean", { source, scannersFired: verdict.triggeredScanners.length });
+    log.info("vigil scan clean", { source, scannersFired: verdict.triggeredScanners.length, endpoint: verdict.endpoint });
     return;
   }
 
@@ -1311,6 +1339,7 @@ async function main(): Promise<number> {
     ? new VigilClient(env.vigilUrl, meshFetchFn, {
         timeoutMs: env.vigilTimeoutMs,
         maxPayloadBytes: env.vigilMaxPayloadBytes,
+        ...(env.vigilGpuUrl !== undefined ? { preferredUrl: env.vigilGpuUrl } : {}),
       })
     : null;
 

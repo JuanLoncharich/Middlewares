@@ -37,6 +37,8 @@ export interface VigilVerdict {
   triggeredScanners: string[];
   /** Raw response body, preserved for the evaluation report. */
   raw: unknown;
+  /** Endpoint that produced this verdict (GPU scanner or the CPU fallback). */
+  endpoint?: string;
 }
 
 export interface VigilClientOptions {
@@ -45,6 +47,13 @@ export interface VigilClientOptions {
   maxPayloadBytes: number;
   /** Network retry attempts (not re-scans). Default 3. */
   retries?: number;
+  /**
+   * Optional GPU scanner tried first. It scans the WHOLE payload (windowed,
+   * batched) where the CPU scanners only read the first tokens, so it gives
+   * better coverage; when it is unreachable (the GPU node is detached) the
+   * scan silently falls back to `url`. Empty/undefined disables it.
+   */
+  preferredUrl?: string;
 }
 
 const TRUNCATION_MARKER = "\n…[truncated by mcp-eval-runner for vigil scan]";
@@ -57,6 +66,7 @@ export class VigilClient {
   private readonly timeoutMs: number;
   private readonly maxPayloadBytes: number;
   private readonly retries: number;
+  private readonly preferredUrl: string | undefined;
 
   constructor(url: string, meshFetch: MeshFetch, options: VigilClientOptions) {
     if (!/^https?:\/\//.test(url)) {
@@ -67,6 +77,11 @@ export class VigilClient {
     this.timeoutMs = options.timeoutMs;
     this.maxPayloadBytes = options.maxPayloadBytes;
     this.retries = options.retries ?? 3;
+    const preferred = options.preferredUrl?.trim();
+    if (preferred && !/^https?:\/\//.test(preferred)) {
+      throw new Error(`VIGIL_GPU_URL must be an absolute http(s) URL, got "${preferred}"`);
+    }
+    this.preferredUrl = preferred || undefined;
   }
 
   get endpoint(): string {
@@ -80,6 +95,25 @@ export class VigilClient {
    */
   async analyze(payload: string, source: string): Promise<VigilVerdict> {
     const body = this.truncate(payload);
+    if (this.preferredUrl !== undefined) {
+      try {
+        // One retry only: a detached GPU node must cost a moment, not minutes.
+        return await this.analyzeAt(this.preferredUrl, body, source, 1);
+      } catch (err) {
+        if (!(err instanceof VigilUnavailableError)) {
+          throw err;
+        }
+        log.warn("GPU vigil unavailable — falling back to the CPU scanner", {
+          source,
+          gpu: this.preferredUrl,
+          error: errorMessage(err),
+        });
+      }
+    }
+    return this.analyzeAt(this.url, body, source, this.retries);
+  }
+
+  private async analyzeAt(url: string, body: string, source: string, retries: number): Promise<VigilVerdict> {
     const request: MeshRequestInit = {
       method: "POST",
       headers: {
@@ -92,19 +126,19 @@ export class VigilClient {
     };
 
     let lastError = "";
-    for (let attempt = 0; attempt <= this.retries; attempt++) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
       if (attempt > 0) {
         await sleep(RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)] ?? 1000);
       }
       try {
-        const res = await this.meshFetch(this.url, request);
+        const res = await this.meshFetch(url, request);
         if (res.status === 0 || res.status >= 500) {
           lastError = `HTTP ${res.status} from vigil`;
           continue;
         }
         if (res.status === 404 || res.status === 405) {
           // Endpoint missing: the deployed vigil build does not serve /analyze.
-          throw new VigilUnavailableError(source, `HTTP ${res.status} — /analyze not available at ${this.url}`);
+          throw new VigilUnavailableError(source, `HTTP ${res.status} — /analyze not available at ${url}`);
         }
         if (res.status >= 400) {
           // 4xx (other than routing misses) is a contract problem worth
@@ -117,13 +151,15 @@ export class VigilClient {
         } catch (err) {
           throw new VigilUnavailableError(source, `response is not JSON: ${errorMessage(err)} — body: ${res.text().slice(0, 200)}`);
         }
-        return this.interpret(parsed, source);
+        const verdict = this.interpret(parsed, source);
+        verdict.endpoint = url;
+        return verdict;
       } catch (err) {
         if (err instanceof VigilUnavailableError) {
           throw err;
         }
         lastError = errorMessage(err);
-        log.warn("vigil scan attempt failed", { source, attempt: attempt + 1, error: lastError });
+        log.warn("vigil scan attempt failed", { source, url, attempt: attempt + 1, error: lastError });
       }
     }
     throw new VigilUnavailableError(source, lastError || "no response");

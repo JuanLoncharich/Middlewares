@@ -125,6 +125,8 @@ data:
         - ".*-free"
         - "^o[1345]"
         - "^gpt"
+        # NVIDIA NIM ids carry the publisher prefix (z-ai/glm-5.3, ...).
+        - "^(z-ai|moonshotai|deepseek-ai|nvidia|meta|mistralai|qwen|openai|google)/"
     logging:
       # Never persist prompt content in gateway logs; count and classify only.
       log_prompts: false
@@ -217,6 +219,11 @@ spec:
               value: "0.0.0.0:8080"
             - name: OCCLUDRA_POLICY_FILE
               value: /conf/policy.yaml
+            # Upstream LLM provider (OpenAI-compatible). Default OpenCode Zen is
+            # https://opencode.ai/zen/v1 ; this deployment uses NVIDIA NIM with
+            # the nvapi- key stored in security-gateways/llm-provider-credentials.
+            - name: OCCLUDRA_UPSTREAM_BASE_URL
+              value: "https://integrate.api.nvidia.com/v1"
             # Backpressure: requests beyond this in-flight count get 503 +
             # Retry-After (clients back off) instead of unbounded memory
             # growth per replica. The HPA adds replicas before saturation.

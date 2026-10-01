@@ -300,3 +300,41 @@ func TestInitContainersDoneWithNativeSidecar(t *testing.T) {
 		t.Fatal("running regular init container must block")
 	}
 }
+
+func TestBuildJobVigilGPUURLOnlyWhenConfigured(t *testing.T) {
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "filesystem-mcp", Namespace: "mcp-evals"},
+		Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+	}
+	evalEnv := func(images ImageConfig) []corev1.EnvVar {
+		job := (&MCPEvaluationRunReconciler{Images: images}).buildJob(testRun(), server)
+		for _, c := range job.Spec.Template.Spec.Containers {
+			if c.Name == containerEvaluator {
+				return c.Env
+			}
+		}
+		t.Fatal("evaluator container missing")
+		return nil
+	}
+	has := func(env []corev1.EnvVar, name string) (string, bool) {
+		for _, e := range env {
+			if e.Name == name {
+				return e.Value, true
+			}
+		}
+		return "", false
+	}
+
+	if _, ok := has(evalEnv(meshImages()), "VIGIL_GPU_URL"); ok {
+		t.Error("VIGIL_GPU_URL must be absent unless configured (GPU scanner is opt-in)")
+	}
+	images := meshImages()
+	images.VigilGPUURL = "http://vigil-gpu-service.security-gateways.svc.cluster.local:5000/analyze"
+	if got, ok := has(evalEnv(images), "VIGIL_GPU_URL"); !ok || got != images.VigilGPUURL {
+		t.Errorf("VIGIL_GPU_URL = %q (present=%v), want %q", got, ok, images.VigilGPUURL)
+	}
+	// The CPU endpoint stays the fallback, unchanged.
+	if got, _ := has(evalEnv(images), "VIGIL_URL"); got != images.VigilURL {
+		t.Errorf("VIGIL_URL changed to %q", got)
+	}
+}

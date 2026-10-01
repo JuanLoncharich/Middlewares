@@ -143,7 +143,12 @@ type ImageConfig struct {
 	// evaluator scans against and points its LLM providers at. When not set
 	// explicitly they are DERIVED from the mode: mesh peer DNS names under
 	// NetBirdDNSDomain in mesh mode, cluster-local service names otherwise.
-	VigilURL        string
+	VigilURL string
+	// VigilGPUURL is an optional GPU scanner the evaluator tries first (it
+	// scans the whole payload in windows; CPU scanners read only the first
+	// tokens) and falls back from to VigilURL. Empty = disabled. Only
+	// meaningful with MESH_ENFORCE=false: the GPU scanner has no mesh identity.
+	VigilGPUURL     string
 	OccludraBaseURL string
 	// NetBirdDNSDomain is the DNS domain the NetBird management server hands
 	// out for peer names (vigil / occludra — pinned via NETBIRD_HOSTNAME).
@@ -202,6 +207,7 @@ func ImageConfigFromEnv() ImageConfig {
 		MeshProxyURL:         envOr("MESH_PROXY_URL", "socks5://127.0.0.1:1080"),
 		MeshBridgePort:       envInt32("MESH_BRIDGE_PORT", meshBridgePortDefault),
 		VigilURL:             vigilURL,
+		VigilGPUURL:          strings.TrimSpace(os.Getenv("VIGIL_GPU_URL")),
 		OccludraBaseURL:      occludraURL,
 		NetBirdDNSDomain:     dnsDomain,
 	}
@@ -1264,6 +1270,9 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 				corev1.ResourceMemory: resource.MustParse("2Gi"),
 			},
 		},
+	}
+	if r.Images.VigilGPUURL != "" {
+		evaluator.Env = append(evaluator.Env, corev1.EnvVar{Name: "VIGIL_GPU_URL", Value: r.Images.VigilGPUURL})
 	}
 
 	return &batchv1.Job{
