@@ -60,7 +60,7 @@
 #                                and point the evaluator at it (VIGIL_GPU_URL, CPU Vigil stays the fallback).
 #                                Requires KEDA. Build the image with hack/gpu-node/build-vigil-gpu.sh.
 #   VIGIL_GPU_IMG                GPU Vigil image (default $IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG)
-#   VIGIL_GPU_MEM_LIMIT          GPU Vigil host-RAM limit (default 3Gi; must fit gpu-node's MEM_LIMIT_GIB)
+#   VIGIL_GPU_MEM_LIMIT          GPU Vigil host-RAM limit (default 4Gi; measured ~3.4 GiB; must fit gpu-node's MEM_LIMIT_GIB)
 #   VIGIL_PROFILE=lite           in-cluster CPU Vigil runs only the YARA scanner (much less RAM); meant as
 #                                the fallback when the full scanner lives on the GPU node. Default: full.
 #   ---- SPOF elimination ----
@@ -114,7 +114,7 @@ DEPLOY_KEDA="${DEPLOY_KEDA:-0}"
 KEDA_CHART_VERSION="${KEDA_CHART_VERSION:-2.21.0}"
 VIGIL_GPU="${VIGIL_GPU:-0}"
 VIGIL_GPU_IMG="${VIGIL_GPU_IMG:-$IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG}"
-VIGIL_GPU_MEM_LIMIT="${VIGIL_GPU_MEM_LIMIT:-3Gi}"
+VIGIL_GPU_MEM_LIMIT="${VIGIL_GPU_MEM_LIMIT:-4Gi}"
 VIGIL_PROFILE="${VIGIL_PROFILE:-full}"
 case "$VIGIL_PROFILE" in full|lite) ;; *) echo "VIGIL_PROFILE must be full or lite" >&2; exit 1 ;; esac
 
@@ -147,7 +147,13 @@ if [ "$SKIP_BUILD" != "1" ]; then
     git -C "$VIGIL_SRC_DIR" remote add origin "$VIGIL_SRC_REPO"
     git -C "$VIGIL_SRC_DIR" fetch --depth 1 origin "$VIGIL_SRC_REF"
     git -C "$VIGIL_SRC_DIR" checkout --quiet FETCH_HEAD
-    docker build -t "$VIGIL_IMG" "$VIGIL_SRC_DIR"
+    # Built with images/vigil-llm/Dockerfile (CPU variant), not upstream's own
+    # Dockerfile: at the pinned commit an upstream-style build crashes at boot
+    # (unpinned huggingface_hub vs sentence-transformers 2.2.2, and a NameError
+    # in VectorDB). See the Dockerfile header for every change.
+    docker build -t "$VIGIL_IMG" -f images/vigil-llm/Dockerfile \
+      --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu --build-arg EXPECT_CUDA=0 \
+      "$VIGIL_SRC_DIR"
     rm -rf "$VIGIL_SRC_DIR"
     docker push "$VIGIL_IMG"
   fi

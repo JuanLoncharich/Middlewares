@@ -112,8 +112,8 @@ spec:
         - name: logs
           emptyDir:
             sizeLimit: 256Mi
-        # Model + dataset cache on the PC's own disk: a scale-from-zero start
-        # reuses it instead of re-downloading ~1 GB from HuggingFace.
+        # Model cache on the PC's own disk: a scale-from-zero start reuses it
+        # instead of re-downloading ~1 GB (measured: 23 s warm vs 5+ min cold).
         - name: hf-cache
           hostPath:
             path: /var/lib/vigil-gpu/hf
@@ -141,11 +141,19 @@ spec:
         - name: vigil
           image: __VIGIL_GPU_IMG__
           imagePullPolicy: IfNotPresent
+          # Start the server directly: upstream's entrypoint first re-streams
+          # two ada-002 datasets whose 1536-dim vectors never match the
+          # 384-dim MiniLM embedder (measured: ~6 min per start, no effect on
+          # verdicts). Warm start this way: ~23 s.
+          command: ["python", "vigil-server.py", "-c", "conf/server.conf"]
           ports:
             - {name: http, containerPort: 5000, protocol: TCP}
           env:
             - {name: HOME, value: /tmp}
             - {name: HF_HOME, value: /cache/hf}
+            # sentence-transformers 2.2.2 keeps its own model cache (default
+            # under $HOME=/tmp, i.e. re-downloaded every start).
+            - {name: SENTENCE_TRANSFORMERS_HOME, value: /cache/st}
           volumeMounts:
             - {name: config, mountPath: /app/conf, readOnly: true}
             - {name: tmp, mountPath: /tmp}

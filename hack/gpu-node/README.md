@@ -50,6 +50,15 @@ over ~9k vectors is microseconds on CPU; whole-payload windowed scoring with
 prompt-trained classifiers false-alarms on code/JSON; the PC is ~26 ms away,
 so the gain is offloading the small nodes, not latency.
 
+## Measured (RTX 5060 Ti, pinned vigil-llm, 3 prompts: benign / "ignore previous instructions" / DAN)
+
+| Variant | Warm start | Per scan | Host RAM | Verdicts |
+|---|---|---|---|---|
+| GPU, full (direct server start, cached models) | **23 s** | **~22 ms** | 3.4 GiB | benign clean, both injections caught (transformer) |
+| CPU, full (this PC's CPU; the 2-vCPU workers are slower) | ~406 s with upstream entrypoint | 73–78 ms | 3.8 GiB | same |
+| CPU, lite (YARA only) | ~401 s with upstream entrypoint | 6 ms | 2.1 GiB | **misses both injections** — a weak fallback |
+| GPU, full, first start ever (empty cache) | 327 s | — | — | — |
+
 ## Network (already done)
 
 ZeroTier network `565799d8f675597b`, pool `10.147.17.0/24`: this PC + the three
@@ -68,8 +77,8 @@ with UDP/4789 tests:
 | Resource | Limit | How it is enforced |
 |---|---|---|
 | CPU | 4 cores | `CPUQuota=400%` on `k0s-gpu.slice`; kubelet `--system-reserved` so the scheduler sees 4 |
-| RAM | 4 GiB | `MemoryMax=4G` (+`MemoryHigh`, swap off) on the slice; kubelet sees ~3 GiB allocatable |
-| VRAM | 8 GiB | **soft** cap: onnxruntime `gpu_mem_limit`. NVIDIA consumer GPUs have no hard per-container VRAM limit |
+| RAM | **6 GiB** (was 4) | `MemoryMax=6G` (+`MemoryHigh`, swap off) on the slice; kubelet sees ~5 GiB allocatable. The full GPU Vigil measured ~3.4 GiB host RAM + ~1 GiB for k0s, so 4 GiB cannot hold it |
+| VRAM | 8 GiB budget | Full GPU Vigil measured ~1.8 GiB. No hard per-container VRAM limit exists on consumer NVIDIA GPUs |
 
 The kubelet runs with `--cgroup-root=/k0s-gpu.slice`, so pods fall under the
 same limits as k0s itself.

@@ -12,5 +12,5 @@ git init -q "$src"
 git -C "$src" remote add origin "$VIGIL_SRC_REPO"
 git -C "$src" fetch -q --depth 1 origin "$VIGIL_SRC_REF"
 git -C "$src" checkout -q FETCH_HEAD
-docker build -t "$IMG" -f images/vigil-gpu/Dockerfile "$src"
+docker build -t "$IMG" -f images/vigil-llm/Dockerfile "$src"
 echo "built $IMG from $VIGIL_SRC_REPO@$VIGIL_SRC_REF"
