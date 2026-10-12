@@ -1,3 +1,5 @@
+import { inSpan } from "./observability.js";
+import { SpanStatusCode } from "@opentelemetry/api";
 /**
  * Minimal JSON-RPC 2.0 / MCP client with two transports:
  *
@@ -872,6 +874,17 @@ export class McpClient {
   }
 
   async request(method: string, params: unknown, timeoutMs: number): Promise<RpcOutcome> {
+    const operation = ["initialize", "tools/list", "tools/call", "resources/list", "resources/read", "prompts/list"].includes(method) ? method : "other";
+    return inSpan("mcp.request", { "rpc.method": operation, "mcp.transport": this.transport.kind }, async (span) => {
+      const result = await this.requestUntraced(method, params, timeoutMs);
+      span.setAttribute("mcp.hang", result.hang);
+      span.setAttribute("mcp.crashed", result.crashed);
+      if (!result.ok) span.setStatus({ code: SpanStatusCode.ERROR, message: "MCP request failed" });
+      return result;
+    });
+  }
+
+  private async requestUntraced(method: string, params: unknown, timeoutMs: number): Promise<RpcOutcome> {
     const id = this.nextId++;
     const frame: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     return this.dispatch(String(id), method, JSON.stringify(frame), timeoutMs);

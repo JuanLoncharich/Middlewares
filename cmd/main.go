@@ -19,7 +19,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"github.com/security-eval/mcp-eval-operator/internal/observability"
 	"os"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -72,6 +74,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	shutdownTelemetry, telemetryErr := observability.Setup("mcp-eval-operator")
+	if telemetryErr != nil {
+		setupLog.Error(telemetryErr, "tracing setup failed; continuing without export")
+	}
+	defer shutdownTelemetry()
 
 	// Disable HTTP/2 by default to mitigate HTTP/2 stream-cancellation and
 	// rapid-reset CVEs (GHSA-qppj-fm5r-hxr3, GHSA-4374-p667-p6c8).
@@ -109,6 +116,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	metrics.Registry.MustRegister(controller.NewRunMetrics(mgr.GetClient()))
 	images := controller.ImageConfigFromEnv()
 	setupLog.Info("evaluation job image configuration",
 		"cloner", images.ClonerImage,

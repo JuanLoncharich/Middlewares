@@ -1,0 +1,96 @@
+// One collector follows trusted container logs via the Kubernetes API.
+// No privileged DaemonSet or host filesystem access is required.
+logging { level = "info" }
+
+discovery.kubernetes "pods" {
+  role = "pod"
+  namespaces { names = ["mcp-eval-system", "mcp-evals", "security-gateways", "chroma"] }
+}
+
+discovery.relabel "logs" {
+  targets = discovery.kubernetes.pods.targets
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    regex = "manager|evaluator|gateway"
+    action = "keep"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label = "namespace"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label = "pod"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label = "container"
+  }
+}
+
+loki.source.kubernetes "pods" {
+  targets = discovery.relabel.logs.output
+  forward_to = [loki.process.sanitize.receiver]
+}
+
+loki.process "sanitize" {
+  // Defense in depth for legacy diagnostic text. Payload fields are removed
+  // by the runner logger before they reach stdout/stderr.
+  stage.replace {
+    expression = "(?i)(bearer[ ]+)[A-Za-z0-9._~+/=-]+"
+    replace = "[REDACTED]"
+  }
+  stage.replace {
+    expression = "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+    replace = "[REDACTED_EMAIL]"
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint { url = "http://loki:3100/loki/api/v1/push" }
+}
+
+otelcol.receiver.otlp "default" {
+  grpc { endpoint = "0.0.0.0:4317" }
+  http { endpoint = "0.0.0.0:4318" }
+  output {
+    traces = [otelcol.processor.memory_limiter.default.input]
+    metrics = [otelcol.processor.memory_limiter.default.input]
+  }
+}
+
+otelcol.processor.memory_limiter "default" {
+  check_interval = "1s"
+  limit = "192MiB"
+  spike_limit = "48MiB"
+  output {
+    traces = [otelcol.processor.batch.default.input]
+    metrics = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  timeout = "2s"
+  send_batch_size = 512
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+    metrics = [otelcol.exporter.prometheus.local.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls { insecure = true }
+  }
+}
+
+otelcol.exporter.prometheus "local" {
+  forward_to = [prometheus.remote_write.local.receiver]
+  resource_to_telemetry_conversion = false
+}
+
+prometheus.remote_write "local" {
+  endpoint { url = "http://prometheus:9090/api/v1/write" }
+}

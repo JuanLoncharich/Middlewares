@@ -49,6 +49,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/security-eval/mcp-eval-operator/api/v1alpha1"
+	"github.com/security-eval/mcp-eval-operator/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const (
@@ -167,6 +171,8 @@ type ImageConfig struct {
 	// not verify the RuntimeClass exists in the cluster; pods referencing a
 	// missing one stay Pending, which is the deployer's responsibility.
 	RuntimeClassName string
+	// Optional OTLP HTTP endpoint for the trusted evaluator only.
+	OTelEndpoint string
 }
 
 // Security-layer endpoint defaults. The cluster-local service names are the
@@ -233,6 +239,7 @@ func ImageConfigFromEnv() ImageConfig {
 		VigilMaxPayloadBytes: os.Getenv("VIGIL_MAX_PAYLOAD_BYTES"),
 		OccludraEnabled:      os.Getenv("OCCLUDRA_ENABLED"),
 		RuntimeClassName:     envOr("RUNTIME_CLASS_NAME", ""),
+		OTelEndpoint:         os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	}
 }
 
@@ -335,7 +342,7 @@ type MCPEvaluationRunReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile drives an MCPEvaluationRun through Pending → Cloning → Running → Evaluating → Completed|Failed.
-func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	log := logf.FromContext(ctx)
 
 	run := &securityv1alpha1.MCPEvaluationRun{}
@@ -344,6 +351,29 @@ func (r *MCPEvaluationRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching MCPEvaluationRun: %w", err)
+	}
+
+	ctx = observability.Extract(ctx, run.Annotations[observability.TraceAnnotation])
+	ctx, span := otel.Tracer("mcp-eval-operator").Start(ctx, "evaluation.reconcile")
+	span.SetAttributes(attribute.String("mcp.run", run.Name), attribute.String("k8s.namespace.name", run.Namespace), attribute.String("mcp.phase", string(run.Status.Phase)))
+	defer func() {
+		if reconcileErr != nil {
+			span.SetStatus(codes.Error, "reconcile failed")
+		}
+		span.End()
+	}()
+	sc := span.SpanContext()
+	log = log.WithValues("run", run.Name, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+	ctx = logf.IntoContext(ctx, log)
+	if run.Annotations[observability.TraceAnnotation] == "" && sc.IsValid() && run.DeletionTimestamp.IsZero() {
+		original := run.DeepCopy()
+		if run.Annotations == nil {
+			run.Annotations = map[string]string{}
+		}
+		run.Annotations[observability.TraceAnnotation] = observability.Traceparent(ctx)
+		if err := r.Patch(ctx, run, client.MergeFrom(original)); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Deletion: remove the Job then drop the finalizer.
@@ -1297,6 +1327,14 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	// Optional gateway tuning knobs: injected only when the operator set them,
 	// so the evaluator's built-in defaults stay authoritative otherwise.
 	evaluator.Env = append(evaluator.Env, gatewayKnobEnv(r.Images)...)
+	if r.Images.OTelEndpoint != "" {
+		evaluator.Env = append(evaluator.Env,
+			corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: r.Images.OTelEndpoint},
+			corev1.EnvVar{Name: "TRACEPARENT", Value: run.Annotations[observability.TraceAnnotation]},
+			corev1.EnvVar{Name: "OTEL_SERVICE_NAME", Value: "mcp-evaluator"},
+			corev1.EnvVar{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		)
+	}
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

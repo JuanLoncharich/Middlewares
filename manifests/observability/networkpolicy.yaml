@@ -1,0 +1,87 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: observability-isolation
+  namespace: observability
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    # Kubernetes API service and endpoint ports; discovery clients use only
+    # read permissions. Narrow to the API endpoint CIDRs if required.
+    - ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-eval-system
+          podSelector:
+            matchLabels:
+              control-plane: controller-manager
+      ports:
+        - {protocol: TCP, port: 8443}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: security-gateways
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: occludra
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: receive-project-telemetry
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-eval-system
+          podSelector:
+            matchLabels:
+              control-plane: controller-manager
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: security-gateways
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: occludra
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-evals
+          podSelector:
+            matchLabels:
+              security.eval.io/role: evaluation-pod
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chroma
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otel-collector
+      ports:
+        - {protocol: TCP, port: 4317}
+        - {protocol: TCP, port: 4318}

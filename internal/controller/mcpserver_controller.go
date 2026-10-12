@@ -38,6 +38,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	securityv1alpha1 "github.com/security-eval/mcp-eval-operator/api/v1alpha1"
+	"github.com/security-eval/mcp-eval-operator/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -353,6 +356,9 @@ func (r *MCPServerReconciler) syncLatestRunResult(server *securityv1alpha1.MCPSe
 
 // createRun builds and creates an MCPEvaluationRun owned by the server.
 func (r *MCPServerReconciler) createRun(ctx context.Context, server *securityv1alpha1.MCPServer) (*securityv1alpha1.MCPEvaluationRun, error) {
+	ctx, span := otel.Tracer("mcp-eval-operator").Start(ctx, "evaluation.schedule")
+	defer span.End()
+	span.SetAttributes(attribute.String("mcp.server", server.Name), attribute.String("k8s.namespace.name", server.Namespace))
 	agents := make([]string, 0, len(server.Spec.AgentSuite))
 	for _, ref := range server.Spec.AgentSuite {
 		agents = append(agents, ref.Name)
@@ -364,8 +370,9 @@ func (r *MCPServerReconciler) createRun(ctx context.Context, server *securityv1a
 
 	run := &securityv1alpha1.MCPEvaluationRun{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-run-%s", server.Name, utilrand.String(5)),
-			Namespace: server.Namespace,
+			Name:        fmt.Sprintf("%s-run-%s", server.Name, utilrand.String(5)),
+			Namespace:   server.Namespace,
+			Annotations: map[string]string{observability.TraceAnnotation: observability.Traceparent(ctx)},
 			Labels: map[string]string{
 				securityv1alpha1.LabelServer: server.Name,
 			},

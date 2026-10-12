@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: MCP evaluation
+    orgId: 1
+    folder: MCP evaluation
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /etc/grafana/dashboards

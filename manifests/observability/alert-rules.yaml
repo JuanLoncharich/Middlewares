@@ -1,0 +1,45 @@
+groups:
+  - name: mcp-evaluation
+    rules:
+      - alert: MCPLatestEvaluationFailed
+        expr: max by (namespace, server) (mcp_evaluation_last_run_failed) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Latest evaluation for {{ $labels.server }} failed'
+          description: 'Inspect MCPEvaluationRun.status.message, then correlate evaluator logs and traces in Grafana.'
+      - alert: MCPEvaluationStuck
+        expr: max by (namespace) (mcp_evaluation_oldest_active_seconds) > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Evaluation active for over 30 minutes
+      - alert: MCPMetricsUnavailable
+        expr: min by (job) (up{job=~"mcp-eval-operator|occludra|alloy|kube-state-metrics"}) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Metrics unavailable for {{ $labels.job }}'
+      - alert: OccludraHighErrorRate
+        expr: sum(rate(occludra_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(occludra_requests_total[5m])), 0.001) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Occludra returning more than 10 percent server errors
+      - alert: MCPWorkloadUnavailable
+        expr: kube_deployment_spec_replicas{namespace=~"mcp-eval-system|security-gateways"} > 0 and on(namespace,deployment) kube_deployment_status_replicas_available == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No available replicas for {{ $labels.deployment }}'
+      - alert: MCPContainerRestarting
+        expr: increase(kube_pod_container_status_restarts_total{namespace=~"mcp-eval-system|security-gateways"}[15m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Container {{ $labels.container }} restarted repeatedly'

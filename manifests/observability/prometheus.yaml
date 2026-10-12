@@ -1,0 +1,60 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+rule_files:
+  - /etc/prometheus/alert-rules.yaml
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+  - job_name: alloy
+    static_configs:
+      - targets: [otel-collector:12345]
+  - job_name: tempo
+    static_configs:
+      - targets: [tempo:3200]
+  - job_name: loki
+    static_configs:
+      - targets: [loki:3100]
+  - job_name: kube-state-metrics
+    static_configs:
+      - targets: [kube-state-metrics:8080]
+  # Scrape each replica, not a load-balanced Service: rate counters would
+  # otherwise jump between processes and misreport resets.
+  - job_name: mcp-eval-operator
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [mcp-eval-system]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_control_plane]
+        regex: controller-manager
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: metrics
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: pod_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    # The existing manager serves a self-signed metrics endpoint. Traffic
+    # is restricted to monitoring pods by NetworkPolicy.
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+  - job_name: occludra
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [security-gateways]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        regex: occludra
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: http
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: pod_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod

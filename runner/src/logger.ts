@@ -1,3 +1,4 @@
+import { traceFields } from "./observability.js";
 /**
  * Minimal structured JSON logger writing to stderr.
  * stdout is reserved so that it never interferes with any IPC.
@@ -20,13 +21,27 @@ const activeLevel: LogLevel = resolveLevel();
 function safeSerialize(fields: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
-    if (value instanceof Error) {
-      out[key] = { name: value.name, message: value.message, stack: value.stack };
-    } else {
-      out[key] = value;
-    }
+    out[key] = sanitize(value, key);
   }
   return out;
+}
+
+// Security evaluation evidence belongs in the access-controlled report,
+// never in the shared observability store.
+function sanitize(value: unknown, key = "", seen = new WeakSet<object>()): unknown {
+  if (/prompt|payload|excerpt|structuredOutput|agentResults|authorization|password|api.?key|token|secret|body/i.test(key)) return "[REDACTED]";
+  if (typeof value === "string") return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:sk-|nvapi-)[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_KEY]")
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[REDACTED_EMAIL]");
+  if (value instanceof Error) return { name: value.name, message: sanitize(value.message) };
+  if (value !== null && typeof value === "object") {
+    if (seen.has(value)) return "[CIRCULAR]";
+    seen.add(value);
+    if (Array.isArray(value)) return value.map((item) => sanitize(item, "", seen));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, sanitize(v, k, seen)]));
+  }
+  return value;
 }
 
 export class Logger {
@@ -64,7 +79,10 @@ export class Logger {
       ts: new Date().toISOString(),
       level,
       component: this.component,
-      msg,
+      run: process.env["RUN_NAME"],
+      namespace: process.env["RUN_NAMESPACE"],
+      ...traceFields(),
+      msg: sanitize(msg),
       ...safeSerialize(fields),
     };
     let line: string;

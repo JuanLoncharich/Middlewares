@@ -1,3 +1,4 @@
+import { startTelemetry, stopTelemetry, evaluationTrace, inSpan, requestTraceHeaders } from "./observability.js";
 /**
  * Evaluator container entrypoint.
  *
@@ -236,7 +237,7 @@ async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEn
   if (env.occludraEnabled) {
     config.provider = {
       [agent.spec.model.providerID]: {
-        options: { baseURL: env.occludraBaseUrl },
+        options: { baseURL: env.occludraBaseUrl, headers: requestTraceHeaders() },
       },
     };
   } else {
@@ -825,7 +826,11 @@ async function scanUntrusted(state: RunState, source: string, payload: string): 
 
   let verdict: VigilVerdict;
   try {
-    verdict = await vigil.analyze(payload, source);
+    verdict = await inSpan("vigil.scan", { "mcp.scan.source": source }, async (span) => {
+ const result = await vigil.analyze(payload, source);
+ span.setAttribute("mcp.injection_detected", result.injectionDetected);
+ return result;
+ });
   } catch (err) {
     if (err instanceof VigilUnavailableError) {
       vrec.unavailableErrors += 1;
@@ -956,7 +961,7 @@ async function evaluate(state: RunState): Promise<void> {
     const abort = new AbortController();
     state.currentAbort = abort;
     try {
-      const result = await run(abort.signal);
+      const result = await inSpan("evaluation.agent", { "mcp.agent.kind": kind, "mcp.agent.name": name }, () => run(abort.signal));
       record.durationMs = result.durationMs;
       record.status = "ok";
       record.structuredOutput = result.structured;
@@ -1016,7 +1021,7 @@ async function evaluate(state: RunState): Promise<void> {
     if (kind === "static") {
       if (staticEvidence === null) {
         try {
-          staticEvidence = await collectStaticEvidence({ workspaceDir: env.workspaceDir });
+          staticEvidence = await inSpan("evaluation.static_evidence", {}, () => collectStaticEvidence({ workspaceDir: env.workspaceDir }));
         } catch (err) {
           log.warn("static evidence collection failed; agent degraded", { agent: name, error: errorMessage(err) });
           state.failedAgents.push(name);
@@ -1055,12 +1060,12 @@ async function evaluate(state: RunState): Promise<void> {
       const client = state.mcp;
       if (client && state.dynamic.init) {
         try {
-          state.dynamic.fuzz = await runFuzz(client, state.dynamic.tools, {
+          state.dynamic.fuzz = await inSpan("evaluation.fuzz", {}, () => runFuzz(client, state.dynamic.tools, {
             maxCasesPerTool: 25,
             totalTimeBudgetMs: 4 * 60 * 1000,
             perCallTimeoutMs: 10_000,
             includeProtocolCases: true,
-          });
+          }));
           report.fuzz = state.dynamic.fuzz;
         } catch (err) {
           if (err instanceof TargetCrashError || err instanceof TargetUnavailableError) {
@@ -1102,11 +1107,12 @@ async function evaluate(state: RunState): Promise<void> {
       const client = state.mcp;
       if (client && state.dynamic.init) {
         try {
-          state.probes = await runProbes(client, state.dynamic.tools, state.dynamic.init, {
+          const initialized = state.dynamic.init;
+          state.probes = await inSpan("evaluation.probes", {}, () => runProbes(client, state.dynamic.tools, initialized, {
             perCallTimeoutMs: 10_000,
             totalTimeBudgetMs: 3 * 60 * 1000,
             maxActiveProbesPerTool: 6,
-          });
+          }));
           report.probes = state.probes;
         } catch (err) {
           if (err instanceof TargetCrashError || err instanceof TargetUnavailableError) {
@@ -1383,8 +1389,8 @@ async function main(): Promise<number> {
     });
     void status
       .patchStatus({ phase: "Failed", currentAgent: "", message })
-      .then(() => process.exit(1))
-      .catch(() => process.exit(1));
+      .then(async () => { await stopTelemetry(); process.exit(1); })
+      .catch(async () => { await stopTelemetry(); process.exit(1); });
     // Hard backstop in case the patch stalls on its retries.
     setTimeout(() => process.exit(1), 8000).unref();
   };
@@ -1393,7 +1399,7 @@ async function main(): Promise<number> {
 
   let exitCode = 0;
   try {
-    await evaluate(state);
+    await inSpan("evaluation.pipeline", {}, () => evaluate(state));
   } catch (err) {
     exitCode = 1;
     const stage = err instanceof RunnerError ? err.stage : "unknown";
@@ -1442,12 +1448,15 @@ async function main(): Promise<number> {
   return exitCode;
 }
 
-main()
-  .then((code) => {
+startTelemetry();
+evaluationTrace(main)
+  .then(async (code) => {
+    await stopTelemetry();
     process.exitCode = code;
     setTimeout(() => process.exit(code), 200);
   })
-  .catch((err: unknown) => {
+  .catch(async (err: unknown) => {
+    await stopTelemetry();
     log.error("unhandled failure in main", { error: errorMessage(err) });
     writeTerminationMessage({ phase: "Failed", finalScore: 0, riskCategory: "Unknown", message: errorMessage(err) });
     process.exit(1);

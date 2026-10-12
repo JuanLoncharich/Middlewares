@@ -91,3 +91,7 @@ undeploy: ## Remove the controller from the cluster.
 .PHONY: samples
 samples: ## Apply the sample namespace, security manifests, agents and server.
 	kubectl apply -k config/samples
+
+.PHONY: observability
+observability: ## Install the monitoring stack; optional OPERATOR_IMG/EVALUATOR_IMG/OCCLUDRA_IMG roll out instrumentation.
+	./hack/deploy-observability.sh

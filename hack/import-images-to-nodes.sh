@@ -107,6 +107,11 @@ for image in "${IMAGES[@]}"; do
     gzip -dc "$tarfile" | kubectl exec -i -n "$DS_NS" "$pod" -- \
       bash -c "cat > /tmp/img.tar && $CTR_BIN -a $CTR_SOCKET -n k8s.io images import /tmp/img.tar >/dev/null && rm /tmp/img.tar" \
       || { echo "     IMPORT FAILED on $pod"; exit 1; }
+    # containerd 2.x CRI ignores unmanaged imports even when ctr lists them.
+    # Register the image with CRI so IfNotPresent can find it without a pull.
+    kubectl exec -n "$DS_NS" "$pod" -- \
+      "$CTR_BIN" -a "$CTR_SOCKET" -n k8s.io images label "$image" \
+      io.cri-containerd.image=managed >/dev/null
     verified=$(kubectl exec -n "$DS_NS" "$pod" -- \
       bash -c "$CTR_BIN -a $CTR_SOCKET -n k8s.io images ls -q | grep -F '$image' | head -1" || true)
     echo "     verified: ${verified:-MISSING}"

@@ -1,3 +1,5 @@
+import { requestTraceHeaders, inSpan } from "./observability.js";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 /**
  * Mesh transport for the NetBird overlay (wt0) — HTTP client + local bridge.
  *
@@ -452,14 +454,18 @@ export function createMeshFetch(rawProxy: string | null, defaultTimeoutMs = DEFA
   const proxy = rawProxy !== null && rawProxy !== "" ? parseProxyUrl(rawProxy) : null;
   return async (url, init = {}) => {
     const target = assertHttpTarget(url);
-    const timeoutMs = init.timeoutMs ?? defaultTimeoutMs;
-    if (proxy === null) {
-      return requestDirect(target, init, timeoutMs);
-    }
-    if (proxy.scheme === "socks5") {
-      return requestViaSocks(proxy, target, init, timeoutMs);
-    }
-    return requestViaHttpProxy(proxy, target, init, timeoutMs);
+    return inSpan("gateway.request", { "server.address": target.hostname, "http.request.method": init.method ?? "GET" }, async (span) => {
+      const timeoutMs = init.timeoutMs ?? defaultTimeoutMs;
+      const traced = { ...init, headers: { ...init.headers, ...requestTraceHeaders() } };
+      const response = proxy === null
+        ? await requestDirect(target, traced, timeoutMs)
+        : proxy.scheme === "socks5"
+          ? await requestViaSocks(proxy, target, traced, timeoutMs)
+          : await requestViaHttpProxy(proxy, target, traced, timeoutMs);
+      span.setAttribute("http.response.status_code", response.status);
+      if (response.status >= 400) span.setStatus({ code: SpanStatusCode.ERROR, message: "gateway request failed" });
+      return response;
+    }, SpanKind.CLIENT);
   };
 }
 

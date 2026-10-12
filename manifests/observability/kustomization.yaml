@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: observability
+resources:
+- rbac.yaml
+- workloads.yaml
+- networkpolicy.yaml
+configMapGenerator:
+- name: prometheus-config
+  files:
+  - prometheus.yaml
+  - alert-rules.yaml
+- name: alloy-config
+  files:
+  - config.alloy=alloy.alloy
+- name: tempo-config
+  files:
+  - tempo.yaml
+- name: loki-config
+  files:
+  - loki.yaml
+- name: grafana-datasources
+  files:
+  - datasources.yaml=grafana-datasources.yaml
+- name: grafana-providers
+  files:
+  - dashboards.yaml=grafana-dashboards.yaml
+- name: grafana-dashboard
+  files:
+  - mcp-evaluation.json=dashboard.json

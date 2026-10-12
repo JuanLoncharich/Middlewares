@@ -56,6 +56,7 @@
 #   IN_CLUSTER_REGISTRY=1        deploy the in-cluster registry (manifests/registry.yaml)
 #   DEPLOY_NETBIRD_CP=1          self-host the NetBird control plane in-cluster (requires an OIDC IdP;
 #                                see manifests/netbird-controlplane.yaml). Also generates the CP secrets.
+#   DEPLOY_OBSERVABILITY=1      install Grafana/Alloy/Tempo/Prometheus/Loki and enable first-party telemetry
 #   ---- vector DB (distributed Chroma over MinIO) ----
 #   DEPLOY_VECTOR_DB=1           deploy the distributed Chroma cluster (namespace `chroma`):
 #                                SysDB coordinator + Rust SysDB + Log Service (WAL) + Query Nodes
@@ -380,6 +381,15 @@ if [ "$DEPLOY_NETBIRD_CP" = "1" ]; then
       manifests/netbird-controlplane.yaml | kubectl apply -f -
   echo "NetBird CP deployed. Next: create the evaluation setup key (dashboard/CLI),"
   echo "then run the platform deploy with NETBIRD_MANAGEMENT_URL=http://netbird-management.security-gateways.svc.cluster.local"
+fi
+
+# Enable telemetry before triggering the first evaluation.
+if [[ "${DEPLOY_OBSERVABILITY:-0}" == "1" ]]; then
+  OPERATOR_IMG="$IMG" EVALUATOR_IMG="$EVALUATOR_IMG" OCCLUDRA_IMG="$OCCLUDRA_IMG" ./hack/deploy-observability.sh
+  kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager --timeout=180s
+  if [[ "$DEPLOY_SECURITY_GATEWAYS" == "1" ]]; then
+    kubectl -n security-gateways rollout status deploy/occludra --timeout=180s
+  fi
 fi
 
 if [ "$TRIGGER" = "1" ]; then

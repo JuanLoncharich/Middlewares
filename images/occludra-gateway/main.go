@@ -28,8 +28,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -168,6 +174,11 @@ type requestStats struct {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	log.SetFlags(0)
+	log.SetOutput(jsonLogWriter{})
+	shutdownTelemetry := setupTracing()
+	defer shutdownTelemetry()
 	policyPath := envOr("OCCLUDRA_POLICY_FILE", "/conf/policy.yaml")
 	policy, err := loadPolicy(policyPath)
 	if err != nil {
@@ -235,13 +246,14 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/", g.serve)
 
 	// Long WriteTimeout would cut streaming responses mid-flight; the other
 	// server timeouts still bound slowloris-style connection holds.
 	server := &http.Server{
 		Addr:              envOr("OCCLUDRA_LISTEN", "0.0.0.0:8080"),
-		Handler:           mux,
+		Handler:           observeHTTP(mux),
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -325,7 +337,7 @@ func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// instead of buffering unlimited concurrent request bodies and SSE
 	// streams — memory, not CPU, is what runs out first under load.
 	if !g.inflight.acquire(2 * time.Second) {
-		log.Printf("saturated (%d in-flight); rejecting with 503", g.inflight.used)
+		log.Printf("gateway saturated; rejecting with 503")
 		w.Header().Set("Retry-After", "3")
 		http.Error(w, "gateway at capacity; retry with backoff", http.StatusServiceUnavailable)
 		return
@@ -352,16 +364,21 @@ func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		stats.model = m
 	}
 	if !g.modelAllowed(policy, stats.model) {
-		log.Printf("blocked model %q: not in allowlist", stats.model)
+		blocked.WithLabelValues("model").Inc()
+		log.Printf("blocked model: not in allowlist")
 		http.Error(w, fmt.Sprintf("model %q is not allowed by gateway policy", stats.model), http.StatusForbidden)
 		return
 	}
 
 	redactValue(obj, policy, stats)
 	if stats.blockedBy != "" {
-		log.Printf("blocked request (model %q): detector %q matched with action=block", stats.model, stats.blockedBy)
+		blocked.WithLabelValues("detector").Inc()
+		log.Printf("blocked request: detector matched with action=block")
 		http.Error(w, "request blocked by gateway policy", http.StatusForbidden)
 		return
+	}
+	for detector, count := range stats.redactions {
+		redactions.WithLabelValues(detector).Add(float64(count))
 	}
 	normalizeToolChoice(obj)
 
@@ -376,7 +393,7 @@ func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 			total += n
 		}
 		if total > 0 {
-			log.Printf("model %q: %d redaction(s) %v", stats.model, total, formatRedactions(stats))
+			log.Printf("%d redaction(s) %v", total, formatRedactions(stats))
 		}
 	}
 	g.proxy(w, r, redacted, int64(len(redacted)))
@@ -498,7 +515,7 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			return
 		}
 		for name, values := range r.Header {
-			if isHopByHop(name) || strings.EqualFold(name, "Authorization") {
+			if isHopByHop(name) || strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "traceparent") || strings.EqualFold(name, "tracestate") || strings.EqualFold(name, "baggage") || strings.HasPrefix(strings.ToLower(name), "x-mcp-") {
 				continue
 			}
 			for _, v := range values {
@@ -513,9 +530,23 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			upReq.Header.Set("Content-Length", fmt.Sprintf("%d", contentLength))
 		}
 
-		resp, err = g.client.Do(upReq)
+		upCtx, upSpan := otel.Tracer("occludra").Start(r.Context(), "llm.upstream", trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attribute.String("server.address", target.base.Hostname()), attribute.String("mcp.upstream", target.name)))
+		resp, err = g.client.Do(upReq.WithContext(upCtx))
+		if err != nil {
+			upSpan.SetStatus(codes.Error, "upstream transport failed")
+		} else {
+			upSpan.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+			if resp.StatusCode >= 400 {
+				upSpan.SetStatus(codes.Error, "upstream request failed")
+			}
+		}
+		upSpan.End()
 		last := i == len(targets)-1
 		if err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			servedBy = target.name
+			break
+		}
+		if last && err == nil {
 			servedBy = target.name
 			break
 		}
@@ -533,7 +564,8 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			}
 			break
 		}
-		log.Printf("upstream %s unavailable (err=%v); failing over to secondary provider", target.name, err)
+		failovers.Inc()
+		log.Printf("upstream %s unavailable; failing over to secondary provider", target.name)
 	}
 	if resp == nil {
 		return

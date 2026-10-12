@@ -1,0 +1,683 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: prometheus
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v3.15.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 9090
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 10
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 30
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 5
+          failureThreshold: 60
+        args:
+        - --config.file=/etc/prometheus/prometheus.yaml
+        - --storage.tsdb.path=/data
+        - --storage.tsdb.retention.time=15d
+        - --storage.tsdb.retention.size=8GB
+        - --web.enable-remote-write-receiver
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: config-0
+          mountPath: /etc/prometheus
+          readOnly: true
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+      - name: config-0
+        configMap:
+          name: prometheus-config
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: prometheus
+  serviceName: prometheus
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prometheus
+  ports:
+  - name: http
+    port: 9090
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tempo
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: tempo
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.10.8
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3200
+        - name: otlp-grpc
+          containerPort: 4317
+        - name: otlp-http
+          containerPort: 4318
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 10
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 30
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 5
+          failureThreshold: 60
+        args:
+        - -config.file=/etc/tempo/tempo.yaml
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: config-0
+          mountPath: /etc/tempo
+          readOnly: true
+        - name: data
+          mountPath: /var/tempo
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+      - name: config-0
+        configMap:
+          name: tempo-config
+      terminationGracePeriodSeconds: 30
+  serviceName: tempo
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: tempo
+  ports:
+  - name: http
+    port: 3200
+    targetPort: http
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: loki
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: loki
+        image: grafana/loki:3.7.8
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3100
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 10
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 30
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 5
+          failureThreshold: 60
+        args:
+        - -config.file=/etc/loki/loki.yaml
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: config-0
+          mountPath: /etc/loki
+          readOnly: true
+        - name: data
+          mountPath: /var/loki
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+      - name: config-0
+        configMap:
+          name: loki-config
+      terminationGracePeriodSeconds: 30
+  serviceName: loki
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: loki
+  ports:
+  - name: http
+    port: 3100
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grafana
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: grafana
+        image: grafana/grafana:13.2.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 768Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          periodSeconds: 30
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          periodSeconds: 5
+          failureThreshold: 180
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: password
+        - name: GF_USERS_ALLOW_SIGN_UP
+          value: 'false'
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: 'false'
+        - name: GF_ANALYTICS_REPORTING_ENABLED
+          value: 'false'
+        - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+          value: 'false'
+        - name: GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES
+          value: 'false'
+        - name: GF_PLUGINS_PREINSTALL_DISABLED
+          value: 'true'
+        - name: GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED
+          value: 'true'
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: config-0
+          mountPath: /etc/grafana/provisioning/datasources
+          readOnly: true
+        - name: config-1
+          mountPath: /etc/grafana/provisioning/dashboards
+          readOnly: true
+        - name: config-2
+          mountPath: /etc/grafana/dashboards
+          readOnly: true
+        - name: data
+          mountPath: /var/lib/grafana
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+      - name: config-0
+        configMap:
+          name: grafana-datasources
+      - name: config-1
+        configMap:
+          name: grafana-providers
+      - name: config-2
+        configMap:
+          name: grafana-dashboard
+      terminationGracePeriodSeconds: 30
+  serviceName: grafana
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+  - name: http
+    port: 3000
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: alloy
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: alloy
+        image: grafana/alloy:v1.20.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 12345
+        - name: otlp-grpc
+          containerPort: 4317
+        - name: otlp-http
+          containerPort: 4318
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 384Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 10
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 30
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          periodSeconds: 5
+          failureThreshold: 60
+        args:
+        - run
+        - /etc/alloy/config.alloy
+        - --storage.path=/data
+        - --server.http.listen-addr=0.0.0.0:12345
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: config-0
+          mountPath: /etc/alloy
+          readOnly: true
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+      - name: config-0
+        configMap:
+          name: alloy-config
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: alloy
+  serviceName: alloy
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alloy
+  ports:
+  - name: http
+    port: 12345
+    targetPort: http
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: &id001
+      app.kubernetes.io/name: kube-state-metrics
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: kube-state-metrics
+        image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: '1'
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 30
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          failureThreshold: 60
+        args:
+        - --resources=deployments,pods,jobs,statefulsets,daemonsets,nodes,persistentvolumeclaims
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: kube-state-metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: mcp-observability
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kube-state-metrics
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

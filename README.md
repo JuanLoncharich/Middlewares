@@ -1,5 +1,8 @@
 # mcp-eval-operator
 
+Distributed tracing, metrics, centralized logs, dashboards, and access
+instructions are covered in [Observability](#observability).
+
 Automated static + dynamic security evaluation of Model Context Protocol (MCP)
 servers on Kubernetes. Point an `MCPServer` resource at a GitHub repository and
 the operator periodically clones it, runs it inside a locked-down sandbox, and
@@ -26,12 +29,14 @@ evaluator ──LLM calls──────▶ occludra┐ (security-gateways, W
 | `api/v1alpha1/` | CRD Go types (`OpenCodeAgent`, `MCPServer`, `MCPEvaluationRun`) + deepcopy |
 | `internal/controller/` | `MCPServer` (cron scheduler) and `MCPEvaluationRun` (Job builder / status) reconcilers |
 | `cmd/main.go` | controller-manager entrypoint |
+| `internal/observability/` | OpenTelemetry setup and persisted trace-context propagation |
 | `config/crd/bases/` | generated-equivalent CRD manifests |
 | `config/rbac/` | manager ClusterRole, leader-election Role, runner ServiceAccount/Role |
 | `config/manager/` | operator Deployment (namespace `mcp-eval-system`) |
 | `config/samples/` | namespace, NetworkPolicies, reference sandbox Pod, four agent personas, `MCPServer` sample |
 | `manifests/` | Vigil-LLM, Occludra and NetBird deployments (namespace `security-gateways`) — the three security layers |
 | `manifests/chroma/` | Distributed Chroma vector database over MinIO (namespace `chroma`): vendored official chart, values, worker configs, MinIO/Postgres/OTel substrate, NetworkPolicies and the Vigil corpus-loader Job |
+| `manifests/observability/` | Grafana, Alloy, Prometheus, Loki, Tempo, dashboards, alert rules, RBAC and NetworkPolicies |
 | `runner/` | TypeScript evaluator (`@opencode-ai/sdk` + `@kubernetes/client-node`) |
 | `images/cloner/` | init-container image: git + npm/uv/go toolchain detection |
 | `images/target/` | sandbox image: supervisor that binds the server's stdio to the IPC FIFOs |
@@ -287,6 +292,133 @@ kubectl -n security-gateways set env deploy/occludra \
   OCCLUDRA_FALLBACK_API_KEY=<secondary-key>
 ```
 
+## Observability
+
+OpenTelemetry instruments the Go operator, TypeScript evaluator and Occludra.
+Grafana Alloy collects their telemetry; Prometheus stores metrics, Loki stores
+logs, and Tempo stores traces. Grafana provisions all three data sources and
+**Dashboards → MCP evaluation → MCP evaluation platform**, a 14-panel dashboard
+that refreshes every 30 seconds.
+
+### What you can inspect
+
+* **Evaluations:** retained runs by phase, latest terminal failure per server,
+  oldest active evaluation, evaluator duration and controller reconciliation
+  errors. Run counts are gauges over retained CR history; queries take `max`
+  across manager replicas before aggregating to avoid double counting.
+* **Gateway:** requests by route/status, P95 duration including the complete SSE
+  stream, DLP redactions by detector, policy blocks and upstream failovers.
+  Active-request metrics are also available in Explore → Prometheus.
+* **Kubernetes:** desired/available deployment replicas, container restarts and
+  telemetry scrape health.
+* **Logs and traces:** correlate an evaluation across scheduling, Job execution,
+  static evidence collection, agents, fuzzing, adversarial probes, MCP RPCs,
+  Vigil client calls and Occludra. Prometheus loads six alert rules for failed
+  or stuck evaluations, unavailable metrics/workloads, gateway errors and
+  repeated restarts. Notification routing requires an Alertmanager destination.
+
+The operator persists W3C context in `security.eval.io/traceparent` on the run
+CR and passes it to the evaluator as `TRACEPARENT`. Runner logs include `run`,
+`namespace`, `trace_id` and `span_id`; controller run logs and gateway completion
+logs include trace IDs. In Grafana, **View trace** opens a log's trace in Tempo.
+Traces cover stages actually executed after instrumentation was enabled.
+
+In **Explore → Loki**, select a run:
+
+```logql
+{namespace="mcp-evals", container="evaluator"} | json | run="YOUR_RUN"
+```
+
+In **Explore → Tempo**, find its trace:
+
+```traceql
+{ span.mcp.run = "YOUR_RUN" }
+```
+
+In **Explore → Prometheus**, inspect firing alerts:
+
+```promql
+ALERTS{alertstate="firing"}
+```
+
+Vigil has client-side spans; its external server image is not instrumented here.
+The helper connects an existing Chroma collector through
+`manifests/chroma/otel-collector-observability.yaml`; joining Chroma traces to
+Vigil requests requires propagation inside Vigil. OpenCode inference calls
+appear under agent spans through Occludra. Untrusted target/cloner logs are
+excluded from the shared log store.
+
+### Deploy and access
+
+Install monitoring with `make observability`, or enable it during a full deploy
+with `DEPLOY_OBSERVABILITY=1`. Build and push/import versioned first-party images
+before rolling out instrumentation. For an existing deployment:
+
+```bash
+OPERATOR_IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG" \
+EVALUATOR_IMG="$IMG_REGISTRY/mcp-evaluator:$IMG_TAG" \
+OCCLUDRA_IMG="$IMG_REGISTRY/occludra-gateway:$IMG_TAG" \
+./hack/deploy-observability.sh
+kubectl -n mcp-eval-system rollout status deploy/mcp-eval-controller-manager
+kubectl -n security-gateways rollout status deploy/occludra
+```
+
+The helper preserves provider, credential and mesh settings and saves previous
+Deployments under `/tmp/mcp-observability-rollback.*`. The image import helper
+registers images with containerd CRI so `IfNotPresent` can use them locally.
+Check monitoring with `kubectl -n observability get pods,pvc`.
+
+Run each port-forward in a separate terminal and leave it open:
+
+```bash
+kubectl -n observability port-forward svc/grafana 3000:3000
+kubectl -n observability port-forward svc/prometheus 9090:9090
+kubectl -n observability port-forward svc/otel-collector 12345:12345
+```
+
+| Interface | Local URL | Purpose |
+|---|---|---|
+| Grafana | http://localhost:3000 | Dashboard and Explore for metrics, logs and traces |
+| Prometheus | http://localhost:9090 | PromQL queries, `/alerts` for rules and `/targets` for scrape health |
+| Alloy | http://localhost:12345 | Collector components, configuration and pipeline health |
+
+Grafana's username is `admin`. Retrieve the generated password in another
+terminal; the same Secret is retained on redeployment:
+
+```bash
+kubectl -n observability get secret grafana-admin -o jsonpath='{.data.password}' | base64 -d
+```
+
+Loki (3100) and Tempo (3200) provide backend APIs and `/ready` endpoints; their
+visual exploration is in Grafana. kube-state-metrics exposes `/metrics` on 8080.
+Alloy receives OTLP over gRPC on 4317 and HTTP on 4318. Operator metrics use HTTPS
+on 8443; Occludra exposes `/metrics` on 8080.
+
+### Retention, isolation and rollback
+
+Prometheus retains 15 days or 8 GB; Loki and Tempo retain seven days. Five PVCs
+use 32 GiB in the default StorageClass. Resource requests total 500m CPU and
+1,216 MiB RAM. The backends are single instances with persistent storage;
+monitoring can pause during node loss or volume reattachment. Alloy outages
+longer than Job retention can leave gaps in logs.
+
+All services use ClusterIP and restricted NetworkPolicies. Monitoring accounts
+cannot read Kubernetes Secrets. Application metadata is traced; runner logging
+redacts sensitive evidence/credential fields, and Alloy sanitizes legacy log
+text. Metric labels exclude run/trace IDs and arbitrary request content. Job
+metrics have a distinct service instance and flush before process exit; exporter
+failure does not change an evaluation's result.
+
+An evaluation Pod's target shares its evaluator's network namespace and can
+reach the allowed telemetry ingestion port. Telemetry is diagnostic evidence;
+CR status and reports remain the authoritative security verdict.
+
+Set `OTEL_SDK_DISABLED=true` or remove `OTEL_EXPORTER_OTLP_ENDPOINT` on the manager
+and gateway to disable export; new Jobs inherit the manager's configuration.
+Use the saved Deployment manifests or Kubernetes rollout history to roll back.
+Removing workloads preserves StatefulSet PVCs by default; deleting the namespace
+or PVCs discards stored telemetry.
+
 ## Security model
 
 The untrusted MCP server is the threat. Controls, from outermost in:
@@ -305,6 +437,8 @@ The untrusted MCP server is the threat. Controls, from outermost in:
      IPs resolved at reconcile time) and the NetBird control/data planes; in
      legacy mode (`MESH_ENFORCE=false`) it allows the gateways' service ports
      and public 443 as well. See *Security layers* below.
+   When observability is enabled, an additive policy also allows the evaluation
+   Pod to reach the Alloy collector on TCP/4318.
    `networkpolicy-cilium.yaml` pins the clone-phase rules to exact FQDNs on
    Cilium.
 3. **Pod** — `automountServiceAccountToken: false`; the evaluator alone mounts
