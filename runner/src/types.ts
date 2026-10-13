@@ -141,6 +141,8 @@ export interface RunnerEnv {
   // --- security layer: Vigil-LLM (inbound prompt-injection scanner) ---
   /** Full URL of the Vigil /analyze endpoint (routed over the NetBird mesh). */
   vigilUrl: string;
+  /** Optional GPU scanner tried first (whole-payload windowed scan); CPU `vigilUrl` is the fallback. */
+  vigilGpuUrl?: string;
   /** Hard gate (true) or observe-only (false). */
   vigilEnabled: boolean;
   /** strict: scanner failure or detection fails the run; monitor: log only. */

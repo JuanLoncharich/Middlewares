@@ -190,6 +190,11 @@ spec:
           # vigil-llm image.
           image: ghcr.io/security-eval/vigil-llm:20260930
           imagePullPolicy: Always
+          # Start the server directly (skip upstream's entrypoint dataset
+          # loader): its 1536-dim ada-002 vectors never match the 384-dim
+          # MiniLM embedder — the CAVEAT above — and re-streaming them took
+          # ~6 min per start. Same verdicts, starts in seconds once cached.
+          command: ["python", "vigil-server.py", "-c", "conf/server.conf"]
           ports:
             - name: http
               containerPort: 5000
@@ -201,6 +206,10 @@ spec:
             # the /app/conf mount below.
             - name: HOME
               value: /tmp
+            # sentence-transformers 2.2.2's own model cache; on the tmp
+            # emptyDir it survives container restarts within the pod.
+            - name: SENTENCE_TRANSFORMERS_HOME
+              value: /tmp/st-cache
               # HOME under /tmp gives the HuggingFace model caches a writable
               # directory (the root filesystem is read-only).
           volumeMounts:

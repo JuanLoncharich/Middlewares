@@ -452,3 +452,27 @@ func TestBuildJobRuntimeClassName(t *testing.T) {
 		t.Fatalf("pod template RuntimeClassName must stay nil when unset, got %q", *job.Spec.Template.Spec.RuntimeClassName)
 	}
 }
+
+func TestBuildJobVigilGPUURLOnlyWhenConfigured(t *testing.T) {
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "filesystem-mcp", Namespace: "mcp-evals"},
+		Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+	}
+	build := func(images ImageConfig) *corev1.Container {
+		return evaluatorContainer(t, (&MCPEvaluationRunReconciler{Images: images}).buildJob(testRun(), server))
+	}
+
+	if _, ok := findEnv(*build(meshImages()), "VIGIL_GPU_URL"); ok {
+		t.Error("VIGIL_GPU_URL must be absent unless configured (GPU scanner is opt-in)")
+	}
+	images := meshImages()
+	images.VigilGPUURL = "http://vigil-gpu-service.security-gateways.svc.cluster.local:5000/analyze/prompt"
+	evaluator := build(images)
+	if got, ok := findEnv(*evaluator, "VIGIL_GPU_URL"); !ok || got != images.VigilGPUURL {
+		t.Errorf("VIGIL_GPU_URL = %q (present=%v), want %q", got, ok, images.VigilGPUURL)
+	}
+	// The CPU endpoint stays the fallback, unchanged.
+	if got, _ := findEnv(*evaluator, "VIGIL_URL"); got != images.VigilURL {
+		t.Errorf("VIGIL_URL changed to %q", got)
+	}
+}

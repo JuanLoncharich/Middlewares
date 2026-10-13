@@ -1,0 +1,237 @@
+# ---------------------------------------------------------------------------
+# GPU Vigil on the on-demand GPU node (the user's PC), scaled 0 <-> 1 by KEDA.
+#
+# * Same pinned vigil-llm source and config contract as the cluster's CPU
+#   Vigil (manifests/vigil-deployment.yaml), built with CUDA torch and the
+#   transformer pipeline on the GPU (images/vigil-gpu/Dockerfile).
+# * The evaluator prefers it (operator env VIGIL_GPU_URL) and falls back to the
+#   in-cluster vigil-service when it is unreachable or scaled to zero — no run
+#   ever fails because the PC is off.
+# * KEDA scales it from the operator's /active-runs count: 1 while any
+#   MCPEvaluationRun is non-terminal, 0 after `cooldownPeriod` of idleness.
+#   The ScaledObject starts PAUSED at 0 replicas; `gpu-node up` removes the
+#   pause annotation after the node is Ready, `gpu-node down` restores it
+#   before draining — so a detached PC never leaves a Pending pod behind.
+# * Required nodeAffinity + toleration pin it to the GPU node; the in-cluster
+#   CPU Vigil never lands there (no toleration).
+# * `replicas` is owned by KEDA. GitOps (Flux) must ignore that field.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vigil-gpu-server-conf
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm-gpu
+    app.kubernetes.io/part-of: mcp-eval-platform
+data:
+  # Identical scanner set to the cluster's full Vigil; only the hardware differs.
+  server.conf: |
+    [main]
+    use_cache = true
+    cache_max = 500
+    [embedding]
+    model = all-MiniLM-L6-v2
+    [vectordb]
+    collection = vigil-local
+    db_dir = /tmp/vigil-vdb
+    n_results = 5
+    [auto_update]
+    enabled = false
+    threshold = 3
+    [scanners]
+    input_scanners = transformer,yara,vectordb
+    output_scanners = similarity,sentiment
+    [scanner:yara]
+    rules_dir = /app/data/yara
+    [scanner:vectordb]
+    threshold = 0.4
+    [scanner:transformer]
+    model = laiyer/deberta-v3-base-prompt-injection
+    threshold = 0.98
+    [scanner:similarity]
+    threshold = 0.4
+    [scanner:sentiment]
+    threshold = 0.7
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vigil-gpu
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm-gpu
+    app.kubernetes.io/component: prompt-scanner-gpu
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  replicas: 0            # owned by KEDA (ScaledObject vigil-gpu below)
+  strategy:
+    type: Recreate       # one GPU: never old and new side by side
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vigil-llm-gpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vigil-llm-gpu
+        app.kubernetes.io/component: prompt-scanner-gpu
+    spec:
+      runtimeClassName: nvidia
+      priorityClassName: mcp-eval-critical
+      serviceAccountName: vigil
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: security.eval.io/gpu
+                    operator: In
+                    values: ["nvidia"]
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10004
+        runAsGroup: 10004
+        fsGroup: 10004
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: config
+          configMap:
+            name: vigil-gpu-server-conf
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: logs
+          emptyDir:
+            sizeLimit: 256Mi
+        # Model cache on the PC's own disk: a scale-from-zero start reuses it
+        # instead of re-downloading ~1 GB (measured: 23 s warm vs 5+ min cold).
+        - name: hf-cache
+          hostPath:
+            path: /var/lib/vigil-gpu/hf
+            type: DirectoryOrCreate
+      initContainers:
+        # hostPath directories are created root-owned; hand this one to the
+        # scanner's UID. Cheap after the first start.
+        - name: cache-owner
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown -R 10004:10004 /cache"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - {name: hf-cache, mountPath: /cache}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+      containers:
+        - name: vigil
+          image: __VIGIL_GPU_IMG__
+          imagePullPolicy: IfNotPresent
+          # Start the server directly: upstream's entrypoint first re-streams
+          # two ada-002 datasets whose 1536-dim vectors never match the
+          # 384-dim MiniLM embedder (measured: ~6 min per start, no effect on
+          # verdicts). Warm start this way: ~23 s.
+          command: ["python", "vigil-server.py", "-c", "conf/server.conf"]
+          ports:
+            - {name: http, containerPort: 5000, protocol: TCP}
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: HF_HOME, value: /cache/hf}
+            # sentence-transformers 2.2.2 keeps its own model cache (default
+            # under $HOME=/tmp, i.e. re-downloaded every start).
+            - {name: SENTENCE_TRANSFORMERS_HOME, value: /cache/st}
+          volumeMounts:
+            - {name: config, mountPath: /app/conf, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            - {name: logs, mountPath: /app/logs}
+            - {name: hf-cache, mountPath: /cache}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10004
+            runAsGroup: 10004
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: __VIGIL_GPU_MEM_LIMIT__
+              nvidia.com/gpu: 1
+          # Same version-agnostic tcpSocket probes as the CPU Vigil. The
+          # startup budget covers a cold first start (model + dataset
+          # download); scale-from-zero starts hit the hostPath cache.
+          startupProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+            failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-gpu-service
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm-gpu
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vigil-llm-gpu
+  ports:
+    - {name: http, port: 5000, targetPort: http, protocol: TCP}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vigil-gpu
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/name: vigil-llm-gpu
+    app.kubernetes.io/part-of: mcp-eval-platform
+  annotations:
+    # Paused at 0 until `gpu-node up` attaches the PC (it removes this).
+    autoscaling.keda.sh/paused-replicas: "0"
+spec:
+  scaleTargetRef:
+    name: vigil-gpu
+  minReplicaCount: 0
+  maxReplicaCount: 1       # one GPU
+  pollingInterval: 15      # seconds between /active-runs polls
+  cooldownPeriod: 600      # idle 10 min -> back to 0 (GPU and RAM freed)
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "http://mcp-eval-operator-activity.mcp-eval-system.svc.cluster.local:8082/active-runs"
+        format: json
+        valueLocation: activeRuns
+        targetValue: "1"
+        activationTargetValue: "0"   # any active run wakes it up

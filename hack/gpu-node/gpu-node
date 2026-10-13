@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# gpu-node — attach / detach this PC as an on-demand GPU worker of the k0s
+# cluster. Nothing runs at boot; `down` leaves no trace in the cluster.
+#
+#   gpu-node preflight   read-only checks (no changes)
+#   gpu-node install     one-time: k0s binary, systemd unit+slice, containerd
+#                        NVIDIA runtime, join token (asks for sudo)
+#   gpu-node up          open firewall + routes, start k0s, wait Ready + GPU,
+#                        start the GPU scanner
+#   gpu-node down        stop the scanner, drain, stop k0s, delete the Node
+#                        object, undo firewall + routes
+#   gpu-node status      what is currently attached
+#   gpu-node smoke       run nvidia-smi in a pod on the node
+#   gpu-node cluster-prep / cluster-revert
+#                        one-time, reversible cluster changes (asks first)
+#
+# Runs as your user; uses sudo only for the privileged steps.
+# If `up` fails half-way it rolls back by running `down`.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=gpu-node.conf
+source "$HERE/gpu-node.conf"
+[ -f "$HERE/gpu-node.local.conf" ] && source "$HERE/gpu-node.local.conf"
+
+KC=(kubectl --context "$KUBE_CONTEXT")
+SLICE=k0s-gpu.slice
+UNIT=k0s-gpu-worker.service
+FW_COMMENT_ZT="gpu-node vxlan zt"
+FW_COMMENT_LAN="gpu-node vxlan node-lan"
+
+log()  { printf '\033[1;34m[gpu-node]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[gpu-node] WARN:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[gpu-node] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+zt_ip() { ip -4 -o addr show dev "$ZT_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
+node_exists() { "${KC[@]}" get node "$NODE_NAME" >/dev/null 2>&1; }
+deploy_exists() { "${KC[@]}" -n "$GPU_NAMESPACE" get deploy "$GPU_DEPLOYMENT" >/dev/null 2>&1; }
+# KEDA owns the GPU workload's replica count (ScaledObject of the same name,
+# 0 <-> 1 from the operator's /active-runs). Attaching releases the pause;
+# detaching pins it to 0 first, so a detached PC never leaves a Pending pod.
+scaledobject_exists() { "${KC[@]}" -n "$GPU_NAMESPACE" get scaledobject "$GPU_DEPLOYMENT" >/dev/null 2>&1; }
+keda_pause() { "${KC[@]}" -n "$GPU_NAMESPACE" annotate --overwrite scaledobject "$GPU_DEPLOYMENT" autoscaling.keda.sh/paused-replicas=0 >/dev/null; }
+keda_resume() { "${KC[@]}" -n "$GPU_NAMESPACE" annotate scaledobject "$GPU_DEPLOYMENT" autoscaling.keda.sh/paused-replicas- >/dev/null; }
+
+# --------------------------------------------------------------- preflight --
+preflight() {
+  local fail=0
+  chk() { if eval "$2" >/dev/null 2>&1; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi; }
+  log "preflight (read-only)"
+  chk "ZeroTier interface $ZT_IFACE has an address"        '[ -n "$(zt_ip)" ]'
+  chk "NVIDIA driver answers (nvidia-smi)"                  'nvidia-smi -L'
+  chk "nvidia-container-runtime present"                    'test -x /usr/bin/nvidia-container-runtime'
+  chk "cgroup v2"                                           '[ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ]'
+  chk "kubectl reaches context $KUBE_CONTEXT"               '"${KC[@]}" get nodes'
+  chk "apiserver reachable over ZeroTier-side path (6443)"  'timeout 4 bash -c "echo > /dev/tcp/${NODES_LAN[2]}/6443"'
+  for i in "${!NODES_ZT[@]}"; do
+    chk "ping node ${NODES_ZT[$i]} over ZeroTier"           "ping -c1 -W2 ${NODES_ZT[$i]}"
+  done
+  chk "k0s binary installed (/usr/local/bin/k0s)"           'test -x /usr/local/bin/k0s'
+  chk "systemd unit + slice installed"                      'systemctl cat '"$UNIT"' '"$SLICE"
+  chk "unit is NOT enabled at boot"                         '[ "$(systemctl is-enabled '"$UNIT"' 2>/dev/null)" != enabled ]'
+  chk "no leftover Node object $NODE_NAME"                  '! node_exists'
+  return $fail
+}
+
+# ----------------------------------------------------------------- install --
+install_cmd() {
+  log "installing k0s $K0S_VERSION (checksum-verified) and the on-demand unit"
+  local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+  local base="https://github.com/k0sproject/k0s/releases/download/${K0S_VERSION/+/%2B}"
+  local asset="k0s-${K0S_VERSION}-amd64"
+  curl -fsSL -o "$tmp/k0s"          "$base/${asset/+/%2B}"
+  curl -fsSL -o "$tmp/sha256sums"   "$base/sha256sums.txt"
+  local want got
+  want="$(awk -v a="$asset" '$2==a || $2=="*"a {print $1}' "$tmp/sha256sums")"
+  got="$(sha256sum "$tmp/k0s" | awk '{print $1}')"
+  [ -n "$want" ] && [ "$want" = "$got" ] || die "k0s checksum mismatch (want '$want' got '$got')"
+  sudo install -m 0755 "$tmp/k0s" /usr/local/bin/k0s
+
+  local total_kib total_gib reserved_cpu reserved_mem_kib
+  total_kib="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+  reserved_mem_kib=$(( total_kib - (MEM_LIMIT_GIB - 1) * 1024 * 1024 ))   # leave (limit-1) GiB for pods
+  reserved_cpu=$(( $(nproc) - CPU_CORES ))
+  [ "$reserved_cpu" -ge 0 ] || die "CPU_CORES ($CPU_CORES) exceeds this machine's cores"
+
+  local args="--node-ip=__NODE_IP__ --hostname-override=${NODE_NAME} --cgroup-root=/${SLICE} --system-reserved=cpu=${reserved_cpu},memory=${reserved_mem_kib}Ki"
+  # NODE_IP is resolved at `up` time (ZeroTier may not be up at install time),
+  # so the unit is rendered by `up`; install only stages the templates.
+  sudo install -d -m 0755 /etc/k0s/containerd.d /etc/k0s/gpu-node
+  sudo install -m 0644 "$HERE/systemd/containerd-nvidia.toml" /etc/k0s/containerd.d/nvidia.toml
+  sudo install -m 0644 "$HERE/systemd/k0s-gpu-worker.service.tmpl" /etc/k0s/gpu-node/worker.service.tmpl
+  printf '%s\n' "$args" | sudo tee /etc/k0s/gpu-node/kubelet-args >/dev/null
+  render_units
+  render_service "$(zt_ip || true)"   # placeholder address if ZeroTier is down; `up` re-renders
+  fetch_token
+  log "install done. Nothing is started and nothing is enabled at boot."
+}
+
+render_units() {
+  local cpu_quota=$(( CPU_CORES * 100 ))
+  local mem_max="${MEM_LIMIT_GIB}G" mem_high="$(( MEM_LIMIT_GIB * 1024 - 512 ))M"
+  sed -e "s|__CPU_QUOTA__|$cpu_quota|" -e "s|__MEM_HIGH__|$mem_high|" -e "s|__MEM_MAX__|$mem_max|" \
+      "$HERE/systemd/k0s-gpu.slice.tmpl" | sudo tee /etc/systemd/system/$SLICE >/dev/null
+  sudo systemctl daemon-reload
+}
+
+render_service() {   # needs the ZeroTier address, so done at `up`
+  local ip="${1:-127.0.0.1}" args
+  args="$(sudo cat /etc/k0s/gpu-node/kubelet-args | sed "s|__NODE_IP__|$ip|")"
+  sed -e "s|__TOKEN_FILE__|$TOKEN_FILE|" -e "s|__NODE_LABEL__|$NODE_LABEL|" \
+      -e "s|__NODE_TAINT__|$NODE_TAINT|" -e "s|__KUBELET_ARGS__|$args|" \
+      /etc/k0s/gpu-node/worker.service.tmpl | sudo tee /etc/systemd/system/$UNIT >/dev/null
+  sudo systemctl daemon-reload
+}
+
+fetch_token() {
+  if sudo test -s "$TOKEN_FILE"; then log "join token already present ($TOKEN_FILE), keeping it"; return; fi
+  log "creating a worker join token on the controller via $JUMP_HOST (it is written to $TOKEN_FILE, never printed)"
+  ssh -o BatchMode=yes "$JUMP_HOST" \
+      "ssh -o BatchMode=yes $CONTROLLER_SSH 'sudo k0s token create --role=worker --expiry=$TOKEN_EXPIRY'" \
+    | sudo install -m 0600 /dev/stdin "$TOKEN_FILE"
+  sudo test -s "$TOKEN_FILE" || die "empty token"
+}
+
+# ------------------------------------------------------------ firewall / routes
+net_up() {
+  local ip; ip="$(zt_ip)"; [ -n "$ip" ] || die "$ZT_IFACE has no address (is ZeroTier joined and authorised?)"
+  log "firewall: allow VXLAN (udp/4789) on $ZT_IFACE from $ZT_SUBNET and $NODE_LAN_SUBNET"
+  sudo ufw allow in on "$ZT_IFACE" from "$ZT_SUBNET"       to any port 4789 proto udp comment "$FW_COMMENT_ZT"  >/dev/null
+  sudo ufw allow in on "$ZT_IFACE" from "$NODE_LAN_SUBNET" to any port 4789 proto udp comment "$FW_COMMENT_LAN" >/dev/null
+  log "routes: node LAN addresses via ZeroTier (VXLAN return path)"
+  for i in "${!NODES_LAN[@]}"; do
+    sudo ip route replace "${NODES_LAN[$i]}/32" via "${NODES_ZT[$i]}" dev "$ZT_IFACE"
+  done
+}
+
+net_down() {
+  for i in "${!NODES_LAN[@]}"; do sudo ip route del "${NODES_LAN[$i]}/32" 2>/dev/null || true; done
+  sudo ufw delete allow in on "$ZT_IFACE" from "$ZT_SUBNET"       to any port 4789 proto udp >/dev/null 2>&1 || true
+  sudo ufw delete allow in on "$ZT_IFACE" from "$NODE_LAN_SUBNET" to any port 4789 proto udp >/dev/null 2>&1 || true
+}
+
+# --------------------------------------------------------------------- up/down
+# ------------------------------------------------------------------ GPU image
+# The GPU workload's image is imported straight into the node's own containerd
+# (kept across down/up: only the first `up` pays for it). Generic: whatever
+# GPU_IMAGE_LOCAL / GPU_IMAGE_REF name in gpu-node.conf.
+load_image() {
+  if sudo k0s ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "$GPU_IMAGE_REF"; then
+    log "image $GPU_IMAGE_REF already in the node's containerd"; return
+  fi
+  docker image inspect "$GPU_IMAGE_LOCAL" >/dev/null 2>&1 || die "local image $GPU_IMAGE_LOCAL not found (build the GPU workload image first)"
+  log "importing $GPU_IMAGE_LOCAL into k0s containerd as $GPU_IMAGE_REF (first time only)"
+  docker tag "$GPU_IMAGE_LOCAL" "$GPU_IMAGE_REF"
+  docker save "$GPU_IMAGE_REF" | sudo k0s ctr -n k8s.io images import -
+  docker rmi "$GPU_IMAGE_REF" >/dev/null 2>&1 || true   # drop only the extra tag
+}
+
+up() {
+  preflight || die "preflight failed; fix the FAIL lines above (nothing was changed)"
+  local ip; ip="$(zt_ip)"
+  trap 'warn "up failed — rolling back"; down_cmd || true' ERR
+  net_up
+  render_service "$ip"
+  log "starting $UNIT (limits: ${CPU_CORES} cores, ${MEM_LIMIT_GIB} GiB RAM, VRAM soft cap $((VRAM_LIMIT_BYTES/1024/1024/1024)) GiB)"
+  sudo systemctl start "$UNIT"
+  log "waiting for node/$NODE_NAME Ready (up to ${READY_TIMEOUT}s)"
+  local t=0
+  until node_exists; do sleep 3; t=$((t+3)); [ $t -lt "$READY_TIMEOUT" ] || die "node never registered"; done
+  "${KC[@]}" wait --for=condition=Ready "node/$NODE_NAME" --timeout="${READY_TIMEOUT}s"
+  log "waiting for the GPU to be advertised (nvidia.com/gpu)"
+  t=0
+  until [ "$("${KC[@]}" get node "$NODE_NAME" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}' 2>/dev/null)" = "1" ]; do
+    sleep 3; t=$((t+3)); [ $t -lt "$READY_TIMEOUT" ] || die "GPU not advertised — is the nvidia device plugin DaemonSet applied? (see README)"
+  done
+  if deploy_exists && scaledobject_exists; then
+    load_image
+    log "releasing KEDA pause on $GPU_DEPLOYMENT (scales 0<->1 with active evaluations; idle = 0)"
+    keda_resume
+  elif deploy_exists; then
+    load_image
+    log "starting $GPU_DEPLOYMENT (no KEDA ScaledObject: always on while attached)"
+    "${KC[@]}" -n "$GPU_NAMESPACE" scale deploy "$GPU_DEPLOYMENT" --replicas=1 >/dev/null
+    "${KC[@]}" -n "$GPU_NAMESPACE" rollout status deploy "$GPU_DEPLOYMENT" --timeout="${READY_TIMEOUT}s"
+  else
+    warn "deployment $GPU_NAMESPACE/$GPU_DEPLOYMENT not found — node is up but no GPU workload was started"
+  fi
+  trap - ERR
+  log "GPU node is attached."
+}
+
+down_cmd() {
+  trap - ERR
+  if scaledobject_exists; then
+    log "pausing KEDA on $GPU_DEPLOYMENT at 0 replicas"
+    keda_pause || true
+  fi
+  if deploy_exists; then
+    "${KC[@]}" -n "$GPU_NAMESPACE" scale deploy "$GPU_DEPLOYMENT" --replicas=0 >/dev/null || true
+    "${KC[@]}" -n "$GPU_NAMESPACE" wait --for=delete pod -l "app.kubernetes.io/name=vigil-llm-gpu" \
+        --timeout=60s >/dev/null 2>&1 || true
+  fi
+  if node_exists; then
+    log "cordon + drain node/$NODE_NAME"
+    "${KC[@]}" cordon "$NODE_NAME" >/dev/null || true
+    "${KC[@]}" drain "$NODE_NAME" --ignore-daemonsets --delete-emptydir-data --force \
+        --timeout="${DRAIN_TIMEOUT}s" >/dev/null || warn "drain incomplete (continuing)"
+  fi
+  log "stopping k0s and everything in $SLICE"
+  sudo systemctl stop "$UNIT" 2>/dev/null || true
+  sudo systemctl kill --kill-whom=all --signal=SIGKILL "$SLICE" 2>/dev/null || true
+  sudo systemctl stop "$SLICE" 2>/dev/null || true
+  if node_exists; then
+    log "deleting Node object (no stale NotReady node left behind)"
+    "${KC[@]}" delete node "$NODE_NAME" --wait=false >/dev/null || true
+  fi
+  net_down
+  log "GPU node is detached."
+}
+
+status() {
+  echo "== local";   systemctl is-active "$UNIT" 2>/dev/null || true
+  echo "   slice:";  systemctl show "$SLICE" -p MemoryCurrent -p CPUUsageNSec -p TasksCurrent 2>/dev/null | sed 's/^/     /' || true
+  echo "   routes:"; ip route | grep -E "$(IFS='|'; echo "${NODES_LAN[*]}")" | sed 's/^/     /' || true
+  echo "== cluster"
+  "${KC[@]}" get node "$NODE_NAME" -o wide 2>&1 | sed 's/^/   /' || true
+  "${KC[@]}" -n "$GPU_NAMESPACE" get scaledobject,deploy,pod -l app.kubernetes.io/name=vigil-llm-gpu -o wide 2>&1 | sed 's/^/   /' || true
+}
+
+smoke() {
+  node_exists || die "node/$NODE_NAME is not attached (run: gpu-node up)"
+  log "running nvidia-smi in a pod pinned to the GPU node"
+  "${KC[@]}" apply -f "$HERE/manifests/smoke-test.yaml" >/dev/null
+  "${KC[@]}" -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-smoke-test --timeout=180s || true
+  "${KC[@]}" -n default logs gpu-smoke-test || true
+  "${KC[@]}" -n default delete pod gpu-smoke-test --wait=false >/dev/null || true
+}
+
+# ------------------------------------------------------- cluster-side changes
+# Every DaemonSet that tolerates all taints would land on the PC. These two are
+# not meant to run there (CSI has no OpenStack to talk to; the importer is a
+# privileged pod with the host containerd socket). Exclude the GPU node.
+EXCLUDE_DS=(image-importer openstack-cinder-csi-nodeplugin)
+EXCLUDE_PATCH='{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"security.eval.io/gpu","operator":"DoesNotExist"}]}]}}}}}}}'
+
+cluster_prep() {
+  log "cluster changes (kubectl, context $KUBE_CONTEXT):"
+  log "  1. RuntimeClass nvidia + NVIDIA device plugin DaemonSet (pinned to the GPU node)"
+  log "  2. keep ${EXCLUDE_DS[*]} off the GPU node (nodeAffinity; causes one rolling restart each)"
+  read -r -p "apply? [y/N] " a; [ "$a" = y ] || die "aborted"
+  "${KC[@]}" apply -f "$HERE/manifests/runtimeclass-nvidia.yaml" -f "$HERE/manifests/nvidia-device-plugin.yaml"
+  for d in "${EXCLUDE_DS[@]}"; do
+    "${KC[@]}" -n kube-system patch ds "$d" --type merge -p "$EXCLUDE_PATCH"
+  done
+  log "done. Revert with: gpu-node cluster-revert"
+}
+
+cluster_revert() {
+  "${KC[@]}" delete -f "$HERE/manifests/nvidia-device-plugin.yaml" -f "$HERE/manifests/runtimeclass-nvidia.yaml" --ignore-not-found
+  for d in "${EXCLUDE_DS[@]}"; do
+    "${KC[@]}" -n kube-system patch ds "$d" --type merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}' || true
+  done
+}
+
+case "${1:-}" in
+  preflight) preflight ;;
+  install)   install_cmd ;;
+  up)        up ;;
+  down)      down_cmd ;;
+  status)    status ;;
+  smoke)     smoke ;;
+  cluster-prep)   cluster_prep ;;
+  cluster-revert) cluster_revert ;;
+  *) sed -n '2,23p' "$0"; exit 2 ;;
+esac

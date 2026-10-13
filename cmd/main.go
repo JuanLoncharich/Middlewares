@@ -57,6 +57,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var activityAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metric endpoint binds to. "+
 		"Use the port :8080. If not set, it will be 0 in order to disable the metrics server")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -67,6 +68,8 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&activityAddr, "activity-bind-address", ":8082",
+		"Address serving GET /active-runs (non-terminal MCPEvaluationRuns) for KEDA scale-to-zero. Empty disables it.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -160,6 +163,13 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MCPEvaluationRun")
 		os.Exit(1)
+	}
+
+	if activityAddr != "" {
+		if err := mgr.Add(&controller.ActivityServer{Reader: mgr.GetClient(), Addr: activityAddr}); err != nil {
+			setupLog.Error(err, "unable to set up activity endpoint")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
