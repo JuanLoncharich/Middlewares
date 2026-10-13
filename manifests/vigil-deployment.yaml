@@ -210,8 +210,13 @@ spec:
             # emptyDir it survives container restarts within the pod.
             - name: SENTENCE_TRANSFORMERS_HOME
               value: /tmp/st-cache
-              # HOME under /tmp gives the HuggingFace model caches a writable
-              # directory (the root filesystem is read-only).
+            # The HuggingFace cache must be set explicitly: the image's ENV
+            # points HF_HOME at /cache/hf (the GPU node's hostPath), which
+            # does not exist on this read-only root filesystem. Without a
+            # writable cache the transformer scanner fails to load and
+            # vigil-llm keeps serving with it silently disabled.
+            - name: HF_HOME
+              value: /tmp/hf
           volumeMounts:
             # Upstream reads /app/conf/server.conf (baked entrypoint
             # argument); the mount shadows the image's own conf/ siblings,
