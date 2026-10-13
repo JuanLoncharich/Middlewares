@@ -59,18 +59,32 @@ so the gain is offloading the small nodes, not latency.
 | CPU, lite (YARA only) | ~401 s with upstream entrypoint | 6 ms | 2.1 GiB | **misses both injections** — a weak fallback |
 | GPU, full, first start ever (empty cache) | 327 s | — | — | — |
 
-## Network (already done)
+## Configuration
 
-ZeroTier network `565799d8f675597b`, pool `10.147.17.0/24`: this PC + the three
-nodes, all links DIRECT. Two things make VXLAN work across it, both verified
-with UDP/4789 tests:
+All machine- and network-specific values (overlay interface and CIDR, node LAN
+and overlay IPs, jump host, controller) live in `gpu-node.conf`, which is
+git-ignored. Start from the template:
 
-* "Allow Ethernet Bridging" is ticked for the **three nodes** in ZeroTier
-  Central (Calico sends VXLAN with the node's `10.66.50.x` source; ZeroTier
-  drops that otherwise).
+```
+cp hack/gpu-node/gpu-node.conf.example hack/gpu-node/gpu-node.conf
+$EDITOR hack/gpu-node/gpu-node.conf     # fill in every CHANGE_ME
+```
+
+`gpu-node` refuses to run while the file is missing or still has `CHANGE_ME`
+values.
+
+## Network
+
+A ZeroTier network (`ZT_SUBNET`) joins this PC and the cluster nodes, all links
+DIRECT. Two things make VXLAN work across it, both verified with UDP/4789 tests:
+
+* "Allow Ethernet Bridging" is ticked for the **cluster nodes** in ZeroTier
+  Central (Calico sends VXLAN with the node's LAN source address,
+  `NODE_LAN_SUBNET`; ZeroTier drops that otherwise).
 * `gpu-node up` adds `ufw` allow rules for UDP/4789 on the ZeroTier interface
-  and host routes `10.66.50.x/32 via <node ZeroTier IP>` so replies return over
-  ZeroTier instead of the NAT gateway. `gpu-node down` removes both.
+  and host routes `<node LAN IP>/32 via <node ZeroTier IP>` (`NODES_LAN` /
+  `NODES_ZT`) so replies return over ZeroTier instead of the NAT gateway.
+  `gpu-node down` removes both.
 
 ## Limits (gpu-node.conf)
 
@@ -78,7 +92,7 @@ with UDP/4789 tests:
 |---|---|---|
 | CPU | 4 cores | `CPUQuota=400%` on `k0s-gpu.slice`; kubelet `--system-reserved` so the scheduler sees 4 |
 | RAM | **6 GiB** (was 4) | `MemoryMax=6G` (+`MemoryHigh`, swap off) on the slice; kubelet sees ~5 GiB allocatable. The full GPU Vigil measured ~3.4 GiB host RAM + ~1 GiB for k0s, so 4 GiB cannot hold it |
-| VRAM | 8 GiB budget | Full GPU Vigil measured ~1.8 GiB. No hard per-container VRAM limit exists on consumer NVIDIA GPUs |
+| VRAM | 8 GiB budget — **not enforced** | Full GPU Vigil measured ~1.8 GiB. No hard per-container VRAM limit exists on consumer NVIDIA GPUs, and vigil-llm (torch) sets no cap of its own; `VRAM_LIMIT_BYTES` is only reported |
 
 The kubelet runs with `--cgroup-root=/k0s-gpu.slice`, so pods fall under the
 same limits as k0s itself.
@@ -100,13 +114,16 @@ gpu-node smoke                     # nvidia-smi in a pod on the node
 gpu-node down                      # detach
 ```
 
-## Calico (needs a cluster-wide decision)
+## Calico (cluster-wide setting)
 
-Calico uses `IP=autodetect` (first interface found). On this PC that would pick
-the home LAN address `10.0.0.135`, not ZeroTier. Fix on the controller, in the
-k0s config: `spec.network.calico.envVars`:
-`IP_AUTODETECTION_METHOD=can-reach=10.66.50.59`. Applying it restarts
-`calico-node` once on every node. **Not applied by any script here.**
+Calico's default `IP=autodetect` picks the first interface found: on this PC
+that is the home LAN address, not ZeroTier, and installing ZeroTier on the
+nodes can make them switch to their ZeroTier address too. The setting used is
+`ipAutodetectionMethod: kubernetes-internal-ip` in the controller's k0s config
+(`spec.network.calico`): every node advertises its Kubernetes InternalIP, and
+`gpu-node up` registers this PC with `--node-ip` = its ZeroTier address.
+Applying it restarts `calico-node` once on every node. **Not applied by any
+script here.**
 
 ## Safety properties
 

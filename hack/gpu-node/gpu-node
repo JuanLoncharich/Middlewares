@@ -20,9 +20,18 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=gpu-node.conf
+# gpu-node.conf is per-machine and git-ignored; the template is the .example.
+if [ ! -f "$HERE/gpu-node.conf" ]; then
+  echo "missing $HERE/gpu-node.conf - copy gpu-node.conf.example and fill in the CHANGE_ME values" >&2
+  exit 1
+fi
+# shellcheck source=gpu-node.conf.example
 source "$HERE/gpu-node.conf"
-[ -f "$HERE/gpu-node.local.conf" ] && source "$HERE/gpu-node.local.conf"
+for _v in ZT_IFACE ZT_SUBNET NODE_LAN_SUBNET JUMP_HOST CONTROLLER_SSH; do
+  [ "${!_v}" != CHANGE_ME ] || { echo "gpu-node.conf: set $_v" >&2; exit 1; }
+done
+[ "${#NODES_LAN[@]}" -gt 0 ] && [ "${#NODES_LAN[@]}" = "${#NODES_ZT[@]}" ] \
+  || { echo "gpu-node.conf: NODES_LAN and NODES_ZT must be non-empty and the same length" >&2; exit 1; }
 
 KC=(kubectl --context "$KUBE_CONTEXT")
 SLICE=k0s-gpu.slice

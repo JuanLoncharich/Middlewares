@@ -9,5 +9,5 @@ config/samples/git-credentials-secret.yaml
 .zcode/
 __pycache__/
 
-# gpu-node per-machine overrides
-hack/gpu-node/gpu-node.local.conf
+# gpu-node per-machine config (template: hack/gpu-node/gpu-node.conf.example)
+hack/gpu-node/gpu-node.conf
