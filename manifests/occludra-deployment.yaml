@@ -219,11 +219,11 @@ spec:
               value: "0.0.0.0:8080"
             - name: OCCLUDRA_POLICY_FILE
               value: /conf/policy.yaml
-            # Upstream LLM provider (OpenAI-compatible). Default OpenCode Zen is
-            # https://opencode.ai/zen/v1 ; this deployment uses NVIDIA NIM with
-            # the nvapi- key stored in security-gateways/llm-provider-credentials.
+            # Upstream LLM provider (OpenAI-compatible). Empty = policy
+            # upstream.base_url, else Occludra's built-in OpenCode Zen.
+            # deploy.sh sets it for LLM_PROVIDER=nvidia.
             - name: OCCLUDRA_UPSTREAM_BASE_URL
-              value: "https://integrate.api.nvidia.com/v1"
+              value: ""
             # Backpressure: requests beyond this in-flight count get 503 +
             # Retry-After (clients back off) instead of unbounded memory
             # growth per replica. The HPA adds replicas before saturation.
@@ -239,6 +239,14 @@ spec:
               # Falls back to ANTHROPIC_API_KEY above when empty.
               value: ""
             # Upstream provider keys — injected into sanitized upstream calls.
+            # UPSTREAM_API_KEY (written by deploy.sh for providers other than
+            # Zen, e.g. NVIDIA) wins over the two provider-named keys below.
+            - name: OCCLUDRA_UPSTREAM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-provider-credentials
+                  key: UPSTREAM_API_KEY
+                  optional: true
             - name: OPENCODE_API_KEY
               valueFrom:
                 secretKeyRef:

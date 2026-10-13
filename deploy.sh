@@ -2,6 +2,7 @@
 # One-shot build + deploy for the MCP evaluation platform.
 #
 #   IMG_REGISTRY=ghcr.io/<you> OPENCODE_API_KEY=<zen-key> ./deploy.sh
+#   IMG_REGISTRY=ghcr.io/<you> LLM_PROVIDER=nvidia NVIDIA_API_KEY=<nvapi-key> ./deploy.sh
 #
 # Steps: build & push the four images, install CRDs + operator (mcp-eval-system),
 # apply the evaluation namespace / NetworkPolicies / agent personas / sample
@@ -10,8 +11,16 @@
 # Env:
 #   IMG_REGISTRY       registry prefix for the images (required)
 #   IMG_TAG            image tag (default: 20260930 — frozen; never ship :latest)
-#   OPENCODE_API_KEY   written into Secret mcp-evals/llm-provider-credentials (required unless SKIP_SECRET=1)
-#   ANTHROPIC_API_KEY  optionally added to the same Secret when using provider `anthropic`
+#   LLM_PROVIDER       upstream LLM provider behind Occludra: zen (default, OpenCode Zen) or nvidia
+#                      (NVIDIA NIM). Sets Occludra's upstream URL and the four agent personas' model.
+#   LLM_MODEL          model id for the personas (default: zen -> muse-spark-1.3-contributor-free,
+#                      nvidia -> z-ai/glm-5.3)
+#   OPENCODE_API_KEY   zen: written into Secret llm-provider-credentials in mcp-evals and
+#                      security-gateways (required unless SKIP_SECRET=1)
+#   ANTHROPIC_API_KEY  zen: optionally added to the same Secrets when using provider `anthropic`
+#   NVIDIA_API_KEY     nvidia: written ONLY into security-gateways/llm-provider-credentials
+#                      (key UPSTREAM_API_KEY); the evaluation namespace gets a placeholder
+#                      (required unless SKIP_SECRET=1)
 #   SKIP_BUILD=1       skip docker build/push
 #   SKIP_SECRET=1      do not (re)create the LLM secret
 #   TRIGGER=0          do not trigger a run at the end
@@ -118,6 +127,28 @@ VIGIL_GPU_IMG="${VIGIL_GPU_IMG:-$IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG}"
 VIGIL_GPU_MEM_LIMIT="${VIGIL_GPU_MEM_LIMIT:-4Gi}"
 VIGIL_PROFILE="${VIGIL_PROFILE:-full}"
 case "$VIGIL_PROFILE" in full|lite) ;; *) echo "VIGIL_PROFILE must be full or lite" >&2; exit 1 ;; esac
+# LLM provider: the personas in config/samples and Occludra's manifest are
+# written for OpenCode Zen; other providers are rendered in at apply time.
+LLM_PROVIDER="${LLM_PROVIDER:-zen}"
+case "$LLM_PROVIDER" in
+  zen)
+    LLM_PROVIDER_ID=opencode
+    LLM_MODEL="${LLM_MODEL:-muse-spark-1.3-contributor-free}"
+    LLM_UPSTREAM_BASE_URL="" ;;   # empty: Occludra's built-in Zen default
+  nvidia)
+    LLM_PROVIDER_ID=nvidia
+    LLM_MODEL="${LLM_MODEL:-z-ai/glm-5.3}"
+    LLM_UPSTREAM_BASE_URL="https://integrate.api.nvidia.com/v1" ;;
+  *) echo "LLM_PROVIDER must be zen or nvidia" >&2; exit 1 ;;
+esac
+# Check the key up front, before anything is applied to the cluster.
+if [ "$SKIP_SECRET" != "1" ]; then
+  if [ "$LLM_PROVIDER" = nvidia ]; then
+    : "${NVIDIA_API_KEY:?set NVIDIA_API_KEY (LLM_PROVIDER=nvidia) or SKIP_SECRET=1}"
+  else
+    : "${OPENCODE_API_KEY:?set OPENCODE_API_KEY (OpenCode Zen key) or SKIP_SECRET=1}"
+  fi
+fi
 
 IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
@@ -191,22 +222,44 @@ log "Applying evaluation namespace, NetworkPolicies, agent personas and sample M
 # The evaluate-phase egress policy is generated per-run by the operator with
 # the API-server endpoint IPs resolved at reconcile time — config/samples
 # needs no CIDR/endpoint substitution here.
-kubectl kustomize config/samples | kubectl apply -f -
+# Personas ship with the Zen model; point them at the chosen provider/model.
+render_personas() {
+  # Quote-agnostic: kustomize re-emits the YAML without the source's quotes.
+  sed -e "s|providerID: \"\\?opencode\"\\?\$|providerID: \"$LLM_PROVIDER_ID\"|" \
+      -e "s|modelID: \"\\?muse-spark-1.3-contributor-free\"\\?\$|modelID: \"$LLM_MODEL\"|"
+}
+kubectl kustomize config/samples | render_personas | kubectl apply -f -
 kubectl apply -f config/rbac/runner_role.yaml
 
-if [ "$SKIP_SECRET" != "1" ]; then
-  : "${OPENCODE_API_KEY:?set OPENCODE_API_KEY (OpenCode Zen key) or SKIP_SECRET=1}"
-  log "Creating LLM credentials secret"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    kubectl -n mcp-evals create secret generic llm-provider-credentials \
-      --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-      --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-      --dry-run=client -o yaml | kubectl apply -f -
+# llm-provider-credentials for namespace $1. Values go through an env-file on a
+# pipe (printf is a shell builtin), so keys never appear on any process argv
+# and are never echoed.
+#  zen:    OPENCODE_API_KEY (+ ANTHROPIC_API_KEY) in both namespaces, as before.
+#  nvidia: the real key only in security-gateways (UPSTREAM_API_KEY, read by
+#          Occludra); mcp-evals gets a placeholder because the evaluator's
+#          custom provider never sends a real key (Occludra swaps it).
+llm_secret_env() {
+  local ns="$1"
+  if [ "$LLM_PROVIDER" = nvidia ]; then
+    if [ "$ns" = security-gateways ]; then
+      printf 'UPSTREAM_API_KEY=%s\n' "$NVIDIA_API_KEY"
+    else
+      printf 'OPENCODE_API_KEY=%s\n' egress-via-occludra
+    fi
   else
-    kubectl -n mcp-evals create secret generic llm-provider-credentials \
-      --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-      --dry-run=client -o yaml | kubectl apply -f -
+    printf 'OPENCODE_API_KEY=%s\n' "$OPENCODE_API_KEY"
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY"; fi
   fi
+}
+apply_llm_secret() {
+  kubectl -n "$1" create secret generic llm-provider-credentials \
+    --from-env-file=<(llm_secret_env "$1") \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+if [ "$SKIP_SECRET" != "1" ]; then
+  log "Creating LLM credentials secret (provider $LLM_PROVIDER)"
+  apply_llm_secret mcp-evals
 fi
 
 # Rewrite the gateway image references for this deployment (stdin → stdout).
@@ -223,6 +276,7 @@ substitute_gateway_images() {
       -e "s|__VIGIL_REPLICAS__|$VIGIL_REPLICAS|g" \
       -e "s|__VIGIL_HPA_MIN__|$VIGIL_HPA_MIN|g" \
       -e "s|__VIGIL_MAX_UNAVAILABLE__|$VIGIL_MAX_UNAVAILABLE|g" \
+      -e "/name: OCCLUDRA_UPSTREAM_BASE_URL\$/{n;s|value: \"\"|value: \"$LLM_UPSTREAM_BASE_URL\"|;}" \
       ${profile_args[@]+"${profile_args[@]}"} \
       ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"}
 }
@@ -346,17 +400,8 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
     exit 1
   fi
   if [ "$SKIP_SECRET" != "1" ]; then
-    log "Mirroring LLM credentials into security-gateways (Occludra is the upstream egress point)"
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-      kubectl -n security-gateways create secret generic llm-provider-credentials \
-        --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-        --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    else
-      kubectl -n security-gateways create secret generic llm-provider-credentials \
-        --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    fi
+    log "Writing LLM credentials into security-gateways (Occludra is the upstream egress point)"
+    apply_llm_secret security-gateways
   else
     echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
   fi
