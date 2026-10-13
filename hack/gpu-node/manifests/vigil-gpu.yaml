@@ -3,7 +3,7 @@
 #
 # * Same pinned vigil-llm source and config contract as the cluster's CPU
 #   Vigil (manifests/vigil-deployment.yaml), built with CUDA torch and the
-#   transformer pipeline on the GPU (images/vigil-gpu/Dockerfile).
+#   transformer pipeline on the GPU (images/vigil-llm/Dockerfile, GPU variant).
 # * The evaluator prefers it (operator env VIGIL_GPU_URL) and falls back to the
 #   in-cluster vigil-service when it is unreachable or scaled to zero — no run
 #   ever fails because the PC is off.
