@@ -95,3 +95,14 @@ Decisions made before this log existed are not back-filled here.
   cluster stays read-only.
 - **Alternatives:** official release binary with checksum verification.
 - **Who decided:** Juan (pacman if available).
+
+### 2026-10-13 — KEDA reaches the operator through its own additive NetworkPolicy
+- **Decision:** `manifests/keda/allow-keda-to-operator.yaml` (keda-operator →
+  operator:8082), applied with `DEPLOY_KEDA=1`; observability's policy is untouched.
+  A dedicated operator ingress policy (option C) may come with M3.
+- **Reason:** observability's Ingress policy isolates the operator, which cut KEDA off
+  (reproduced in kind). Who decided: Juan.
+
+### 2026-10-13 — Git history with environment values stays as is (for now)
+- **Decision:** don't rewrite `gpu-node-nvidia`'s history although the repo is public.
+  Who decided: Juan (will handle it later).

@@ -522,6 +522,9 @@ if [ "$DEPLOY_KEDA" = "1" ]; then
   helm upgrade --install keda keda --repo https://kedacore.github.io/charts \
     --version "$KEDA_CHART_VERSION" -n keda --create-namespace \
     -f manifests/keda/values-mcp-eval.yaml --wait --timeout 5m
+  # Keeps KEDA's path to the operator's /active-runs open even when another
+  # Ingress policy (e.g. observability's) isolates the operator pods.
+  kubectl apply -f manifests/keda/allow-keda-to-operator.yaml
 fi
 
 if [ "$VIGIL_GPU" = "1" ]; then

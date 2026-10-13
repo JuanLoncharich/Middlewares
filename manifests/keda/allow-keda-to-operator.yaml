@@ -1,0 +1,33 @@
+# KEDA's metrics-api scaler (pod keda-operator, namespace keda) polls the
+# operator's GET :8082/active-runs to scale the GPU Vigil 0 <-> 1.
+#
+# Any Ingress NetworkPolicy that selects the operator pods isolates them:
+# from then on only explicitly allowed traffic gets in. The observability
+# stack ships such a policy (operator-observability: Prometheus -> :8443), so
+# without this one KEDA is cut off and the GPU Vigil never scales up.
+# NetworkPolicies are additive: this adds KEDA's path without touching the
+# observability policy. Applied by deploy.sh together with KEDA
+# (DEPLOY_KEDA=1); harmless when nothing else selects the operator.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-keda-to-operator-activity
+  namespace: mcp-eval-system
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keda-operator
+      ports:
+        - protocol: TCP
+          port: 8082
