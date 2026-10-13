@@ -476,3 +476,44 @@ func TestBuildJobVigilGPUURLOnlyWhenConfigured(t *testing.T) {
 		t.Errorf("VIGIL_URL changed to %q", got)
 	}
 }
+
+// The custom git CA (key ca.crt of credentialsSecretRef) is PEM text. git's
+// GIT_SSL_CAINFO must be a file path, so the operator hands the PEM over as
+// GIT_CA_PEM and the cloner writes it to a file itself.
+func TestBuildJobPassesGitCAAsPEMNotAsCAInfoPath(t *testing.T) {
+	run := testRun()
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "fixture", Namespace: "mcp-evals"},
+		Spec: securityv1alpha1.MCPServerSpec{
+			RepositoryUrl:        "https://git.internal/x/y",
+			Transport:            "stdio",
+			CredentialsSecretRef: "git-creds",
+		},
+	}
+	job := (&MCPEvaluationRunReconciler{Images: meshImages()}).buildJob(run, server)
+	var cloner *corev1.Container
+	for i := range job.Spec.Template.Spec.InitContainers {
+		if job.Spec.Template.Spec.InitContainers[i].Name == containerCloner {
+			cloner = &job.Spec.Template.Spec.InitContainers[i]
+		}
+	}
+	if cloner == nil {
+		t.Fatal("no cloner init container")
+	}
+	var pem *corev1.EnvVar
+	for i := range cloner.Env {
+		switch cloner.Env[i].Name {
+		case "GIT_SSL_CAINFO":
+			t.Fatalf("GIT_SSL_CAINFO must not carry the secret's PEM content (git treats it as a path)")
+		case "GIT_CA_PEM":
+			pem = &cloner.Env[i]
+		}
+	}
+	if pem == nil || pem.ValueFrom == nil || pem.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("GIT_CA_PEM missing or not sourced from a secret: %+v", pem)
+	}
+	ref := pem.ValueFrom.SecretKeyRef
+	if ref.Name != "git-creds" || ref.Key != "ca.crt" || ref.Optional == nil || !*ref.Optional {
+		t.Fatalf("GIT_CA_PEM ref = %+v, want optional git-creds/ca.crt", ref)
+	}
+}

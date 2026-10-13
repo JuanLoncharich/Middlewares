@@ -1186,10 +1186,11 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 			},
 			// Optional custom CA for self-hosted git servers (in-cluster
 			// test fixtures, corporate Gitea): key ca.crt in the same
-			// secret is handed to git as GIT_SSL_CAINFO, which git reads
-			// natively.
+			// secret. It is PEM text, while git's GIT_SSL_CAINFO must be a
+			// file path, so the cloner writes GIT_CA_PEM to a file and
+			// points GIT_SSL_CAINFO at it.
 			corev1.EnvVar{
-				Name: "GIT_SSL_CAINFO",
+				Name: "GIT_CA_PEM",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: server.Spec.CredentialsSecretRef},

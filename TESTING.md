@@ -204,4 +204,5 @@ kubectl -n mcp-evals delete secret git-test-tls mcp-git-test-ca
   un management server real; el camino legacy de ClusterIP queda cubierto.
 - **Git fixture**: el CA del git server dura 7 días y es de prueba; para un
   git corporativo real usá `credentialsSecretRef` con la key `ca.crt` — el
-  operador la pasa al cloner como `GIT_SSL_CAINFO`.
+  operador la pasa al cloner como `GIT_CA_PEM` y el cloner la escribe a un
+  archivo para `GIT_SSL_CAINFO`.
