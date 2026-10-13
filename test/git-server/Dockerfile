@@ -4,7 +4,8 @@
 # content, no auth — never exposed outside the cluster (NetworkPolicy in
 # test/git-server.yaml limits ingress to the evaluation namespace).
 FROM alpine:3.20
-RUN apk add --no-cache git python3
+# git-http-backend (smart HTTP) ships in git-daemon on Alpine, not in git.
+RUN apk add --no-cache git git-daemon python3
 # Build context is test/ (the fixtures live in test/mcp-servers):
 #   docker build -f test/git-server/Dockerfile test/
 COPY git-server/server.py /usr/local/bin/git-test-server.py
@@ -23,7 +24,11 @@ RUN set -eux; \
       git -C "/tmp/src/$name" push -q "/repos/$name.git" HEAD:main; \
       git -C "/repos/$name.git" update-server-info; \
     done; \
-    rm -rf /tmp/src
+    rm -rf /tmp/src; \
+    # The pod runs as UID/GID 1000 (test/git-server.yaml). git refuses to serve
+    # repositories owned by another user ("dubious ownership"), so hand them
+    # over instead of disabling that check with safe.directory=*.
+    chown -R 1000:1000 /repos
 ENV GIT_REPOS_ROOT=/repos \
     GIT_SERVER_PORT=5443
 EXPOSE 5443

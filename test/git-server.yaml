@@ -44,7 +44,7 @@ spec:
       containers:
         - name: git-server
           image: localhost:5001/git-test-server:local
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always   # fixed ":local" tag: always fetch the rebuilt image
           ports:
             - name: https
               containerPort: 5443
