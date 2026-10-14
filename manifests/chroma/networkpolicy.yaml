@@ -65,9 +65,11 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: security-gateways
+          # CPU Vigil and the GPU Vigil (hack/gpu-node). Egress side:
+          # NetworkPolicy vigil-to-chroma in manifests/vigil-deployment.yaml.
           podSelector:
-            matchLabels:
-              app.kubernetes.io/name: vigil-llm
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [vigil-llm, vigil-llm-gpu]}
       ports:
         - protocol: TCP
           port: 8000

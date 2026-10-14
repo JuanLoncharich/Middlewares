@@ -42,16 +42,12 @@
 # EMBEDDING: model=all-MiniLM-L6-v2 — a local SentenceTransformer, so no
 # OpenAI key is needed (upstream's `openai` profile requires one). Models
 # download from HuggingFace at boot; the tmp emptyDir doubles as that cache.
-# CAVEAT: upstream's entrypoint also pre-loads its ada-002 (1536-dim)
-# corpora into the on-disk ChromaDB; against the 384-dim MiniLM embedder
-# those vectors mismatch and vectordb queries degrade to no-matches
-# (upstream's fail-soft scanner semantics). The platform's REAL vector plane
-# is the distributed Chroma cluster (manifests/chroma/ — coordinator, log
-# service, compactors, query nodes over MinIO): the vigil-corpus-loader Job
-# loads the Vigil embedding corpora there (collections
-# vigil_instruction_bypass / vigil_jailbreak). If a later vigil pin gains a
-# remote-Chroma config knob, point the vectordb scanner at
-# rust-frontend-service.chroma:8000.
+# VECTOR DB: the vectordb scanner queries the distributed Chroma cluster
+# (manifests/chroma/ — coordinator, log service, compactors, query nodes over
+# MinIO) through the image's REST v2 client (images/vigil-llm/
+# remote_vectordb.py), collections vigil_instruction_bypass / vigil_jailbreak
+# loaded by the vigil-corpus-loader Job. Upstream's local on-disk ChromaDB is
+# not used. NetworkPolicy vigil-to-chroma (below) opens that one path.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -76,11 +72,21 @@ data:
     model = all-MiniLM-L6-v2
 
     [vectordb]
+    # The corpus lives in the distributed Chroma (manifests/chroma/, loaded by
+    # the vigil-corpus-loader Job) and is queried over REST v2
+    # (images/vigil-llm/remote_vectordb.py). Required: if Chroma does not
+    # answer, the scan answers 500 and the evaluation fails closed.
+    chroma_url = http://rust-frontend-service.chroma.svc.cluster.local:8000
+    tenant = default_tenant
+    database = default_database
+    collections = vigil_instruction_bypass,vigil_jailbreak
+    timeout_s = 5
+    n_results = 5
+    # Upstream's local-database keys; unused while chroma_url is set.
     collection = vigil-local
     # Writable path: the container root filesystem is read-only; /tmp is an
     # emptyDir.
     db_dir = /tmp/vigil-vdb
-    n_results = 5
 
     [auto_update]
     # Do not mutate the corpus from scan traffic — deterministic scans.
@@ -405,3 +411,41 @@ spec:
       # Evaluation traffic arrives in waves (runs start/end together); hold
       # capacity for a while before shedding replicas.
       stabilizationWindowSeconds: 300
+---
+# Vigil -> distributed Chroma, the vectordb scanner's only path to its corpus.
+# gateway-egress (occludra-deployment.yaml) lets security-gateways pods reach
+# private addresses only on NetBird ports; this adds exactly the Chroma
+# frontend's REST port, for Vigil pods only (CPU and GPU variants). The
+# matching ingress rule is allow-vigil-to-frontend in
+# manifests/chroma/networkpolicy.yaml.
+#
+# LIQO NOTE (not solved here): when the GPU Vigil runs on the PC as a pod
+# offloaded through Liqo, it executes in the PC's cluster. Neither this
+# policy nor the chroma-side one applies to it there (they select pods of
+# this cluster), and from the PC chroma_url must still resolve and route to
+# rust-frontend-service.chroma (Liqo service reflection/remapped CIDRs, or a
+# reachable address over the tunnel), with the Chroma frontend accepting the
+# remapped source address. That path needs its own rule on both sides.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vigil-to-chroma
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [vigil-llm, vigil-llm-gpu]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chroma
+          podSelector:
+            matchLabels:
+              app: rust-frontend-service
+      ports:
+        - protocol: TCP
+          port: 8000

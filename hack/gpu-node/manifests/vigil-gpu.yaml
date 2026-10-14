@@ -33,9 +33,22 @@ data:
     [embedding]
     model = all-MiniLM-L6-v2
     [vectordb]
+    # The corpus lives in the distributed Chroma (manifests/chroma/, loaded by
+    # the vigil-corpus-loader Job) and is queried over REST v2
+    # (images/vigil-llm/remote_vectordb.py). Required: if Chroma does not
+    # answer, the scan answers 500 and the evaluation fails closed.
+    chroma_url = http://rust-frontend-service.chroma.svc.cluster.local:8000
+    tenant = default_tenant
+    database = default_database
+    collections = vigil_instruction_bypass,vigil_jailbreak
+    timeout_s = 5
+    n_results = 5
+    # Same corpus as the CPU Vigil. When this pod runs on the PC through Liqo
+    # (cross-cluster), this URL must resolve and route from there: see the
+    # note on NetworkPolicy vigil-to-chroma in manifests/vigil-deployment.yaml.
+    # Upstream's local-database keys; unused while chroma_url is set.
     collection = vigil-local
     db_dir = /tmp/vigil-vdb
-    n_results = 5
     [auto_update]
     enabled = false
     threshold = 3

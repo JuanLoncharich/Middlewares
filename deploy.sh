@@ -82,7 +82,10 @@
 #                                SysDB coordinator + Rust SysDB + Log Service (WAL) + Query Nodes
 #                                + Compactors + Work Queue + Garbage Collector, with MinIO object
 #                                storage and a Postgres-backed catalog. Vigil's vector scanner
-#                                queries its frontend for prompt-injection similarity.
+#                                queries its frontend for prompt-injection similarity. REQUIRED
+#                                by Vigil: with DEPLOY_VECTOR_DB=0 and no Chroma reachable at
+#                                rust-frontend-service.chroma:8000, every scan answers 500 and
+#                                evaluations fail closed.
 #   CHROMA_IMG_TAG               chroma component image tag (short commit SHA from the `chromadb`
 #                                Docker Hub org; keep in vintage with the vendored chart).
 #   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
@@ -183,8 +186,10 @@ if [ "$SKIP_BUILD" != "1" ]; then
     # Dockerfile: at the pinned commit an upstream-style build crashes at boot
     # (unpinned huggingface_hub vs sentence-transformers 2.2.2, and a NameError
     # in VectorDB). See the Dockerfile header for every change.
+    # vigil-patches: our files copied into the image (remote_vectordb.py).
     docker build -t "$VIGIL_IMG" -f images/vigil-llm/Dockerfile \
       --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu --build-arg EXPECT_CUDA=0 \
+      --build-context vigil-patches=images/vigil-llm \
       "$VIGIL_SRC_DIR"
     rm -rf "$VIGIL_SRC_DIR"
     docker push "$VIGIL_IMG"
@@ -320,6 +325,11 @@ for doc in docs:
 # Vigil's vector scanner queries the frontend; topology docs in ARCHITECTURE.md,
 # manifests in manifests/chroma/.
 # ---------------------------------------------------------------------------
+if [ "$DEPLOY_VECTOR_DB" != "1" ] && [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ] \
+  && ! kubectl -n chroma get service rust-frontend-service >/dev/null 2>&1; then
+  echo "WARNING: DEPLOY_VECTOR_DB=0 and no Chroma frontend in namespace chroma: Vigil's vector" \
+       "scanner requires it, so every Vigil scan will fail and evaluations will fail closed." >&2
+fi
 if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
   log "Deploying vector-DB substrate (MinIO, Postgres, OTel) into namespace chroma"
   # The substrate manifests and the chart both target namespace `chroma`;
