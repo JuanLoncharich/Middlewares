@@ -19,7 +19,9 @@
 #  4. upstream bug: VectorDB logs an undefined `config_dict`, so any local
 #     embedding model dies at boot with NameError — log the model instead;
 #  5. the transformer truncates its input to 512 tokens (bounded memory);
-#  6. scanner errors answer HTTP 500 instead of a "clean" 200 (fail closed).
+#  6. scanner errors answer HTTP 500 instead of a "clean" 200 (fail closed);
+#  7. the vectordb scanner queries the distributed Chroma over REST v2
+#     (remote_vectordb.py, needs --build-context vigil-patches=images/vigil-llm).
 # Runtime notes for the manifests: start the server directly (skip upstream's
 # entrypoint dataset loader: its 1536-dim ada-002 vectors never match the
 # 384-dim MiniLM embedder, and re-streaming them took ~6 min per start) and
@@ -101,6 +103,17 @@ RUN sed -i "/logger.error(f'Pipeline error/{n;s/return scan_obj/raise/}" vigil/s
  && sed -i "s/^    result = vigil.input_scanner.perform_scan(input_prompt)$/&\n    if result.get('errors'):\n        logger.error(f'({request.path}) Scanner errors, answering 500: {result[\"errors\"]}')\n        return jsonify(result), 500/" vigil-server.py \
  && grep -q "return jsonify(result), 500" vigil-server.py \
  && python -c "import ast; [ast.parse(open(f).read()) for f in ('vigil-server.py', 'vigil/scanners/transformer.py', 'vigil/scanners/yara.py', 'vigil/scanners/vectordb.py')]"
+
+# Patch 6 — the vectordb scanner queries the distributed Chroma. Upstream's
+# VectorDB is a local chromadb==0.4.17 client (API v1); the platform's corpus
+# lives in the Rust Chroma cluster, REST v2 only. remote_vectordb.py (from
+# the `vigil-patches` build context: images/vigil-llm/) embeds locally and
+# queries it; Vigil uses it when server.conf sets [vectordb] chroma_url.
+# Build with: --build-context vigil-patches=images/vigil-llm
+COPY --from=vigil-patches remote_vectordb.py vigil/core/remote_vectordb.py
+RUN sed -i 's/^        self.vectordb = VectorDB(\*\*params)$/        if params.get("chroma_url"):\n            from vigil.core.remote_vectordb import RemoteVectorDB\n            self.vectordb = RemoteVectorDB(**params)\n        else:\n            self.vectordb = VectorDB(**params)/' vigil/vigil.py \
+ && grep -q 'self.vectordb = RemoteVectorDB(\*\*params)' vigil/vigil.py \
+ && python -c "import ast; ast.parse(open('vigil/vigil.py').read()); ast.parse(open('vigil/core/remote_vectordb.py').read())"
 
 ENV HF_HOME=/cache/hf \
     SENTENCE_TRANSFORMERS_HOME=/cache/st \
