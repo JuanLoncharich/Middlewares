@@ -95,3 +95,9 @@ Decisions made before this log existed are not back-filled here.
   cluster stays read-only.
 - **Alternatives:** official release binary with checksum verification.
 - **Who decided:** Juan (pacman if available).
+
+### 2026-10-14 — Real local LLM instead of a mock (`LLM_PROVIDER=local`)
+- **Decision:** e2e and local runs use a real model served by llama-server on the GPU machine,
+  behind Occludra, reached through an opt-in egress rule (`occludra-egress-local-llm`: Occludra →
+  that IP/32:port only, deleted for any other provider). Replaces the mock-LLM plan.
+  Who decided: Juan.

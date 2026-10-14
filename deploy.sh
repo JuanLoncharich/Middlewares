@@ -483,6 +483,12 @@ EOF
   if [ "$SKIP_SECRET" != "1" ]; then
     log "Writing LLM credentials into security-gateways (Occludra is the upstream egress point)"
     apply_llm_secret security-gateways
+    # Occludra reads the key from env, i.e. once at pod start: pods created
+    # by the apply above can start before this Secret is written (measured
+    # in kind: 1 s apart, first replica ran keyless), and a rotated key never
+    # reaches running pods. Restart so every replica has the current key.
+    kubectl -n security-gateways rollout restart deployment/occludra
+    kubectl -n security-gateways rollout status deployment/occludra --timeout=180s
   else
     echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
   fi
