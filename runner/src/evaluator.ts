@@ -51,6 +51,7 @@ import { runProbes, renderProbeMarkdown } from "./probes.js";
 import { collectStaticEvidence, renderStaticMarkdown } from "./static.js";
 import { createMeshFetch, startMeshProxyBridge, waitForSocks5Proxy, type MeshBridge, type MeshFetch } from "./meshhttp.js";
 import { excerptOf, VigilClient, type VigilVerdict } from "./vigil.js";
+import { fuzzSegments, probeSegments, scanUnits, scanUntilDetection, surfaceSegments, type ScanSegment } from "./vigilsegments.js";
 import {
   AgentPromptError,
   AgentTimeoutError,
@@ -799,66 +800,41 @@ interface RunState {
 // Vigil gate: untrusted MCP payloads never enter a prompt unscanned
 // ---------------------------------------------------------------------------
 
-function buildSurfacePayload(ev: DynamicEvidence): string {
-  return JSON.stringify(
-    {
-      instructions: ev.init?.instructions ?? null,
-      tools: ev.tools,
-      prompts: ev.prompts,
-      resources: ev.resources,
-    },
-    null,
-    1,
-  );
-}
-
-function buildFuzzPayload(fuzz: FuzzReport): string {
-  return JSON.stringify(
-    {
-      notableResponses: fuzz.notableResponses,
-      anomalousCases: fuzz.cases.filter((c) => c.errorClass !== "ok"),
-    },
-    null,
-    1,
-  );
-}
-
-function buildProbePayload(probes: ProbeReport): string {
-  return JSON.stringify(
-    {
-      serverInstructionsHits: probes.serverInstructionsHits,
-      toolDescriptionHits: probes.toolDescriptionHits,
-      benignCalls: probes.benignCalls.map((b) => ({ tool: b.tool, outputExcerpt: b.outputExcerpt, hits: b.hits })),
-      activeProbes: probes.activeProbes,
-    },
-    null,
-    1,
-  );
-}
-
 /**
- * Scan one untrusted payload with Vigil-LLM over the mesh.
+ * Scan one gate's untrusted texts with Vigil-LLM over the mesh: each text on
+ * its own, as plain text, chunked to the classifier's window
+ * (vigilsegments.ts says why). Any chunk detected = the gate detected.
  *
  * strict (VIGIL_ENFORCE=strict, default): a detection scores the run 0 with
  * riskCategory=Malicious, records a Critical finding and ABORTS the
  * evaluation; an unreachable scanner fails the run as well (fail-closed).
  * monitor: detections and outages are logged + recorded, evaluation continues.
  */
-async function scanUntrusted(state: RunState, source: string, payload: string): Promise<void> {
+async function scanUntrusted(state: RunState, source: string, segments: ScanSegment[]): Promise<void> {
   const vigil = state.security.vigil;
   if (vigil === null) {
     return;
   }
   const vrec = state.security.gate.vigil;
-  vrec.payloadsScanned += 1;
+  const units = scanUnits(segments);
 
   let verdict: VigilVerdict;
+  let offending: ScanSegment;
   try {
-    verdict = await inSpan("vigil.scan", { "mcp.scan.source": source }, async (span) => {
- const result = await vigil.analyze(payload, source);
- span.setAttribute("mcp.injection_detected", result.injectionDetected);
- return result;
- });
+    const result = await inSpan("vigil.scan", { "mcp.scan.source": source, "mcp.scan.units": units.length }, async (span) => {
+      const r = await scanUntilDetection(units, async (unit) => {
+        vrec.payloadsScanned += 1;
+        return vigil.analyze(unit.text, `${source}: ${unit.label}`);
+      });
+      span.setAttribute("mcp.injection_detected", r.hit !== undefined);
+      return r;
+    });
+    if (result.hit === undefined) {
+      log.info("vigil scan clean", { source, units: units.length, endpoint: vigil.endpoint });
+      return;
+    }
+    verdict = result.hit.verdict;
+    offending = result.hit.unit;
   } catch (err) {
     if (err instanceof VigilUnavailableError) {
       vrec.unavailableErrors += 1;
@@ -872,14 +848,10 @@ async function scanUntrusted(state: RunState, source: string, payload: string): 
     fail(state, `vigil scan (${source})`, err);
   }
 
-  if (!verdict.injectionDetected) {
-    log.info("vigil scan clean", { source, scannersFired: verdict.triggeredScanners.length, endpoint: verdict.endpoint });
-    return;
-  }
-
-  const excerpt = excerptOf(payload);
+  const excerpt = excerptOf(offending.text);
   vrec.detections.push({
     source,
+    segment: offending.label,
     confidence: verdict.confidence,
     scanners: verdict.triggeredScanners,
     excerpt,
@@ -890,7 +862,7 @@ async function scanUntrusted(state: RunState, source: string, payload: string): 
     severity: "Critical",
     title: `Indirect prompt injection detected in untrusted ${source}`,
     description:
-      `Vigil-LLM flagged the MCP server's ${source} content as a prompt injection / jailbreak attempt` +
+      `Vigil-LLM flagged the MCP server's ${source} content (${offending.label}) as a prompt injection / jailbreak attempt` +
       (verdict.confidence !== undefined ? ` (confidence ${verdict.confidence.toFixed(2)})` : "") +
       (verdict.triggeredScanners.length > 0 ? `; triggered scanners: ${verdict.triggeredScanners.join(", ")}` : "") +
       `. Excerpt: ${excerpt}`,
@@ -1083,7 +1055,7 @@ async function evaluate(state: RunState): Promise<void> {
       // before any of it reaches a prompt.
       if (state.dynamic.init && !state.security.surfaceScanned) {
         state.security.surfaceScanned = true;
-        await scanUntrusted(state, "advertised-surface", buildSurfacePayload(state.dynamic));
+        await scanUntrusted(state, "advertised-surface", surfaceSegments(state.dynamic));
       }
       const client = state.mcp;
       if (client && state.dynamic.init) {
@@ -1113,7 +1085,7 @@ async function evaluate(state: RunState): Promise<void> {
       }
       // Gate 2: anomalous fuzz responses may carry injected instructions.
       if (state.dynamic.fuzz) {
-        await scanUntrusted(state, "fuzz-responses", buildFuzzPayload(state.dynamic.fuzz));
+        await scanUntrusted(state, "fuzz-responses", fuzzSegments(state.dynamic.fuzz));
       }
       report.telemetry = state.dynamic.telemetry;
       try {
@@ -1130,7 +1102,7 @@ async function evaluate(state: RunState): Promise<void> {
       await ensureTarget();
       if (state.dynamic.init && !state.security.surfaceScanned) {
         state.security.surfaceScanned = true;
-        await scanUntrusted(state, "advertised-surface", buildSurfacePayload(state.dynamic));
+        await scanUntrusted(state, "advertised-surface", surfaceSegments(state.dynamic));
       }
       const client = state.mcp;
       if (client && state.dynamic.init) {
@@ -1158,7 +1130,7 @@ async function evaluate(state: RunState): Promise<void> {
       // Gate 3: probe outputs — the untrusted server's direct answers to our
       // adversarial inputs.
       if (state.probes) {
-        await scanUntrusted(state, "probe-responses", buildProbePayload(state.probes));
+        await scanUntrusted(state, "probe-responses", probeSegments(state.probes));
       }
       report.telemetry = state.dynamic.telemetry;
       try {

@@ -481,6 +481,8 @@ export interface AgentRunRecord {
 
 export interface VigilDetectionRecord {
   source: string;
+  /** Which text of the gate was flagged (e.g. "tool weather: description"). */
+  segment?: string;
   confidence?: number;
   scanners: string[];
   excerpt: string;
@@ -492,6 +494,7 @@ export interface SecurityGateReport {
     enabled: boolean;
     enforced: boolean;
     url: string;
+    /** Scan requests sent (one per text chunk). */
     payloadsScanned: number;
     detections: VigilDetectionRecord[];
     unavailableErrors: number;
