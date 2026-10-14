@@ -50,8 +50,17 @@ import { runFuzz, renderFuzzMarkdown } from "./fuzz.js";
 import { runProbes, renderProbeMarkdown } from "./probes.js";
 import { collectStaticEvidence, renderStaticMarkdown } from "./static.js";
 import { createMeshFetch, startMeshProxyBridge, waitForSocks5Proxy, type MeshBridge, type MeshFetch } from "./meshhttp.js";
-import { excerptOf, VigilClient, type VigilVerdict } from "./vigil.js";
-import { fuzzSegments, probeSegments, scanUnits, scanUntilDetection, surfaceSegments, type ScanSegment } from "./vigilsegments.js";
+import { DEFAULT_TRANSFORMER_THRESHOLD, excerptOf, VigilClient, type VigilScannerHit, type VigilVerdict } from "./vigil.js";
+import {
+  fuzzSegments,
+  MAX_NOTED_WARNINGS,
+  probeSegments,
+  scanGate,
+  scanUnits,
+  surfaceSegments,
+  vigilWarningsNote,
+  type ScanSegment,
+} from "./vigilsegments.js";
 import {
   AgentPromptError,
   AgentTimeoutError,
@@ -146,6 +155,17 @@ function readEnv(): RunnerEnv {
   if (agentNames.length === 0) {
     throw new ConfigurationError("AGENT_NAMES must list at least one OpenCodeAgent");
   }
+  const optionalFraction = (key: string, fallback: number): number => {
+    const raw = env[key];
+    if (!isNonEmptyString(raw)) {
+      return fallback;
+    }
+    const parsed = Number(raw.trim());
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+      throw new ConfigurationError(`environment variable ${key} must be a number in (0, 1], got "${raw}"`);
+    }
+    return parsed;
+  };
   const flag = (key: string, fallback: boolean): boolean => {
     const raw = env[key];
     if (!isNonEmptyString(raw)) {
@@ -182,6 +202,7 @@ function readEnv(): RunnerEnv {
     vigilEnforce: rawEnforce === "strict",
     vigilTimeoutMs: optionalInt("VIGIL_TIMEOUT_MS", 10_000),
     vigilMaxPayloadBytes: optionalInt("VIGIL_MAX_PAYLOAD_BYTES", 65_536),
+    vigilTransformerThreshold: optionalFraction("VIGIL_TRANSFORMER_THRESHOLD", DEFAULT_TRANSFORMER_THRESHOLD),
     // --- Occludra (LLM gateway) ---
     occludraBaseUrl: env["OCCLUDRA_BASE_URL"] ?? "http://occludra-service.security-gateways.svc.cluster.local:8080/v1",
     occludraEnabled: flag("OCCLUDRA_ENABLED", true),
@@ -803,13 +824,74 @@ interface RunState {
 /**
  * Scan one gate's untrusted texts with Vigil-LLM over the mesh: each text on
  * its own, as plain text, chunked to the classifier's window
- * (vigilsegments.ts says why). Any chunk detected = the gate detected.
+ * (vigilsegments.ts says why). Each chunk's verdict is clean, warn or abort
+ * (vigil.ts combineScannerResults): a chunk aborts only when the transformer
+ * AND YARA or vectordb flag it; a single scanner only warns.
  *
- * strict (VIGIL_ENFORCE=strict, default): a detection scores the run 0 with
+ * Warnings are recorded in the report (securityGate.vigil.warnings), become
+ * one Medium finding per gate and are passed to the LLM auditor as a note.
+ *
+ * strict (VIGIL_ENFORCE=strict, default): an abort scores the run 0 with
  * riskCategory=Malicious, records a Critical finding and ABORTS the
  * evaluation; an unreachable scanner fails the run as well (fail-closed).
- * monitor: detections and outages are logged + recorded, evaluation continues.
+ * monitor: aborts and outages are logged + recorded, evaluation continues.
  */
+async function recordVigilWarnings(
+  state: RunState,
+  source: string,
+  warnings: { unit: ScanSegment; verdict: VigilVerdict }[],
+): Promise<void> {
+  if (warnings.length === 0) {
+    return;
+  }
+  const vrec = state.security.gate.vigil;
+  for (const { unit, verdict } of warnings) {
+    vrec.warnings.push({
+      source,
+      segment: unit.label,
+      scanners: verdict.hits.map((h) => h.scanner),
+      hits: verdict.hits,
+      excerpt: excerptOf(unit.text),
+    });
+  }
+  const listed = warnings
+    .slice(0, MAX_NOTED_WARNINGS)
+    .map(({ unit, verdict }) => `${unit.label} (${verdict.hits.map(describeHit).join(", ")})`)
+    .join("; ");
+  state.report.findings.push({
+    agent: "vigil-llm",
+    severity: "Medium",
+    title: `Possible prompt injection in untrusted ${source} (not corroborated)`,
+    description:
+      `Vigil-LLM flagged ${warnings.length} text(s) of the MCP server's ${source} with a single scanner, ` +
+      `which on its own does not stop the evaluation (one scanner alone has measurable false positives): ${listed}` +
+      (warnings.length > MAX_NOTED_WARNINGS ? `; and ${warnings.length - MAX_NOTED_WARNINGS} more in the report` : "") +
+      ".",
+    remediation: "Review the flagged texts (securityGate.vigil.warnings in the report) before integrating this server.",
+  });
+  log.warn("vigil warnings — single-scanner hits, evaluation continues", { source, warnings: warnings.length });
+  await state.status.patchStatus({ findings: state.report.findings });
+}
+
+function describeHit(h: VigilScannerHit): string {
+  const name = h.scanner.replace(/^scanner:/, "");
+  if (h.detail) return `${name}: ${h.detail}`;
+  return h.score !== undefined ? `${name} ${h.score.toFixed(3)}` : name;
+}
+
+/** The persona message plus, when Vigil warned, the note about it. */
+function withVigilNotes(state: RunState, message: string): string {
+  return message + vigilWarningsNote(state.security.gate.vigil.warnings.map((w) => {
+    const score = w.hits.find((h) => h.scanner === "scanner:transformer")?.score;
+    return {
+      source: w.source,
+      segment: w.segment,
+      scanners: w.scanners.map((s) => s.replace(/^scanner:/, "")),
+      ...(score !== undefined ? { score } : {}),
+    };
+  }));
+}
+
 async function scanUntrusted(state: RunState, source: string, segments: ScanSegment[]): Promise<void> {
   const vigil = state.security.vigil;
   if (vigil === null) {
@@ -822,19 +904,21 @@ async function scanUntrusted(state: RunState, source: string, segments: ScanSegm
   let offending: ScanSegment;
   try {
     const result = await inSpan("vigil.scan", { "mcp.scan.source": source, "mcp.scan.units": units.length }, async (span) => {
-      const r = await scanUntilDetection(units, async (unit) => {
+      const r = await scanGate(units, async (unit) => {
         vrec.payloadsScanned += 1;
         return vigil.analyze(unit.text, `${source}: ${unit.label}`);
       });
-      span.setAttribute("mcp.injection_detected", r.hit !== undefined);
+      span.setAttribute("mcp.injection_detected", r.abort !== undefined);
+      span.setAttribute("mcp.vigil.warnings", r.warnings.length);
       return r;
     });
-    if (result.hit === undefined) {
-      log.info("vigil scan clean", { source, units: units.length, endpoint: vigil.endpoint });
+    await recordVigilWarnings(state, source, result.warnings);
+    if (result.abort === undefined) {
+      log.info("vigil scan without abort", { source, units: units.length, warnings: result.warnings.length, endpoint: vigil.endpoint });
       return;
     }
-    verdict = result.hit.verdict;
-    offending = result.hit.unit;
+    verdict = result.abort.verdict;
+    offending = result.abort.unit;
   } catch (err) {
     if (err instanceof VigilUnavailableError) {
       vrec.unavailableErrors += 1;
@@ -1090,7 +1174,7 @@ async function evaluate(state: RunState): Promise<void> {
       report.telemetry = state.dynamic.telemetry;
       try {
         await recordAgent(agent, kind, (signal) =>
-          runAgentPrompt(agent, kind, buildDynamicMessage(server, state.dynamic), env, signal),
+          runAgentPrompt(agent, kind, withVigilNotes(state, buildDynamicMessage(server, state.dynamic)), env, signal),
         );
       } catch (err) {
         log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
@@ -1135,7 +1219,7 @@ async function evaluate(state: RunState): Promise<void> {
       report.telemetry = state.dynamic.telemetry;
       try {
         await recordAgent(agent, kind, (signal) =>
-          runAgentPrompt(agent, kind, buildAdversarialMessage(server, state.dynamic, state.probes), env, signal),
+          runAgentPrompt(agent, kind, withVigilNotes(state, buildAdversarialMessage(server, state.dynamic, state.probes)), env, signal),
         );
       } catch (err) {
         log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
@@ -1151,7 +1235,7 @@ async function evaluate(state: RunState): Promise<void> {
       let structured: unknown;
       try {
         structured = await recordAgent(agent, kind, (signal) =>
-          runAgentPrompt(agent, kind, buildSynthesisMessage(server, report.agents, state.dynamic.telemetry), env, signal),
+          runAgentPrompt(agent, kind, withVigilNotes(state, buildSynthesisMessage(server, report.agents, state.dynamic.telemetry)), env, signal),
         );
       } catch (err) {
         log.warn("synthesis agent failed; falling back to conservative scoring", { agent: name, error: errorMessage(err) });
@@ -1188,7 +1272,7 @@ async function evaluate(state: RunState): Promise<void> {
     // generic persona
     try {
       await recordAgent(agent, kind, (signal) =>
-        runAgentPrompt(agent, kind, buildGenericMessage(server, report.agents, state.dynamic.telemetry), env, signal),
+        runAgentPrompt(agent, kind, withVigilNotes(state, buildGenericMessage(server, report.agents, state.dynamic.telemetry)), env, signal),
       );
     } catch (err) {
       log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
@@ -1317,6 +1401,7 @@ async function main(): Promise<number> {
     ? new VigilClient(env.vigilUrl, meshFetchFn, {
         timeoutMs: env.vigilTimeoutMs,
         maxPayloadBytes: env.vigilMaxPayloadBytes,
+        transformerThreshold: env.vigilTransformerThreshold,
         ...(env.vigilGpuUrl !== undefined ? { preferredUrl: env.vigilGpuUrl } : {}),
       })
     : null;
@@ -1340,8 +1425,10 @@ async function main(): Promise<number> {
         enabled: vigil !== null,
         enforced: env.vigilEnforce,
         url: env.vigilUrl,
+        transformerThreshold: env.vigilTransformerThreshold,
         payloadsScanned: 0,
         detections: [],
+        warnings: [],
         unavailableErrors: 0,
       },
       occludra: { enabled: env.occludraEnabled, baseUrl: env.occludraBaseUrl },

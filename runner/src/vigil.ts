@@ -29,8 +29,12 @@ import type { MeshFetch, MeshRequestInit } from "./meshhttp.js";
 const log: Logger = rootLogger.child("vigil");
 
 export interface VigilVerdict {
-  /** True when the payload is prompt injection / jailbreak / malicious. */
+  /** clean / warn / abort — see combineScannerResults. */
+  level: VigilLevel;
+  /** level === "abort": the payload is treated as malicious. */
   injectionDetected: boolean;
+  /** Scanner matches that counted (upstream ResponseModel shape only). */
+  hits: VigilScannerHit[];
   /** 0..1 confidence, when the server exposes one. */
   confidence?: number;
   /** Normalized names of scanners that fired. */
@@ -48,13 +52,36 @@ export interface VigilClientOptions {
   /** Network retry attempts (not re-scans). Default 3. */
   retries?: number;
   /**
-   * Optional GPU scanner tried first. It scans the WHOLE payload (windowed,
-   * batched) where the CPU scanners only read the first tokens, so it gives
-   * better coverage; when it is unreachable (the GPU node is detached) the
-   * scan silently falls back to `url`. Empty/undefined disables it.
+   * Optional GPU Vigil (same image and config as `url`, CUDA build) tried
+   * first: same verdicts, faster. When it is unreachable (the GPU node is
+   * detached or scaled to zero) the scan falls back to `url`.
+   * Empty/undefined disables it.
    */
   preferredUrl?: string;
+  /**
+   * Transformer score at or above which a transformer match counts, used
+   * when Vigil's response does not carry the threshold it was configured
+   * with. Default 0.98 (manifests/vigil-deployment.yaml).
+   */
+  transformerThreshold?: number;
 }
+
+/** One scanner that matched, as the gate reports it. */
+export interface VigilScannerHit {
+  scanner: string;
+  /** Transformer: INJECTION score; vectordb: best (smallest) distance. */
+  score?: number;
+  /** YARA: matched rule names. */
+  detail?: string;
+}
+
+/**
+ * clean: nothing counted. warn: something matched, but not enough to call
+ * the text malicious. abort: the strict/Malicious path.
+ */
+export type VigilLevel = "clean" | "warn" | "abort";
+
+export const DEFAULT_TRANSFORMER_THRESHOLD = 0.98;
 
 const TRUNCATION_MARKER = "\n…[truncated by mcp-eval-runner for vigil scan]";
 /** Backoff schedule between scan retries (ms). */
@@ -67,6 +94,7 @@ export class VigilClient {
   private readonly maxPayloadBytes: number;
   private readonly retries: number;
   private readonly preferredUrl: string | undefined;
+  private readonly transformerThreshold: number;
 
   constructor(url: string, meshFetch: MeshFetch, options: VigilClientOptions) {
     if (!/^https?:\/\//.test(url)) {
@@ -82,6 +110,7 @@ export class VigilClient {
       throw new Error(`VIGIL_GPU_URL must be an absolute http(s) URL, got "${preferred}"`);
     }
     this.preferredUrl = preferred || undefined;
+    this.transformerThreshold = options.transformerThreshold ?? DEFAULT_TRANSFORMER_THRESHOLD;
   }
 
   get endpoint(): string {
@@ -177,12 +206,12 @@ export class VigilClient {
 
     // 1) Integration contract field.
     if (typeof parsed["injection_detected"] === "boolean") {
-      return {
+      return legacy({
         injectionDetected: parsed["injection_detected"],
         confidence: readConfidence(parsed),
         triggeredScanners: readTriggeredScanners(parsed),
         raw: parsed,
-      };
+      });
     }
 
     // 2) Per-scanner matches shape — upstream vigil-llm ResponseModel
@@ -192,17 +221,13 @@ export class VigilClient {
     // read as clean.
     const scanResults = parsed["results"];
     if (isRecord(scanResults)) {
-      const triggered = Object.entries(scanResults)
-        .filter(([name, r]) =>
-          name !== "scanner:sentiment" &&
-          isRecord(r) &&
-          Array.isArray(r["matches"]) &&
-          r["matches"].length > 0)
-        .map(([name]) => name);
+      const combined = combineScannerResults(scanResults, this.transformerThreshold);
       return {
-        injectionDetected: triggered.length > 0,
+        level: combined.level,
+        injectionDetected: combined.level === "abort",
+        hits: combined.hits,
         confidence: readConfidence(parsed),
-        triggeredScanners: triggered,
+        triggeredScanners: combined.hits.map((h) => h.scanner),
         raw: parsed,
       };
     }
@@ -210,44 +235,44 @@ export class VigilClient {
     // 3) status-based shape ({status: "blocked"|"allowed", runs: {...}}).
     const status = typeof parsed["status"] === "string" ? parsed["status"].toLowerCase() : undefined;
     if (status !== undefined) {
-      return {
+      return legacy({
         injectionDetected: status === "blocked" || status === "malicious" || status === "detected",
         confidence: readConfidence(parsed),
         triggeredScanners: readTriggeredScanners(parsed),
         raw: parsed,
-      };
+      });
     }
 
     // 4) decision-based shape ({decision: {block: true, ...}} or a string).
     const decision = parsed["decision"];
     if (isRecord(decision) && typeof decision["block"] === "boolean") {
-      return {
+      return legacy({
         injectionDetected: decision["block"],
         confidence: readConfidence(parsed),
         triggeredScanners: readTriggeredScanners(parsed),
         raw: parsed,
-      };
+      });
     }
     if (typeof decision === "string") {
       const d = decision.toLowerCase();
-      return {
+      return legacy({
         injectionDetected: d === "block" || d === "blocked" || d === "malicious" || d === "injection",
         confidence: readConfidence(parsed),
         triggeredScanners: readTriggeredScanners(parsed),
         raw: parsed,
-      };
+      });
     }
 
     // 5) verdict string fallback ({verdict: "..."}).
     const verdict = parsed["verdict"];
     if (typeof verdict === "string") {
       const v = verdict.toLowerCase();
-      return {
+      return legacy({
         injectionDetected: v.includes("inject") || v.includes("jailbreak") || v.includes("malicious"),
         confidence: readConfidence(parsed),
         triggeredScanners: readTriggeredScanners(parsed),
         raw: parsed,
-      };
+      });
     }
 
     throw new VigilUnavailableError(source, `unrecognized verdict shape: ${JSON.stringify(parsed).slice(0, 300)}`);
@@ -262,6 +287,70 @@ export class VigilClient {
     return Buffer.from(payload, "utf8").subarray(0, this.maxPayloadBytes).toString("utf8") + TRUNCATION_MARKER;
   }
 
+}
+
+/**
+ * The gate's rule for upstream's per-scanner results (decided by Juan,
+ * 2026-10-14, after measuring per-text scanning on 684 benign texts: the
+ * transformer flags 2.3% at >= 0.98 — e.g. "Reverse the characters of the
+ * provided text." at 0.999 — and upstream YARA 3.8%, mostly docs that quote
+ * attacks; both together, 0.3%):
+ *
+ *  - a transformer match counts only at score >= its threshold (upstream
+ *    also reports INJECTION labels below it, "for manual review");
+ *  - transformer AND (YARA or vectordb) on the same text => abort;
+ *  - any scanner on its own => warn (recorded, shown to the auditor).
+ */
+export function combineScannerResults(
+  results: Record<string, unknown>,
+  defaultThreshold = DEFAULT_TRANSFORMER_THRESHOLD,
+): { level: VigilLevel; hits: VigilScannerHit[] } {
+  const hits: VigilScannerHit[] = [];
+  let transformer = false;
+  let corroborating = false;
+  for (const [name, r] of Object.entries(results)) {
+    if (name === "scanner:sentiment" || !isRecord(r) || !Array.isArray(r["matches"])) continue;
+    const matches = r["matches"].filter(isRecord);
+    if (name === "scanner:transformer") {
+      let best: number | undefined;
+      for (const m of matches) {
+        const score = typeof m["score"] === "number" ? m["score"] : undefined;
+        const threshold = typeof m["threshold"] === "number" ? m["threshold"] : defaultThreshold;
+        const injection = m["label"] === undefined || m["label"] === "INJECTION";
+        if (injection && score !== undefined && score >= threshold) {
+          best = best === undefined ? score : Math.max(best, score);
+        }
+      }
+      if (best !== undefined) {
+        transformer = true;
+        hits.push({ scanner: name, score: best });
+      }
+      continue;
+    }
+    if (matches.length === 0) continue;
+    if (name === "scanner:yara") {
+      corroborating = true;
+      const rules = matches.map((m) => m["rule_name"]).filter((x): x is string => typeof x === "string");
+      hits.push({ scanner: name, detail: rules.join(", ") });
+      // Seam: a YARA-only abort (e.g. for a curated set of high-confidence
+      // rules) would be decided here. Deliberately not enabled: YARA on its
+      // own only warns until that is settled.
+    } else if (name === "scanner:vectordb") {
+      corroborating = true;
+      const distances = matches.map((m) => m["distance"]).filter((x): x is number => typeof x === "number");
+      hits.push({ scanner: name, ...(distances.length > 0 ? { score: Math.min(...distances) } : {}) });
+    } else {
+      // A scanner this rule does not know: visible, never decisive.
+      hits.push({ scanner: name });
+    }
+  }
+  const level: VigilLevel = transformer && corroborating ? "abort" : hits.length > 0 ? "warn" : "clean";
+  return { level, hits };
+}
+
+/** Verdict shapes other than upstream's per-scanner results: detected = abort. */
+function legacy(v: Omit<VigilVerdict, "level" | "hits">): VigilVerdict {
+  return { ...v, level: v.injectionDetected ? "abort" : "clean", hits: [] };
 }
 
 function sleep(ms: number): Promise<void> {

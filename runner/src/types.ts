@@ -141,7 +141,7 @@ export interface RunnerEnv {
   // --- security layer: Vigil-LLM (inbound prompt-injection scanner) ---
   /** Full URL of the Vigil /analyze endpoint (routed over the NetBird mesh). */
   vigilUrl: string;
-  /** Optional GPU scanner tried first (whole-payload windowed scan); CPU `vigilUrl` is the fallback. */
+  /** Optional GPU Vigil tried first (same verdicts, faster); CPU `vigilUrl` is the fallback. */
   vigilGpuUrl?: string;
   /** Hard gate (true) or observe-only (false). */
   vigilEnabled: boolean;
@@ -150,6 +150,8 @@ export interface RunnerEnv {
   /** Per-request timeout and payload truncation ceiling for scans. */
   vigilTimeoutMs: number;
   vigilMaxPayloadBytes: number;
+  /** Transformer score that counts as a hit when Vigil's answer has none (default 0.98). */
+  vigilTransformerThreshold: number;
 
   // --- security layer: Occludra (outgoing LLM gateway) ---
   /** OpenAI-compatible base URL the OpenCode providers are pointed at. */
@@ -489,14 +491,28 @@ export interface VigilDetectionRecord {
   abortive: boolean;
 }
 
+/** A text one Vigil scanner flagged on its own: recorded, shown to the auditor, not fatal. */
+export interface VigilWarningRecord {
+  source: string;
+  segment: string;
+  scanners: string[];
+  hits: { scanner: string; score?: number; detail?: string }[];
+  excerpt: string;
+}
+
 export interface SecurityGateReport {
   vigil: {
     enabled: boolean;
     enforced: boolean;
     url: string;
+    /** Transformer score a match needs to count (when Vigil does not send its own). */
+    transformerThreshold: number;
     /** Scan requests sent (one per text chunk). */
     payloadsScanned: number;
+    /** Abort-level verdicts: transformer AND (YARA or vectordb) on one text. */
     detections: VigilDetectionRecord[];
+    /** Warn-level verdicts: a single scanner on a text. */
+    warnings: VigilWarningRecord[];
     unavailableErrors: number;
   };
   occludra: {
