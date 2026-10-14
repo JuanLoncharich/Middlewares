@@ -374,12 +374,23 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
   # PriorityClass shared by the operator and both gateways (node-pressure
   # evictions must not take out the control plane or the security perimeter).
   kubectl apply -f manifests/priorityclass.yaml
+  # Our YARA rules (manifests/vigil-yara/*.yar) replace the ones upstream bakes
+  # into the image; every Vigil pod (CPU and GPU) mounts this ConfigMap as its
+  # rules_dir. Needs the namespace, which the Occludra manifest creates.
+  apply_vigil_yara_rules() {
+    local args=() f
+    for f in manifests/vigil-yara/*.yar; do args+=("--from-file=$f"); done
+    kubectl -n security-gateways create configmap vigil-yara-rules "${args[@]}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  }
   if [ "$MESH_ENFORCE" = "true" ]; then
     apply_gateway_manifest manifests/occludra-deployment.yaml
     apply_gateway_manifest manifests/netbird-daemonset.yaml
+    apply_vigil_yara_rules
     apply_gateway_manifest manifests/vigil-deployment.yaml
   else
     substitute_gateway_images < manifests/occludra-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
+    apply_vigil_yara_rules
     substitute_gateway_images < manifests/vigil-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
   fi
   if [ "$MESH_ENFORCE" != "true" ]; then

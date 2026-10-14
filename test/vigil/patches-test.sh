@@ -34,6 +34,7 @@ start() { # start <extra docker args...>
     --tmpfs "/tmp:uid=$(id -u),gid=$(id -g)" --tmpfs "/app/logs:uid=$(id -u),gid=$(id -g)" \
     -e HOME=/tmp -e HF_HOME=/tmp/hf -e SENTENCE_TRANSFORMERS_HOME=/tmp/st-cache \
     -v "$CACHE/hf:/tmp/hf" -v "$CACHE/st:/tmp/st-cache" -v "$WORK/conf:/app/conf:ro" \
+    -v "$PWD/manifests/vigil-yara:/app/yara-rules:ro" \
     -p 127.0.0.1:15199:5000 "$@" --entrypoint python "$IMAGE" vigil-server.py -c conf/server.conf >/dev/null
   for _ in $(seq 300); do
     curl -s -o /dev/null localhost:15199/ && return 0

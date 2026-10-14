@@ -26,8 +26,8 @@
 #
 # Input scanners enabled on the pinned commit's scan endpoint
 # /analyze/prompt: transformer (prompt-injection classifier
-# laiyer/deberta-v3-base-prompt-injection), yara (rules baked into the image
-# at /app/data/yara) and vectordb (embedding similarity, cosine distance
+# laiyer/deberta-v3-base-prompt-injection), yara (our rules from
+# manifests/vigil-yara/, mounted at /app/yara-rules) and vectordb (embedding similarity, cosine distance
 # threshold). The pinned commit has no `heuristics`/`canonical` scanners.
 # output_scanners keep upstream's defaults; they only run on
 # /analyze/response, which the evaluation path never calls.
@@ -92,7 +92,10 @@ data:
     output_scanners = similarity,sentiment
 
     [scanner:yara]
-    rules_dir = /app/data/yara
+    # Our rules (manifests/vigil-yara/, ConfigMap vigil-yara-rules created by
+    # deploy.sh), not upstream's baked /app/data/yara. A YARA match is a
+    # second opinion: the evaluator aborts only when the transformer agrees.
+    rules_dir = /app/yara-rules
 
     [scanner:vectordb]
     threshold = 0.4
@@ -166,6 +169,9 @@ spec:
         - name: config
           configMap:
             name: vigil-server-conf
+        - name: yara-rules
+          configMap:
+            name: vigil-yara-rules
         - name: tmp
           emptyDir:
             # Doubles as the writable HOME: the HuggingFace model cache
@@ -231,6 +237,9 @@ spec:
             # readOnlyRootFilesystem.
             - name: logs
               mountPath: /app/logs
+            - name: yara-rules
+              mountPath: /app/yara-rules
+              readOnly: true
           securityContext:
             runAsNonRoot: true
             runAsUser: 10004

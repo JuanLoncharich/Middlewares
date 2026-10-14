@@ -43,7 +43,8 @@ data:
     input_scanners = transformer,yara,vectordb
     output_scanners = similarity,sentiment
     [scanner:yara]
-    rules_dir = /app/data/yara
+    # Same rules as the CPU Vigil (ConfigMap vigil-yara-rules, deploy.sh).
+    rules_dir = /app/yara-rules
     [scanner:vectordb]
     threshold = 0.4
     [scanner:transformer]
@@ -106,6 +107,9 @@ spec:
         - name: config
           configMap:
             name: vigil-gpu-server-conf
+        - name: yara-rules
+          configMap:
+            name: vigil-yara-rules
         - name: tmp
           emptyDir:
             sizeLimit: 2Gi
@@ -158,6 +162,7 @@ spec:
             - {name: config, mountPath: /app/conf, readOnly: true}
             - {name: tmp, mountPath: /tmp}
             - {name: logs, mountPath: /app/logs}
+            - {name: yara-rules, mountPath: /app/yara-rules, readOnly: true}
             - {name: hf-cache, mountPath: /cache}
           securityContext:
             runAsNonRoot: true
