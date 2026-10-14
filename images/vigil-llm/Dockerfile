@@ -17,7 +17,9 @@
 #  3. the transformer scanner's pipeline runs on CUDA when one is visible
 #     (upstream passes no device -> always CPU);
 #  4. upstream bug: VectorDB logs an undefined `config_dict`, so any local
-#     embedding model dies at boot with NameError — log the model instead.
+#     embedding model dies at boot with NameError — log the model instead;
+#  5. the transformer truncates its input to 512 tokens (bounded memory);
+#  6. scanner errors answer HTTP 500 instead of a "clean" 200 (fail closed).
 # Runtime notes for the manifests: start the server directly (skip upstream's
 # entrypoint dataset loader: its 1536-dim ada-002 vectors never match the
 # 384-dim MiniLM embedder, and re-streaming them took ~6 min per start) and
@@ -73,6 +75,32 @@ RUN sed -i "s/pipeline('text-classification', model=self.model_name)/pipeline('t
 # with "NameError: name 'config_dict' is not defined". Log the model instead.
 RUN sed -i 's/{config_dict\["embed_fn"\]}/{model}/' vigil/core/vectordb.py \
  && ! grep -q 'config_dict' vigil/core/vectordb.py
+
+# Patch 4 — the transformer reads at most 512 tokens per request. Upstream
+# feeds the whole prompt to deberta-v3 (512-token window), whose memory grows
+# with the square of the length: one 64 KB payload OOM-killed the pod at its
+# 3.5 GiB limit. The evaluator already sends ≤512-token chunks
+# (runner/src/vigilsegments.ts); this bounds memory for any other caller.
+# (The prompt must stay positional: transformers 4.36's text-classification
+# __call__ reads args[0].)
+RUN sed -i '/hits = self.pipeline(/{n;s/scan_obj.prompt$/scan_obj.prompt, truncation=True, max_length=512/}' \
+      vigil/scanners/transformer.py \
+ && grep -q 'scan_obj.prompt, truncation=True, max_length=512$' vigil/scanners/transformer.py
+
+# Patch 5 — fail closed. Upstream's scanners catch their own errors (model
+# not loaded, pipeline/YARA/vector failure) and return "no matches", so a
+# broken scanner answers HTTP 200 "clean". Re-raise instead: the dispatcher
+# records the error, and /analyze/prompt answers 500 (not cached) when any
+# scanner errored, which the evaluator treats as Vigil unavailable.
+RUN sed -i "/logger.error(f'Pipeline error/{n;s/return scan_obj/raise/}" vigil/scanners/transformer.py \
+ && sed -i "/logger.error(f'Failed to perform yara scan/{n;s/return scan_obj/raise/}" vigil/scanners/yara.py \
+ && sed -i "/logger.error(f'Failed to perform vector scan/{n;s/return scan_obj/raise/}" vigil/scanners/vectordb.py \
+ && grep -A1 "Pipeline error" vigil/scanners/transformer.py | grep -q '^ *raise$' \
+ && grep -A1 "Failed to perform yara scan" vigil/scanners/yara.py | grep -q '^ *raise$' \
+ && grep -A1 "Failed to perform vector scan" vigil/scanners/vectordb.py | grep -q '^ *raise$' \
+ && sed -i "s/^    result = vigil.input_scanner.perform_scan(input_prompt)$/&\n    if result.get('errors'):\n        logger.error(f'({request.path}) Scanner errors, answering 500: {result[\"errors\"]}')\n        return jsonify(result), 500/" vigil-server.py \
+ && grep -q "return jsonify(result), 500" vigil-server.py \
+ && python -c "import ast; [ast.parse(open(f).read()) for f in ('vigil-server.py', 'vigil/scanners/transformer.py', 'vigil/scanners/yara.py', 'vigil/scanners/vectordb.py')]"
 
 ENV HF_HOME=/cache/hf \
     SENTENCE_TRANSFORMERS_HOME=/cache/st \
