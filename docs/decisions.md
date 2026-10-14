@@ -106,3 +106,12 @@ Decisions made before this log existed are not back-filled here.
 ### 2026-10-13 — Git history with environment values stays as is (for now)
 - **Decision:** don't rewrite `gpu-node-nvidia`'s history although the repo is public.
   Who decided: Juan (will handle it later).
+
+### 2026-10-14 — The operator owns its Ingress NetworkPolicy (supersedes the KEDA entry above)
+- **Decision:** `config/manager/network_policy.yaml` makes the operator pods default-deny for
+  Ingress and lists every legitimate client: Prometheus → 8443, KEDA → 8082. It replaces
+  r-baggioII's `operator-observability` (removed from `manifests/observability/integrations/`)
+  and the separate KEDA policy; `deploy.sh` deletes both from existing clusters.
+- **Reason:** who may reach the operator was a side effect of which optional stack was
+  installed. Least privilege, written in one place next to the operator.
+  Who decided: Juan. r-baggioII to be told (her file is removed).

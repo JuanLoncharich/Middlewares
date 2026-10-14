@@ -207,6 +207,11 @@ kubectl kustomize config/default \
         -e "s|ghcr.io/security-eval/mcp-evaluator:20260930|$EVALUATOR_IMG|g" \
         -e "s|https://netbird.example.com:443|$NETBIRD_MANAGEMENT_URL|g" \
   | kubectl apply -f -
+# The operator bundle now owns its Ingress policy (config/manager/network_policy.yaml).
+# Remove the per-client policies older deploys left behind so the cluster
+# matches the repo.
+kubectl -n mcp-eval-system delete networkpolicy operator-observability \
+  allow-keda-to-operator-activity --ignore-not-found
 kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager MESH_ENFORCE="$MESH_ENFORCE" >/dev/null
 # Air-gap deploys (images imported straight into the nodes' containerd store,
 # hack/import-images-to-nodes.sh) must set IMAGE_PULL_POLICY=IfNotPresent:
@@ -522,9 +527,6 @@ if [ "$DEPLOY_KEDA" = "1" ]; then
   helm upgrade --install keda keda --repo https://kedacore.github.io/charts \
     --version "$KEDA_CHART_VERSION" -n keda --create-namespace \
     -f manifests/keda/values-mcp-eval.yaml --wait --timeout 5m
-  # Keeps KEDA's path to the operator's /active-runs open even when another
-  # Ingress policy (e.g. observability's) isolates the operator pods.
-  kubectl apply -f manifests/keda/allow-keda-to-operator.yaml
 fi
 
 if [ "$VIGIL_GPU" = "1" ]; then
