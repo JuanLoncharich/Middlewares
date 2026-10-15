@@ -37,7 +37,9 @@ data:
     # the vigil-corpus-loader Job) and is queried over REST v2
     # (images/vigil-llm/remote_vectordb.py). Required: if Chroma does not
     # answer, the scan answers 500 and the evaluation fails closed.
-    chroma_url = http://rust-frontend-service.chroma.svc.cluster.local:8000
+    # Reader token as env CHROMA_TOKEN (Secret chroma-reader), like the CPU Vigil.
+    chroma_url = http://chroma-gateway.chroma.svc.cluster.local:8080
+    token_env = CHROMA_TOKEN
     tenant = default_tenant
     database = default_database
     collections = vigil_instruction_bypass,vigil_jailbreak
@@ -166,6 +168,9 @@ spec:
           ports:
             - {name: http, containerPort: 5000, protocol: TCP}
           env:
+            - name: CHROMA_TOKEN   # reader token for chroma-gateway, like the CPU Vigil
+              valueFrom:
+                secretKeyRef: {name: chroma-reader, key: token}
             - {name: HOME, value: /tmp}
             - {name: HF_HOME, value: /cache/hf}
             # sentence-transformers 2.2.2 keeps its own model cache (default

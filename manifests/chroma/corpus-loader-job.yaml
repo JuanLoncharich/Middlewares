@@ -3,8 +3,12 @@
 # (deadbits org) and pushes them into the distributed Chroma collections via
 # the frontend REST API.
 #
-# deploy.sh builds/pushes the image and applies this manifest with
-# __LOADER_IMG__ substituted. Idempotent: collections holding vectors are
+# No image of our own: stock python:alpine (pinned) runs load_corpus.py
+# (stdlib only) from the ConfigMap vigil-corpus-loader, which
+# hack/chroma/deploy.sh creates from images/vigil-corpus-loader/. So any
+# cluster that can pull from Docker Hub can load the corpus — no registry
+# push needed. It writes through chroma-gateway with the writer token
+# (Secret chroma-auth). Idempotent: collections holding vectors are
 # skipped (FORCE_LOAD=1 to reload); re-applying after a completed Job
 # re-runs it only when the spec changes (deploy.sh deletes+recreates it).
 #
@@ -40,11 +44,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: loader
-          image: __LOADER_IMG__
+          image: python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
           imagePullPolicy: IfNotPresent
+          command: ["python", "/app/load_corpus.py"]
           env:
             - name: CHROMA_URL
-              value: http://rust-frontend-service.chroma.svc.cluster.local:8000
+              value: http://chroma-gateway.chroma.svc.cluster.local:8080
+            - name: CHROMA_TOKEN
+              valueFrom:
+                secretKeyRef: {name: chroma-auth, key: writer-token}
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -55,6 +63,8 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            - {name: script, mountPath: /app, readOnly: true}
           resources:
             requests:
               cpu: 100m
@@ -63,3 +73,7 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+      volumes:
+        - name: script
+          configMap:
+            name: vigil-corpus-loader

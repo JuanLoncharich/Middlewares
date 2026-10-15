@@ -21,7 +21,9 @@
 #  5. the transformer truncates its input to 512 tokens (bounded memory);
 #  6. scanner errors answer HTTP 500 instead of a "clean" 200 (fail closed);
 #  7. the vectordb scanner queries the distributed Chroma over REST v2
-#     (remote_vectordb.py, needs --build-context vigil-patches=images/vigil-llm).
+#     (remote_vectordb.py, needs --build-context vigil-patches=images/vigil-llm);
+#  8. upstream bug: [auto_update] enabled is read as a string, so "false" is
+#     truthy and auto-update was always on — parse it as a boolean.
 # Runtime notes for the manifests: start the server directly (skip upstream's
 # entrypoint dataset loader: its 1536-dim ada-002 vectors never match the
 # 384-dim MiniLM embedder, and re-streaming them took ~6 min per start) and
@@ -114,6 +116,16 @@ COPY --from=vigil-patches remote_vectordb.py vigil/core/remote_vectordb.py
 RUN sed -i 's/^        self.vectordb = VectorDB(\*\*params)$/        if params.get("chroma_url"):\n            from vigil.core.remote_vectordb import RemoteVectorDB\n            self.vectordb = RemoteVectorDB(**params)\n        else:\n            self.vectordb = VectorDB(**params)/' vigil/vigil.py \
  && grep -q 'self.vectordb = RemoteVectorDB(\*\*params)' vigil/vigil.py \
  && python -c "import ast; ast.parse(open('vigil/vigil.py').read()); ast.parse(open('vigil/core/remote_vectordb.py').read())"
+
+# Patch 7 — upstream bug at the pinned commit: `[auto_update] enabled` comes
+# out of configparser as the string "false", which is truthy, so auto-update
+# is ON whatever the config says: every prompt that 3 scanners flag is written
+# into the vector corpus (scan traffic poisoning the shared corpus), and with
+# the read-only remote client that write fails the whole scan with a 500.
+# Parse the value as a boolean.
+RUN sed -i "s/auto_update = manager_config.get('auto_update', {}).get('enabled', False)$/auto_update = str(manager_config.get('auto_update', {}).get('enabled', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')/" vigil/vigil.py \
+ && grep -q "in ('1', 'true', 'yes', 'on')" vigil/vigil.py \
+ && python -c "import ast; ast.parse(open('vigil/vigil.py').read())"
 
 ENV HF_HOME=/cache/hf \
     SENTENCE_TRANSFORMERS_HOME=/cache/st \

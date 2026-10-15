@@ -82,10 +82,13 @@
 #                                SysDB coordinator + Rust SysDB + Log Service (WAL) + Query Nodes
 #                                + Compactors + Work Queue + Garbage Collector, with MinIO object
 #                                storage and a Postgres-backed catalog. Vigil's vector scanner
-#                                queries its frontend for prompt-injection similarity. REQUIRED
-#                                by Vigil: with DEPLOY_VECTOR_DB=0 and no Chroma reachable at
-#                                rust-frontend-service.chroma:8000, every scan answers 500 and
-#                                evaluations fail closed.
+#                                queries it for prompt-injection similarity through chroma-gateway
+#                                (bearer token; Secrets chroma-auth / chroma-reader are generated).
+#                                REQUIRED by Vigil: with DEPLOY_VECTOR_DB=0 and no Chroma reachable at
+#                                chroma-gateway.chroma:8080, every scan answers 500 and evaluations
+#                                fail closed. Implemented by hack/chroma/deploy.sh (runs standalone too).
+#   VECTOR_DB_MODE=single        one-pod Chroma instead of the distributed one — for kind tests only
+#   CHROMA_QUERY_REPLICAS / CHROMA_COMPACTION_REPLICAS   distributed replicas (default 2 / 2)
 #   CHROMA_IMG_TAG               chroma component image tag (short commit SHA from the `chromadb`
 #                                Docker Hub org; keep in vintage with the vendored chart).
 #   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
@@ -107,7 +110,6 @@ DEPLOY_NETBIRD_CP="${DEPLOY_NETBIRD_CP:-0}"
 DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
-LOADER_IMG="$IMG_REGISTRY/vigil-corpus-loader:$IMG_TAG"
 WORKSTATION_NODEPORT="${WORKSTATION_NODEPORT:-0}"
 WORKSTATION_CIDR="${WORKSTATION_CIDR:-172.21.0.0/16}"
 # Vigil sizing: defaults fit multi-node production. The real vigil-llm image
@@ -193,11 +195,6 @@ if [ "$SKIP_BUILD" != "1" ]; then
       "$VIGIL_SRC_DIR"
     rm -rf "$VIGIL_SRC_DIR"
     docker push "$VIGIL_IMG"
-  fi
-  if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
-    log "Building Vigil corpus loader image"
-    docker build -t "$LOADER_IMG" images/vigil-corpus-loader
-    docker push "$LOADER_IMG"
   fi
 fi
 
@@ -326,57 +323,12 @@ for doc in docs:
 # manifests in manifests/chroma/.
 # ---------------------------------------------------------------------------
 if [ "$DEPLOY_VECTOR_DB" != "1" ] && [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ] \
-  && ! kubectl -n chroma get service rust-frontend-service >/dev/null 2>&1; then
-  echo "WARNING: DEPLOY_VECTOR_DB=0 and no Chroma frontend in namespace chroma: Vigil's vector" \
-       "scanner requires it, so every Vigil scan will fail and evaluations will fail closed." >&2
+  && ! kubectl -n chroma get service chroma-gateway >/dev/null 2>&1; then
+  echo "WARNING: DEPLOY_VECTOR_DB=0 and no chroma-gateway in namespace chroma: Vigil needs it (and its" \
+       "Secret chroma-reader to even start), so evaluations will fail closed." >&2
 fi
 if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
-  log "Deploying vector-DB substrate (MinIO, Postgres, OTel) into namespace chroma"
-  # The substrate manifests and the chart both target namespace `chroma`;
-  # create it up front so apply order never matters. The PriorityClass is
-  # referenced by MinIO/Postgres (and the gateways further down).
-  kubectl create namespace chroma --dry-run=client -o yaml | kubectl apply -f -
-  kubectl apply -f manifests/priorityclass.yaml
-  kubectl apply -f manifests/chroma/minio.yaml \
-                 -f manifests/chroma/postgres.yaml \
-                 -f manifests/chroma/otel-collector.yaml \
-                 -f manifests/chroma/networkpolicy.yaml
-  for dep in minio postgres otel-collector; do
-    kubectl -n chroma rollout status "deploy/$dep" --timeout=300s
-  done
-
-  log "Rendering + applying distributed Chroma (component images chromadb/*:$CHROMA_IMG_TAG)"
-  # CRDs first: the MemberList custom resources in the chart cannot be
-  # applied until the chroma.cluster CRD is established.
-  kubectl apply -f manifests/chroma/chart/crds/
-  helm template distributed-chroma manifests/chroma/chart \
-    -f manifests/chroma/values-mcp-eval.yaml \
-    --set-file rustFrontendService.configuration=manifests/chroma/frontend-config.yaml \
-    --set-file rustLogService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file queryService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file compactionService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file garbageCollector.configuration=manifests/chroma/worker-config.yaml \
-    --set-file rustSysdbService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file workQueueService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file fnConsumer.configuration=manifests/chroma/worker-config.yaml \
-    | sed "s|__CHROMA_IMG_TAG__|$CHROMA_IMG_TAG|g" \
-    | kubectl apply -f -
-  for dep in sysdb rust-sysdb-service rust-frontend-service work-queue-service fn-consumer; do
-    kubectl -n chroma rollout status "deploy/$dep" --timeout=600s
-  done
-  for sts in rust-log-service query-service compaction-service garbage-collector; do
-    kubectl -n chroma rollout status "statefulset/$sts" --timeout=600s
-  done
-
-  if [ "$SKIP_CORPUS_LOAD" != "1" ]; then
-    log "Loading Vigil embedding corpora into Chroma (Job vigil-corpus-loader)"
-    sed "s|__LOADER_IMG__|$LOADER_IMG|g" manifests/chroma/corpus-loader-job.yaml \
-      | kubectl apply -f -
-    # First (cold) run downloads the datasets from HuggingFace.
-    kubectl -n chroma wait --for=condition=complete job/vigil-corpus-loader --timeout=900s \
-      || { echo "ERROR: corpus loader did not complete — logs: kubectl -n chroma logs job/vigil-corpus-loader" >&2; exit 1; }
-  fi
-  echo "Vector DB up: http://rust-frontend-service.chroma.svc.cluster.local:8000 (namespace chroma)"
+  CHROMA_IMG_TAG="$CHROMA_IMG_TAG" SKIP_CORPUS_LOAD="$SKIP_CORPUS_LOAD" hack/chroma/deploy.sh
 fi
 
 if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then

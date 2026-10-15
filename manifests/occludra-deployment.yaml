@@ -560,20 +560,19 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-    # Distributed Chroma frontend (manifests/chroma/) — Vigil's vector
-    # scanner queries the corpora there. Only the single client-facing port
-    # of the frontend is reachable; sysdb/log/minio/postgres stay
-    # unreachable from the gateways.
+    # Chroma (manifests/chroma/) — Vigil's vector scanner queries the
+    # corpora there. Only chroma-gateway (token check) is reachable; the
+    # frontend, sysdb/log/minio/postgres stay unreachable from the gateways.
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: chroma
           podSelector:
             matchLabels:
-              app: rust-frontend-service
+              app.kubernetes.io/name: chroma-gateway
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8080
 ---
 apiVersion: v1
 kind: ServiceAccount

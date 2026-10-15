@@ -76,7 +76,10 @@ data:
     # the vigil-corpus-loader Job) and is queried over REST v2
     # (images/vigil-llm/remote_vectordb.py). Required: if Chroma does not
     # answer, the scan answers 500 and the evaluation fails closed.
-    chroma_url = http://rust-frontend-service.chroma.svc.cluster.local:8000
+    # chroma-gateway checks a bearer token: the reader token reaches the
+    # pod as env CHROMA_TOKEN (Secret chroma-reader, hack/chroma/deploy.sh).
+    chroma_url = http://chroma-gateway.chroma.svc.cluster.local:8080
+    token_env = CHROMA_TOKEN
     tenant = default_tenant
     database = default_database
     collections = vigil_instruction_bypass,vigil_jailbreak
@@ -212,6 +215,12 @@ spec:
               containerPort: 5000
               protocol: TCP
           env:
+            # Reader token for chroma-gateway ([vectordb] token_env). No
+            # optional: without the Secret the pod does not start, instead of
+            # starting and failing every scan with 401.
+            - name: CHROMA_TOKEN
+              valueFrom:
+                secretKeyRef: {name: chroma-reader, key: token}
             # No VIGIL_CONF knob exists upstream: the image's baked entrypoint
             # runs `python vigil-server.py -c conf/server.conf` (WORKDIR /app)
             # and its dataset loader hardcodes /app/conf/server.conf — hence
@@ -412,18 +421,17 @@ spec:
       # capacity for a while before shedding replicas.
       stabilizationWindowSeconds: 300
 ---
-# Vigil -> distributed Chroma, the vectordb scanner's only path to its corpus.
+# Vigil -> Chroma, the vectordb scanner's only path to its corpus.
 # gateway-egress (occludra-deployment.yaml) lets security-gateways pods reach
-# private addresses only on NetBird ports; this adds exactly the Chroma
-# frontend's REST port, for Vigil pods only (CPU and GPU variants). The
-# matching ingress rule is allow-vigil-to-frontend in
-# manifests/chroma/networkpolicy.yaml.
+# private addresses only on NetBird ports; this adds exactly chroma-gateway's
+# port, for Vigil pods only (CPU and GPU variants). The matching ingress rule
+# is allow-vigil-to-gateway in manifests/chroma/networkpolicy.yaml.
 #
 # LIQO NOTE (not solved here): when the GPU Vigil runs on the PC as a pod
 # offloaded through Liqo, it executes in the PC's cluster. Neither this
 # policy nor the chroma-side one applies to it there (they select pods of
 # this cluster), and from the PC chroma_url must still resolve and route to
-# rust-frontend-service.chroma (Liqo service reflection/remapped CIDRs, or a
+# chroma-gateway.chroma (Liqo service reflection/remapped CIDRs, or a
 # reachable address over the tunnel), with the Chroma frontend accepting the
 # remapped source address. That path needs its own rule on both sides.
 apiVersion: networking.k8s.io/v1
@@ -445,7 +453,7 @@ spec:
               kubernetes.io/metadata.name: chroma
           podSelector:
             matchLabels:
-              app: rust-frontend-service
+              app.kubernetes.io/name: chroma-gateway
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8080

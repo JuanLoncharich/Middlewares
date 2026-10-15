@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Deploy Chroma (namespace `chroma`) behind chroma-gateway, create its tokens,
+# and load the Vigil corpus. deploy.sh calls this when DEPLOY_VECTOR_DB=1; it
+# also runs on its own:
+#
+#   CONTEXT=kind-mcp-e2e VECTOR_DB_MODE=single hack/chroma/deploy.sh
+#   CONTEXT=k0s CHROMA_QUERY_REPLICAS=1 CHROMA_COMPACTION_REPLICAS=1 hack/chroma/deploy.sh
+#
+# Settings (environment):
+#   CONTEXT                      kubectl context (default: the current one)
+#   VECTOR_DB_MODE               distributed (default): the full distributed Chroma over MinIO
+#                                (manifests/chroma/chart + values-mcp-eval.yaml);
+#                                single: one chroma pod with an emptyDir, for kind tests only
+#   CHROMA_IMG_TAG               distributed component image tag (default dff1d8a)
+#   CHROMA_QUERY_REPLICAS        query-service replicas (default 2)
+#   CHROMA_COMPACTION_REPLICAS   compaction-service replicas (default 2)
+#   SKIP_CORPUS_LOAD=1           do not run the loader Job
+#   CHROMA_ROTATE_TOKENS=1       replace both tokens (gateway and Vigil pods are restarted)
+#
+# Tokens: Secret chroma-auth (namespace chroma: reader-token, writer-token)
+# is generated once, randomly, and never printed; Secret chroma-reader
+# (namespace security-gateways: token) is a copy of the reader token for the
+# Vigil pods. The writer token never leaves namespace chroma.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+VECTOR_DB_MODE="${VECTOR_DB_MODE:-distributed}"
+CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
+CHROMA_QUERY_REPLICAS="${CHROMA_QUERY_REPLICAS:-2}"
+CHROMA_COMPACTION_REPLICAS="${CHROMA_COMPACTION_REPLICAS:-2}"
+SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
+CHROMA_ROTATE_TOKENS="${CHROMA_ROTATE_TOKENS:-0}"
+
+k() { kubectl ${CONTEXT:+--context "$CONTEXT"} "$@"; }
+log() { printf '\n==> [chroma] %s\n' "$*"; }
+case "$VECTOR_DB_MODE" in
+  distributed) UPSTREAM=rust-frontend-service:8000 ;;
+  single) UPSTREAM=chroma-single:8000 ;;
+  *) echo "VECTOR_DB_MODE must be distributed or single (got '$VECTOR_DB_MODE')" >&2; exit 2 ;;
+esac
+
+k create namespace chroma --dry-run=client -o yaml | k apply -f -
+k create namespace security-gateways --dry-run=client -o yaml | k apply -f -
+k apply -f manifests/chroma/networkpolicy.yaml
+# Renamed to allow-vigil-to-gateway: the frontend takes no outside clients now.
+k -n chroma delete networkpolicy allow-vigil-to-frontend --ignore-not-found
+
+# ---- tokens (values travel only through pipes, never argv or output) ----
+rotated=0
+if [ "$CHROMA_ROTATE_TOKENS" = "1" ] || ! k -n chroma get secret chroma-auth >/dev/null 2>&1; then
+  log "Generating chroma-auth tokens"
+  python3 -c '
+import secrets, sys
+r, w = secrets.token_hex(32), secrets.token_hex(32)
+sys.stdout.write(f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: chroma-auth
+  namespace: chroma
+  labels: {{app.kubernetes.io/part-of: chroma-distributed}}
+type: Opaque
+stringData:
+  reader-token: "{r}"
+  writer-token: "{w}"
+""")' | k apply -f - >/dev/null
+  rotated=1
+fi
+k -n chroma get secret chroma-auth -o jsonpath='{.data.reader-token}' | python3 -c '
+import sys
+tok = sys.stdin.read().strip()
+if not tok:
+    sys.exit("chroma-auth has no reader-token")
+sys.stdout.write(f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: chroma-reader
+  namespace: security-gateways
+  labels: {{app.kubernetes.io/part-of: mcp-eval-platform}}
+type: Opaque
+data:
+  token: "{tok}"
+""")' | k apply -f - >/dev/null
+
+# ---- Chroma itself ----
+if [ "$VECTOR_DB_MODE" = single ]; then
+  log "Deploying single-node Chroma (test only: data lives in an emptyDir)"
+  k apply -f manifests/chroma/single.yaml
+  k -n chroma rollout status deploy/chroma-single --timeout=300s
+else
+  log "Deploying vector-DB substrate (MinIO, Postgres, OTel)"
+  # The PriorityClass is referenced by MinIO/Postgres.
+  k apply -f manifests/priorityclass.yaml
+  k apply -f manifests/chroma/minio.yaml -f manifests/chroma/postgres.yaml -f manifests/chroma/otel-collector.yaml
+  for dep in minio postgres otel-collector; do
+    k -n chroma rollout status "deploy/$dep" --timeout=300s
+  done
+  log "Rendering + applying distributed Chroma (chromadb/*:$CHROMA_IMG_TAG, query x$CHROMA_QUERY_REPLICAS, compaction x$CHROMA_COMPACTION_REPLICAS)"
+  # CRDs first: the MemberList custom resources in the chart cannot be
+  # applied until the chroma.cluster CRD is established.
+  k apply -f manifests/chroma/chart/crds/
+  helm template distributed-chroma manifests/chroma/chart \
+    -f manifests/chroma/values-mcp-eval.yaml \
+    --set queryService.replicaCount="$CHROMA_QUERY_REPLICAS" \
+    --set compactionService.replicaCount="$CHROMA_COMPACTION_REPLICAS" \
+    --set-file rustFrontendService.configuration=manifests/chroma/frontend-config.yaml \
+    --set-file rustLogService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file queryService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file compactionService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file garbageCollector.configuration=manifests/chroma/worker-config.yaml \
+    --set-file rustSysdbService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file workQueueService.configuration=manifests/chroma/worker-config.yaml \
+    --set-file fnConsumer.configuration=manifests/chroma/worker-config.yaml \
+    | sed "s|__CHROMA_IMG_TAG__|$CHROMA_IMG_TAG|g" \
+    | k apply -f -
+  for dep in sysdb rust-sysdb-service rust-frontend-service work-queue-service fn-consumer; do
+    k -n chroma rollout status "deploy/$dep" --timeout=600s
+  done
+  for sts in rust-log-service query-service compaction-service garbage-collector; do
+    k -n chroma rollout status "statefulset/$sts" --timeout=600s
+  done
+fi
+
+# ---- the gateway: the only door in ----
+log "Deploying chroma-gateway (upstream $UPSTREAM)"
+sed "s|__CHROMA_UPSTREAM__|$UPSTREAM|g" manifests/chroma/gateway.yaml | k apply -f -
+if [ "$rotated" = 1 ]; then
+  # New tokens: pods read them from env at start.
+  k -n chroma rollout restart deploy/chroma-gateway
+  for d in vigil vigil-gpu; do
+    k -n security-gateways get deploy "$d" >/dev/null 2>&1 && k -n security-gateways rollout restart "deploy/$d"
+  done
+fi
+k -n chroma rollout status deploy/chroma-gateway --timeout=180s
+
+# ---- corpus ----
+if [ "$SKIP_CORPUS_LOAD" != "1" ]; then
+  log "Loading Vigil embedding corpora (Job vigil-corpus-loader)"
+  k -n chroma create configmap vigil-corpus-loader \
+    --from-file=load_corpus.py=images/vigil-corpus-loader/load_corpus.py --dry-run=client -o yaml | k apply -f -
+  # A Job's pod template is immutable: replace it so a new run happens.
+  k -n chroma delete job vigil-corpus-loader --ignore-not-found --wait=true
+  k apply -f manifests/chroma/corpus-loader-job.yaml
+  # First (cold) run downloads the datasets from HuggingFace.
+  k -n chroma wait --for=condition=complete job/vigil-corpus-loader --timeout=900s \
+    || { echo "ERROR: corpus loader did not complete — logs: kubectl -n chroma logs job/vigil-corpus-loader" >&2; exit 1; }
+fi
+echo "Chroma ($VECTOR_DB_MODE) up behind http://chroma-gateway.chroma.svc.cluster.local:8080"
