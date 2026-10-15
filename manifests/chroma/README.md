@@ -78,6 +78,19 @@ The loader Job runs on stock `python:alpine`, pinned by digest, with
 is no image to build or push, so any cluster that can pull from Docker Hub
 can load the corpus.
 
+On the distributed mode the script also renders `allow-kube-api-egress`:
+the chart's components find each other through MemberList custom resources
+and leases, so they must reach the Kubernetes API. `default-deny-all` blocks
+that path; on k0s with Calico this left the frontend stuck at 503. The
+policy targets this cluster's real API endpoints, read from the
+`kubernetes` EndpointSlice, because NetworkPolicies see traffic after the
+Service DNAT.
+
+Measured on k0s (2026-10-15, query and compaction at 1 replica each, corpus
+loaded): about 770 MiB of RAM for the whole namespace. MinIO, the compactor
+and the query node use about 170–190 MiB each; everything else uses under
+50 MiB.
+
 ## Tests
 
 | Test | What it proves | Where |
@@ -85,7 +98,7 @@ can load the corpus.
 | `test/chroma/gateway-test.sh` | 22 checks: 401/403/200 per token and path, encoded and dot-dot paths refused, start-up guards, tokens absent from logs | Docker, real Chroma |
 | `test/vigil/remote-vectordb-test.sh` | Vigil's client through the gateway: queries with the reader token, fails closed with no or a wrong token without leaking it, and the reader token cannot write | Docker |
 | `test/vigil/patches-test.sh <image>` | the Vigil image end to end against Chroma (fail closed, auto-update off) | Docker |
-| `test/kind/chroma-access-test.sh` | live NetworkPolicies and tokens from pods carrying the real clients' labels (13 checks) | any cluster (`CONTEXT=…`) |
+| `test/kind/chroma-access-test.sh` | live NetworkPolicies and tokens from pods carrying the real clients' labels (13 checks) | any cluster (`CONTEXT=…`); 13/13 on kind and on k0s |
 
 ## Limits
 

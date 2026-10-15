@@ -112,10 +112,42 @@ else
     --set-file fnConsumer.configuration=manifests/chroma/worker-config.yaml \
     | sed "s|__CHROMA_IMG_TAG__|$CHROMA_IMG_TAG|g" \
     | k apply -f -
-  for dep in sysdb rust-sysdb-service rust-frontend-service work-queue-service fn-consumer; do
+  # The components find each other through MemberList custom resources and
+  # leases, i.e. they call the Kubernetes API, which default-deny-all blocks
+  # (seen on k0s/Calico: "Error acquiring memberlist ... deadline has elapsed",
+  # frontend stuck at 503). NetworkPolicies match the API server's real
+  # endpoint (after the Service DNAT), which differs per cluster, so the
+  # policy is rendered from this cluster's endpoints.
+  api_peers="$(k get endpointslices -n default -l kubernetes.io/service-name=kubernetes \
+    -o jsonpath='{range .items[*]}{range .endpoints[*]}{.addresses[0]}{" "}{end}{end}')"
+  api_port="$(k get endpointslices -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[0].ports[0].port}')"
+  [ -n "$api_peers" ] && [ -n "$api_port" ] || { echo "cannot read the API server endpoints" >&2; exit 1; }
+  {
+    cat <<'POLICY'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kube-api-egress
+  namespace: chroma
+  labels: {app.kubernetes.io/part-of: chroma-distributed}
+spec:
+  # The chart's components (memberlist, leases); not MinIO, Postgres, the
+  # gateway or the loader.
+  podSelector:
+    matchExpressions:
+      - {key: app, operator: In, values: [sysdb, rust-sysdb-service, rust-frontend-service, rust-log-service,
+          query-service, compaction-service, work-queue-service, fn-consumer, garbage-collector]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+POLICY
+    for ip in $api_peers; do printf '        - ipBlock: {cidr: %s/32}\n' "$ip"; done
+    printf '      ports:\n        - {protocol: TCP, port: %s}\n' "$api_port"
+  } | k apply -f -
+  for dep in sysdb rust-sysdb-service rust-frontend-service fn-consumer; do
     k -n chroma rollout status "deploy/$dep" --timeout=600s
   done
-  for sts in rust-log-service query-service compaction-service garbage-collector; do
+  for sts in rust-log-service query-service compaction-service garbage-collector work-queue-service; do
     k -n chroma rollout status "statefulset/$sts" --timeout=600s
   done
 fi
