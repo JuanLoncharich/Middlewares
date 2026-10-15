@@ -23,10 +23,16 @@ endpoint and auto-update cannot write scan traffic into the shared corpus.
 Selected in server.conf by setting [vectordb] chroma_url; without it Vigil
 keeps upstream's local VectorDB.
 
+Auth: chroma_url points at chroma-gateway (manifests/chroma/gateway.yaml),
+which wants a bearer token. The token comes from the environment variable
+named by [vectordb] token_env (default CHROMA_TOKEN, filled from a Secret),
+never from server.conf, and never appears in errors or logs.
+
 Stdlib HTTP only (urllib), like the corpus loader.
 """
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Callable, Dict, List, Optional
@@ -54,6 +60,7 @@ class RemoteVectorDB:
         database: str = "default_database",
         n_results: str = "5",
         timeout_s: str = "5",
+        token_env: str = "CHROMA_TOKEN",
         embed_fn: Optional[Callable[[str], List[float]]] = None,
         **_unused,  # upstream's local-db keys (collection, db_dir, ...) stay in the conf, unused
     ):
@@ -67,6 +74,8 @@ class RemoteVectorDB:
         self.n_results = int(n_results)
         self.timeout = float(timeout_s)
         self._ids: Dict[str, str] = {}
+        token = os.environ.get(token_env, "")
+        self._auth = {"Authorization": f"Bearer {token}"} if token else {}
         if embed_fn is None:
             from sentence_transformers import SentenceTransformer
 
@@ -77,6 +86,7 @@ class RemoteVectorDB:
         # while Chroma is down; collection ids are resolved on first use.
         logger.success(
             f"Remote vector db: {self.base} tenant={tenant} database={database} collections={self.collections}"
+            f" auth={'bearer from $' + token_env if token else 'none'}"
         )
 
     # -- upstream VectorDB interface --------------------------------------------------
@@ -137,8 +147,10 @@ class RemoteVectorDB:
 
     def _request(self, method: str, url: str, payload: Optional[dict] = None):
         data = json.dumps(payload).encode() if payload is not None else None
-        req = urllib.request.Request(url, data=data, method=method,
-                                     headers={"Content-Type": "application/json"} if data else {})
+        headers = dict(self._auth)
+        if data:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read()

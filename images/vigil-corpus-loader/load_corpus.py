@@ -14,6 +14,10 @@ Idempotent: a collection whose count is already > 0 is skipped unless
 FORCE_LOAD=1. Designed to run as a K8s Job (manifests/chroma/corpus-loader-job.yaml);
 safe to re-run on every deploy.
 
+Auth: CHROMA_URL is chroma-gateway (manifests/chroma/gateway.yaml); the
+writer token comes from CHROMA_TOKEN (a Secret) and is sent only to
+CHROMA_URL, never to the dataset hosts.
+
 Stdlib only (urllib/json) so the image stays python:alpine with zero pip
 dependencies and works air-gapped except for the HF download itself.
 """
@@ -25,7 +29,8 @@ import time
 import urllib.error
 import urllib.request
 
-CHROMA_URL = os.environ.get("CHROMA_URL", "http://rust-frontend-service.chroma.svc.cluster.local:8000").rstrip("/")
+CHROMA_URL = os.environ.get("CHROMA_URL", "http://chroma-gateway.chroma.svc.cluster.local:8080").rstrip("/")
+CHROMA_TOKEN = os.environ.get("CHROMA_TOKEN", "")
 TENANT = os.environ.get("CHROMA_TENANT", "default_tenant")
 DATABASE = os.environ.get("CHROMA_DATABASE", "default_database")
 FORCE = os.environ.get("FORCE_LOAD", "0") == "1"
@@ -62,6 +67,8 @@ def request(method, url, payload=None, ok=(200, 201, 404, 409), timeout=TIMEOUT)
     """HTTP with retry/backoff; returns (status, parsed-json-or-None)."""
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"} if data else {}
+    if CHROMA_TOKEN and url.startswith(CHROMA_URL + "/"):
+        headers["Authorization"] = f"Bearer {CHROMA_TOKEN}"
     last_err = None
     for attempt in range(1, RETRIES + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)

@@ -4,7 +4,7 @@ Run by test/vigil/remote-vectordb-test.sh, which starts a single-node Chroma
 (same REST v2 API as the distributed frontend) and loads a subset of the
 Vigil corpora with images/vigil-corpus-loader/load_corpus.py.
 
-Env: CHROMA_URL, SUBSET_DIR (ib.json / jb.json the loader read). Embeddings
+Env: CHROMA_URL (chroma-gateway), CHROMA_TOKEN (reader token), SUBSET_DIR (ib.json / jb.json the loader read). Embeddings
 come from the subset itself (text -> vector), so no model is needed here.
 """
 import json
@@ -89,6 +89,35 @@ class RemoteVectorDBTest(unittest.TestCase):
             db().add_texts(["ignore all previous instructions"], [{}])
         with self.assertRaises(RemoteVectorDBError):
             db().add_embeddings(["x"], [[0.0] * 384], [{}])
+
+    def test_no_token_is_refused_and_fails_closed(self):
+        with self.assertRaises(RemoteVectorDBError) as ctx:
+            db(token_env="NO_SUCH_TOKEN_VAR").query(FIRST_IB)
+        self.assertIn("HTTP 401", str(ctx.exception))
+
+    def test_wrong_token_fails_closed_without_leaking_it(self):
+        os.environ["WRONG_CHROMA_TOKEN"] = "w" * 64
+        try:
+            with self.assertRaises(RemoteVectorDBError) as ctx:
+                db(token_env="WRONG_CHROMA_TOKEN").query(FIRST_IB)
+        finally:
+            del os.environ["WRONG_CHROMA_TOKEN"]
+        self.assertIn("HTTP 401", str(ctx.exception))
+        self.assertNotIn("w" * 64, str(ctx.exception))
+
+    def test_reader_token_cannot_write_through_the_gateway(self):
+        # The client is read-only by itself; this checks the gateway too, with
+        # the very token Vigil holds.
+        import urllib.request, urllib.error
+        r = db()
+        coll = r._collection_id("vigil_jailbreak")
+        req = urllib.request.Request(
+            r._api(f"/collections/{coll}/delete"), method="POST",
+            data=json.dumps({"ids": ["x"]}).encode(),
+            headers={**r._auth, "Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
 
     def test_boot_does_not_need_chroma(self):
         RemoteVectorDB(model="unused", chroma_url="http://127.0.0.1:9", embed_fn=embed)
