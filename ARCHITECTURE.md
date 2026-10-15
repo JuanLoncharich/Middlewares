@@ -400,14 +400,11 @@ releases).
 
 The `vector` scanner is where the platform's **distributed Chroma cluster**
 (§5.2.1) plugs in: the `vigil-corpus-loader` Job loads the Vigil embedding
-corpora into it, and if the pinned image version exposes a remote-Chroma
-setting in its config the scanner is pointed at the cluster's frontend
-(`rust-frontend-service.chroma:8000`). Upstream's default is an *embedded
-on-disk* ChromaDB inside the container and the vendored schema shipped here
-has no remote-endpoint knob — confirm the key for your image version before
-relying on the remote path. Upstream semantics degrade a scanner that fails
-(its verdict is marked unavailable) instead of failing the request; the
-strict/monitor enforcement of the final verdict happens evaluator-side.
+corpora into it, and the image's REST v2 client
+(`images/vigil-llm/remote_vectordb.py`, selected by `[vectordb] chroma_url`)
+queries it through **`chroma-gateway.chroma:8080`** with a read-only bearer
+token (§5.2.1). The client fails closed: if Chroma does not answer, the scan
+answers HTTP 500 and the evaluation fails.
 
 #### 5.2.1 Distributed Chroma over MinIO (namespace `chroma`)
 
@@ -423,7 +420,8 @@ and deployed by `deploy.sh` with `DEPLOY_VECTOR_DB=1` (default):
 | **Log Service** (`rust-log-service`, StatefulSet) | WAL over S3 | every write is recorded here first and acknowledged — index building never blocks writes; peer discovery via `MemberList` CustomResources (CRD shipped by the chart) |
 | **Compactors** (`compaction-service` ×2, StatefulSet) | rendezvous-hash assigned | consume the log asynchronously, build HNSW/SPANN index segments, write them to object storage |
 | **Query Nodes** (`query-service` ×2, StatefulSet) | stateless search replicas | load prebuilt indexes from MinIO through local SSD/memory caches (`hostPath` `/cache`); scale `replicaCount` with read traffic |
-| Frontend (`rust-frontend-service`) | Rust gateway, REST v2 on :8000 | the only client entrypoint: auth/routing; serves `vigil` and the corpus loader |
+| Frontend (`rust-frontend-service`) | Rust gateway, REST v2 on :8000 | routing to sysdb/log/query nodes; **no authentication** of its own, so it takes no clients from outside the namespace |
+| **`chroma-gateway`** (`manifests/chroma/gateway.yaml`) | nginx, :8080 | the only door from outside the namespace: checks a bearer token — *reader* (Vigil: resolve a collection, query it) or *writer* (corpus loader: everything) — then proxies to the frontend |
 | Work Queue + Fn Consumer + Garbage Collector | support services | distributed task queue; index/version garbage collection |
 | **MinIO** (`minio:9000`, PVC 20 Gi) | S3 API, `chroma-storage` bucket | all WAL fragments and compacted index segments; the reason query nodes can stay stateless |
 | OTel collector | OTLP sink | chroma components export traces/metrics there; failures are non-fatal |
@@ -437,7 +435,12 @@ into collections `vigil_instruction_bypass`
 **cosine** space (the loader tries spann- then hnsw-shaped configs). The Job
 is idempotent (skips loaded collections; `FORCE_LOAD=1` re-adds). It is the
 only pod in the namespace with internet egress (NetworkPolicy
-`allow-corpus-loader-egress`).
+`allow-corpus-loader-egress`). It runs on stock `python:alpine` with its
+script in a ConfigMap, and writes through the gateway with the writer token.
+
+Deployment, tokens and tests: `manifests/chroma/README.md`. Local test
+clusters use a one-pod Chroma behind the same gateway
+(`VECTOR_DB_MODE=single`).
 
 Vigil sizing note: the scanner's per-replica footprint is governed by the
 models the pinned image loads at boot (classifier + embedding engines), not

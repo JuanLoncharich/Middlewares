@@ -178,8 +178,8 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
   (`manifests/chroma/`, namespace `chroma`: SysDB coordinator + log-service
   WAL + 2 query nodes + 2 compactors over **MinIO**, with the Vigil corpora
   `deadbits/*-all-MiniLM-L6-v2`, 8 900+ vectors, loaded by the
-  `vigil-corpus-loader` Job) — point the scanner at its frontend per the
-  pinned image version's config. Pods scale via HPA (CPU 70 %,
+  `vigil-corpus-loader` Job), queried through `chroma-gateway` with a
+  read-only token (`manifests/chroma/README.md`). Pods scale via HPA (CPU 70 %,
   `VIGIL_HPA_MIN`→8) with a PDB at 50 %; classifier replicas are
   memory-hungry, so laptop-class nodes should deploy with
   `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`.
