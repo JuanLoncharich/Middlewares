@@ -34,7 +34,6 @@ if [ ${#IMAGES[@]} -eq 0 ]; then
     ghcr.io/security-eval/mcp-evaluator:20260930
     ghcr.io/security-eval/occludra-gateway:20260930
     ghcr.io/security-eval/vigil-llm:20260930
-    ghcr.io/security-eval/vigil-corpus-loader:20260930
     # Vector DB plane (see manifests/chroma/): keep CHROMA_IMG_TAG in sync
     # with deploy.sh / manifests/chroma/values-mcp-eval.yaml.
     chromadb/sysdb-service:dff1d8a
@@ -47,7 +46,10 @@ if [ ${#IMAGES[@]} -eq 0 ]; then
     chromadb/work-queue-service:dff1d8a
     chromadb/fn-consumer-service:dff1d8a
     chromadb/garbage-collector-service:dff1d8a
-    quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    ghcr.io/chroma-core/ci-minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # chroma-gateway and the corpus loader (stock images, pinned in the manifests)
+    nginxinc/nginx-unprivileged:1.29.1-alpine@sha256:27985295bdb22a1ef8f712863210bd5877c0f3006494a593e86b3fe0fa55467e
+    python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
     postgres:15
     otel/opentelemetry-collector:0.107.0
   )
