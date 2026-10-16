@@ -158,3 +158,19 @@ Decisions made before this log existed are not back-filled here.
 - **Reason:** Juan wants to learn Liqo with the GPU node, and test it locally
   before touching k0s.
 - **Who decided:** Juan.
+
+### 2026-10-16 — Liqo lab wiring: WireGuard over a fixed NodePort on the docker bridge
+- **Decision:** Liqo v1.2.0 on both clusters; kind consumes, k3s provides
+  4 CPU, 6Gi, 30 pods and 1 `nvidia.com/gpu`. The gateway server runs on k3s
+  as NodePort 30851/UDP; the kind client dials `172.18.0.1:30851`. One more
+  ufw rule allows exactly that port from the kind network. The GPU reaches
+  k3s through the NVIDIA device plugin (chart 0.20.1, `runtimeClassName:
+  nvidia`); the node is labelled `nvidia.com/gpu.present=true` by hand
+  instead of installing Node Feature Discovery. Offloaded GPU pods need
+  `runtimeClassName: nvidia` (a matching RuntimeClass exists in kind so the
+  API accepts it; Liqo forwards the field).
+- **Reason:** no LoadBalancer on either cluster; the bridge IP is the only
+  address kind's containers reach on the host, and a fixed port keeps the
+  firewall rule narrow.
+- **Alternatives:** LoadBalancer (needs MetalLB); NFD for one node.
+- **Who decided:** the agent, with Juan's go-ahead to run it.
