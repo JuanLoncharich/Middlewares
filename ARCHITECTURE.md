@@ -206,8 +206,8 @@ Owns run → Job → Pod. Key mechanics:
   has a window" without coverage. Mesh mode contents: DNS to kube-dns,
   API-server endpoint IPs (`resolveAPIServerAddresses()`, resolved at
   reconcile time), NetBird control/data plane (UDP 51820, relay ports).
-  Legacy mode (`MESH_ENFORCE=false`): + gateway service ports 8080/5000 and
-  public 443.
+  Legacy mode (`MESH_ENFORCE=false`): + gateway service ports 8080/5000
+  (public 443 only with `EVAL_PUBLIC_EGRESS=true`; default off).
 - Watches the run Pod: `complete()` (line ~453) confirms evaluator-written
   results and timestamps; `fail()` (line ~504) records stage/agent + error
   class into `status.message`; both also rely on the evaluator's

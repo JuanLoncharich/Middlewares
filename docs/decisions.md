@@ -284,3 +284,15 @@ Decisions made before this log existed are not back-filled here.
   missed the fixture case); dropping Mosscap (Juan chose to include it).
 - **Who decided:** the agent, to fix a regression of the hybrid method Juan
   chose; flagged for Juan.
+
+### 2026-10-21 — The evaluate phase has no public 443 by default
+- **Decision:** `EVAL_PUBLIC_EGRESS` defaults to false. In legacy mode the
+  evaluate phase reaches only DNS, the API server and the gateways; `true`
+  re-opens TCP 443 to every public IP.
+- **Reason:** the target shares the evaluation Pod's network, so public 443
+  was the untrusted server's way out. Every LLM call already goes through
+  Occludra. Tested in kind with the local LLM: 1.1.1.1:443 blocked from the
+  Pod, all four agents completed with no network error.
+- **Alternatives:** keep it open (the old behaviour); an FQDN allowlist
+  (needs Cilium).
+- **Who decided:** Juan.

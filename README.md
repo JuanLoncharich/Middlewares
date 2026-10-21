@@ -439,7 +439,8 @@ The untrusted MCP server is the threat. Controls, from outermost in:
      takes over. In mesh mode it allows ONLY DNS, the API server (endpoint
      IPs resolved at reconcile time) and the NetBird control/data planes; in
      legacy mode (`MESH_ENFORCE=false`) it allows the gateways' service ports
-     and public 443 as well. See *Security layers* below.
+     as well (public 443 only with `EVAL_PUBLIC_EGRESS=true` on the operator;
+     off by default). See *Security layers* below.
    When observability is enabled, an additive policy also allows the evaluation
    Pod to reach the Alloy collector on TCP/4318.
    `networkpolicy-cilium.yaml` pins the clone-phase rules to exact FQDNs on

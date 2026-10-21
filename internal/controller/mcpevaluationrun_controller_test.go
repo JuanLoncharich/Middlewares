@@ -586,13 +586,13 @@ func TestBuildEvaluateNetworkPolicyLegacyWithoutPublicEgress(t *testing.T) {
 	}
 }
 
-func TestEvalPublicEgressDefaultsOn(t *testing.T) {
+func TestEvalPublicEgressDefaultsOff(t *testing.T) {
 	t.Setenv("EVAL_PUBLIC_EGRESS", "")
-	if !ImageConfigFromEnv().EvalPublicEgress {
-		t.Fatal("EVAL_PUBLIC_EGRESS unset must keep today's behaviour (public 443 open)")
-	}
-	t.Setenv("EVAL_PUBLIC_EGRESS", "false")
 	if ImageConfigFromEnv().EvalPublicEgress {
-		t.Fatal("EVAL_PUBLIC_EGRESS=false ignored")
+		t.Fatal("EVAL_PUBLIC_EGRESS unset must keep public 443 closed")
+	}
+	t.Setenv("EVAL_PUBLIC_EGRESS", "true")
+	if !ImageConfigFromEnv().EvalPublicEgress {
+		t.Fatal("EVAL_PUBLIC_EGRESS=true ignored")
 	}
 }
