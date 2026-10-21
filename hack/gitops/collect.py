@@ -6,6 +6,9 @@
 # - `kubectl set env` calls become env changes on the matching Deployment.
 # - Jobs get Flux's force annotation: their pod template is immutable, so a
 #   changed Job is recreated (deploy.sh deletes and re-applies it).
+# - Null fields are removed, as kubectl's client-side apply does. Flux's
+#   server-side apply would send them (and fail validation, e.g. Chroma's
+#   MemberList `members:`, which Chroma fills in at runtime).
 # - Namespaces and PVCs are never pruned by Flux: deleting either would take
 #   the hand-made Secrets or the vector data with it.
 import json
@@ -20,6 +23,14 @@ CLUSTER_SCOPED = {"Namespace", "CustomResourceDefinition", "ClusterRole", "Clust
                   "PriorityClass", "RuntimeClass", "ValidatingWebhookConfiguration",
                   "MutatingWebhookConfiguration", "StorageClass"}
 
+def strip_nulls(v):
+    if isinstance(v, dict):
+        return {k: strip_nulls(x) for k, x in v.items() if x is not None}
+    if isinstance(v, list):
+        return [strip_nulls(x) for x in v]
+    return v
+
+
 objs = {}
 order = []
 with open(os.path.join(src, "manifests.jsonl")) as f:
@@ -32,7 +43,7 @@ with open(os.path.join(src, "manifests.jsonl")) as f:
                 items = doc.get("items") or []
             else:
                 items = [doc]
-            for d in items:
+            for d in map(strip_nulls, items):
                 if d.get("kind") == "Secret":
                     continue
                 md = d.setdefault("metadata", {})

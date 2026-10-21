@@ -2230,7 +2230,6 @@ kind: Deployment
 metadata:
   name: sysdb
   namespace: chroma
-  annotations: null
 spec:
   replicas: 1
   selector:
@@ -2491,7 +2490,6 @@ metadata:
   namespace: chroma
 spec:
   serviceName: rust-log-service
-  replicas: null
   selector:
     matchLabels:
       app: rust-log-service
@@ -2630,40 +2628,35 @@ kind: MemberList
 metadata:
   name: compaction-service-memberlist
   namespace: chroma
-spec:
-  members: null
+spec: {}
 ---
 apiVersion: chroma.cluster/v1
 kind: MemberList
 metadata:
   name: fn-consumer-memberlist
   namespace: chroma
-spec:
-  members: null
+spec: {}
 ---
 apiVersion: chroma.cluster/v1
 kind: MemberList
 metadata:
   name: garbage-collection-service-memberlist
   namespace: chroma
-spec:
-  members: null
+spec: {}
 ---
 apiVersion: chroma.cluster/v1
 kind: MemberList
 metadata:
   name: query-service-memberlist
   namespace: chroma
-spec:
-  members: null
+spec: {}
 ---
 apiVersion: chroma.cluster/v1
 kind: MemberList
 metadata:
   name: rust-log-service-memberlist
   namespace: chroma
-spec:
-  members: null
+spec: {}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
