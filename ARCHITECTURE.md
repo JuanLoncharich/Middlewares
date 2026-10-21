@@ -24,16 +24,16 @@ perimeter from the host's Docker.
                               │  │                  stdio ⇄ /ipc FIFOs          │
                               │  └─ ctr   evaluator  @opencode-ai/sdk runner    │
                               │           ├─ OpenCode child server 127.0.0.1:4096+
-                              │           ├─ Vigil /analyze (inbound scan)      │
+                              │           ├─ Vigil /analyze/prompt (inbound)    │
                               │           └─ LLM calls ──► Occludra /v1         │
                               └───────┬───────────────────────────┬─────────────┘
                               Vigil    │                           │  completions
                               ┌────────▼─────────┐    ┌────────────▼───────────┐
    gateway plane              │ Deployment vigil │    │ Deployment occludra    │
-   ns security-gateways       │ :5000 /analyze   │    │ :8080 /v1 (OpenAI API) │
+   ns security-gateways       │ :5000 /analyze/… │    │ :8080 /v1 (OpenAI API) │
    (PSA privileged: TUN only) │ 2 replicas + PDB │    │ 2 replicas + PDB       │
-                              │ [stub: heuristics│    │ regex redaction,       │
-                              │  no DB]          │    │ hot-reloaded policy    │
+                              │ deberta+YARA+    │    │ regex redaction,       │
+                              │ vectors (Chroma) │    │ hot-reloaded policy    │
                               └────────┬─────────┘    └────────────┬───────────┘
                                        │  NetBird WireGuard mesh   │ replaces Authz
                                        └───────────┬───────────────┘ with secret key
@@ -58,7 +58,7 @@ its code lives, and whether it holds state.
 | `MCPEvaluationRun` | **CRD** (shortname `mcprun`), has `status` **subresource** | ns `mcp-evals` | `api/v1alpha1/mcpevaluationrun_types.go` | primary results store (etcd) |
 | `OpenCodeAgent` | **CRD** | ns `mcp-evals` | `api/v1alpha1/opencodeagent_types.go` | persona config (etcd) |
 | `MCPServerReconciler` | **controller** (Reconcile loop, controller-runtime) | runs inside manager pod | `internal/controller/mcpserver_controller.go` | stateless; recomputes from etcd each pass |
-| `MCPEvaluationRunReconciler` | **controller** | same | `internal/controller/mcpevaluationrun_controller.go` (1437 lines) | stateless; builds Jobs, watches Pods |
+| `MCPEvaluationRunReconciler` | **controller** | same | `internal/controller/mcpevaluationrun_controller.go` | stateless; builds Jobs, watches Pods |
 | controller-manager | **Deployment** `mcp-eval-controller-manager` (2 replicas, `--leader-elect`, PDB minAvailable 1, topology spread, `PriorityClass mcp-eval-critical`) | `mcp-eval-system` | repo root `Dockerfile`, `cmd/main.go` | none (etcd is the state) |
 | cloner | **init container** of the run Pod | `mcp-evals` | `images/cloner/` (bash) | writes `/workspace`, exits |
 | target sandbox | **container** (`target`) of the run Pod, UID 10002 | `mcp-evals` | `images/target/` (bash supervisor) | ephemeral, jailed |
@@ -72,7 +72,7 @@ its code lives, and whether it holds state.
 | Distributed Chroma | SysDB coordinator (`sysdb`) + Rust SysDB + Log Service WAL (StatefulSet) + **2 Query Nodes** + **2 Compactors** + Work Queue + Fn Consumer + Garbage Collector + Rust frontend (REST v2 :8000); chart vendored at `manifests/chroma/chart/` | `chroma` | `manifests/chroma/` (chart + values + worker/frontend configs), images `chromadb/<svc>:<sha>` | object segments in **MinIO**; catalog in **Postgres** |
 | `vigil-server-conf` | **ConfigMap** (`server.conf`, scanner enable/disable) | `security-gateways` | `manifests/vigil-deployment.yaml` | scanner profile (etcd) |
 | NetworkPolicies | **NetworkPolicy** ×5 static + **1 generated per run** (`<run>-evaluate-egress`) | `security-gateways` / `mcp-evals` | `manifests/occludra-deployment.yaml`, `workstation-nodeport.yaml`, controller §4 | — |
-| LLM credentials | **Secret** `llm-provider-credentials` (key `OPENCODE_API_KEY`) — exists in **both** `mcp-evals` (evaluator passes it to its own gateway calls' config; real key upstream lives in the gateway) and `security-gateways` (decoded only by occludra) | both ns | created by `deploy.sh` | etcd |
+| LLM credentials | **Secret** `llm-provider-credentials` — the **real** key only in `security-gateways` (read by Occludra, which replaces the client's `Authorization`); `mcp-evals` holds the placeholder `egress-via-occludra` for every provider | both ns | created by `deploy.sh` | etcd |
 | netbird auth | **Secret** `netbird-auth` (setup key) | `security-gateways` | `deploy.sh` | etcd |
 | workstation | **Docker container** `opencode-programmer` (NOT a Kubernetes resource) on docker network `kind` | host Docker | `images/opencode-workstation/` | config in `$HOME/.config/opencode` |
 | local registry | **Docker container** `kind-registry` (`registry:2`, `localhost:5001`) | host Docker | kind setup | image layers on volume |
@@ -262,7 +262,7 @@ The orchestrator. Module map:
 |---|---|
 | `evaluator.ts` | main() flow, agent orchestration, OpenCode boot (`bootOpencode`: `createOpencode` spawns `opencode serve` on 127.0.0.1:4096+ with config `{model, permission:"deny", autoupdate:false, share:"disabled", snapshot:false, provider.opencode.options.baseURL = OCCLUDRA_BASE_URL}`), structured-output recovery from plain text, report writing. **Degraded continuation**: a failing persona is recorded in `agentResults` and the remaining agents still run; the run completes `degraded: N/M failed` when ≥1 agent succeeded and fails only when all failed. Strict-mode Vigil detections stay a hard abort. Process-level `uncaughtException`/`unhandledRejection` handlers patch `Failed` + write the termination message before exiting; SIGTERM aborts the in-flight agent's OpenCode call via its AbortController; before the first security-gateway call the runner waits for the netbird SOCKS5 proxy to accept connections (`MESH_READY_TIMEOUT_MS`, default 60 s) |
 | `k8s.ts` | status writer: **merge-patch on the status subresource** (`patchNamespacedCustomObjectStatus`), retry w/ backoff, never throws; patches carrying a terminal phase get extended backoff and a final `flushTerminalPatch()` from the shutdown path (a lost terminal write would otherwise strand the CR non-terminally); a 404 (run deleted) aborts retries; `fetchAgent`/`fetchServer` retry transient API errors and fail fast on 404; dry-run mode reads `${OUTPUT_DIR}/server.json` + `agents/<name>.json` instead of the API |
-| `vigil.ts` | VigilClient: POST `/analyze {prompt}` with timeout + retry/backoff; verdict parsing across all response shapes; `VigilUnavailableError` classification (caller decides strict fail-closed vs monitor); `excerptOf` for logs |
+| `vigil.ts` | VigilClient: POST `/analyze/prompt {prompt}` per chunk (`vigilsegments.ts`) with timeout + retry/backoff; verdict parsing across all response shapes; `VigilUnavailableError` classification (caller decides strict fail-closed vs monitor); `excerptOf` for logs |
 | `meshhttp.ts` | NetBird transport: SOCKS5 (RFC 1928) client with user/pass auth staging; `fetch-over-SOCKS5` for the evaluator's own Vigil/Occludra calls; `waitForSocks5Proxy()` readiness gate; local **HTTP↔SOCKS5 bridge** listener on `127.0.0.1:18080` exported as `HTTP_PROXY`/`HTTPS_PROXY` so the OpenCode child process (cannot be taught SOCKS5) rides the mesh too; bridged upstream requests and CONNECT tunnels carry a 10-min inactivity bound so a hung netbird cannot stall them forever |
 | `mcpclient.ts` | MCP client over stdio-FIFO or SSE loopback transport |
 | `static.ts` | SAST evidence: repo tree, launch metadata, flagged patterns |
@@ -358,53 +358,43 @@ pass-through.
 
 ### 5.2 Vigil — inbound prompt-injection scanner
 **Kind**: Deployment ×2 (PDB) + ClusterIP `vigil-service:5000` + NodePort
-`vigil-np:30500`. Contract: `POST /analyze {"prompt": "…"}` →
-`{"injection_detected": bool, "confidence": float (0–1),
-"status": "blocked"\|"allowed", "scanners": [names], "runs": {…}}`.
-Probes are version-agnostic **tcpSocket** checks on the REST port with a
-generous startupProbe: the pinned image is not publicly pullable, so no HTTP
-health route could be verified empirically (upstream docs also document no
-`/health` endpoint). Content is never logged (`log_payloads: false`).
-The netbird TUN sidecars on both gateways are liveness-probed with the same
-exec check the DaemonSet uses (`test -S /var/run/netbird/wt0.sock || ip link
-show wt0`) so a wedged sidecar is restarted instead of silently dropping the
-pod from the mesh; the userspace run sidecar (no TUN, no stable socket path)
-relies on the evaluator's SOCKS5 readiness gate + run-level retries instead.
+`vigil-np:30500`. Contract (upstream vigil-llm@f2b4c13): `POST /analyze/prompt
+{"prompt": "…"}` → `{"status", "uuid", "results": {"scanner:<name>":
+{"matches": [...]}}, "messages": [...]}`; a scanner error answers **HTTP 500**
+(image patch 5), which the evaluator treats as Vigil unavailable.
 
-**Deployed implementation is the real vigil-llm image**
-(built by `deploy.sh` from pinned upstream source `VIGIL_SRC_REPO@VIGIL_SRC_REF`
-into `$IMG_REGISTRY/vigil-llm:$IMG_TAG`; `VIGIL_IMG` overrides for mirrored
-images — the vendored Python
-test double that previously stood in for it was deleted; no scanner behavior
-is toggled via env knobs). Scanners are
-configured exclusively through the `vigil-server-conf` ConfigMap
-(config mounted at `/app/conf/server.conf`, the path the pinned commit's
-baked entrypoint passes to `vigil-server.py`); the shipped profile enables
-the **input scanners** the pinned commit provides:
+**What the evaluator sends** (`runner/src/vigilsegments.ts`): every untrusted
+text on its own, as plain text, in ≤ 500-character chunks with 100 characters
+of overlap — server instructions, every tool/prompt/resource description and
+schema text (gate 1), every fuzz answer and error (gate 2), every probe output
+(gate 3). A JSON blob of the whole surface used to score benign while single
+fields scored 1.0, and the classifier reads only 512 tokens.
+
+**How a verdict is made** (`runner/src/vigil.ts`, decision 1A): the run aborts
+(score 0, `Malicious`, `Critical` finding) only when the **transformer** flags a
+chunk **and** YARA or vectordb flags it too; one scanner alone is a warning
+(`Medium` finding, named in the auditor's prompt without the text).
 
 | Scanner | Mechanism | Shipped config |
 |---|---|---|
-| `transformer` | transformer prompt-injection classifier | enabled, model `laiyer/deberta-v3-base-prompt-injection`, threshold 0.98 |
-| `yara` | YARA security rules bundled with the image (`/app/data/yara`) | enabled |
-| `vectordb` | embedding similarity against a known injection corpus | enabled, cosine distance threshold 0.4 (MiniLM embedder; see §5.2.1 for the real vector plane) |
-| `sentiment` / `similarity` | response-side signals | configured upstream-default but inert on the evaluation path — the runner only calls `/analyze/prompt` with raw untrusted payloads, never `/analyze/response` |
+| `transformer` | `laiyer/deberta-v3-base-prompt-injection`, input truncated to 512 tokens (patch 4) | threshold 0.98 |
+| `yara` | **our** rules, `manifests/vigil-yara/*.yar` (ConfigMap `vigil-yara-rules`, mounted at `/app/yara-rules`); upstream's bundled rules are not used (3.8 % false positives, missed "ignore all previous instructions") | case-insensitive, filler-tolerant phrasings of override, role hijack, prompt leak, hidden-instruction tags, exfiltration |
+| `vectordb` | calibrated **hybrid** similarity (`images/vigil-llm/remote_vectordb.py`): the whole chunk vs whole malicious texts, each sentence vs malicious sentences, embedder `intfloat/multilingual-e5-small` | per-collection thresholds from the corpus metadata (`hack/vigil-corpus/`); `[scanner:vectordb] threshold = 2.0` so upstream does not filter again |
+| `sentiment` / `similarity` | response-side signals | inert on the evaluation path — the runner never calls `/analyze/response` |
 
-(The pinned commit has no `heuristics`/`canonical` scanners and no
-payload-logging kill switch; scan payloads can appear in the container's
-`server.log` on matches.)
+Image patches (`images/vigil-llm/Dockerfile` lists all ten): bounded
+transformer input, fail-closed scanner errors, auto-update really off (it was
+always on and wrote scan traffic into the corpus), the REST v2 Chroma client,
+one embedding model per process, no Flask reloader (it loaded every model
+twice), CUDA for the GPU variant.
 
-Per-scanner thresholds beyond those shown are the image's own defaults; the
-config layout mirrors vigil-llm's documented `server.conf` — **verify
-against the image version you pin** (the upstream format has changed across
-releases).
-
-The `vector` scanner is where the platform's **distributed Chroma cluster**
-(§5.2.1) plugs in: the `vigil-corpus-loader` Job loads the Vigil embedding
-corpora into it, and the image's REST v2 client
-(`images/vigil-llm/remote_vectordb.py`, selected by `[vectordb] chroma_url`)
-queries it through **`chroma-gateway.chroma:8080`** with a read-only bearer
-token (§5.2.1). The client fails closed: if Chroma does not answer, the scan
-answers HTTP 500 and the evaluation fails.
+The `vectordb` client reads, on first use, each collection's metadata
+(threshold, embedding model, text prefix, embedding probe) and **fails closed**
+if its own embedder does not reproduce the probe: a corpus and an embedder
+that disagree never score silently. It queries through
+**`chroma-gateway.chroma:8080`** with a read-only bearer token (§5.2.1); if
+Chroma does not answer, the scan answers HTTP 500 and the evaluation fails.
+Measured detection and false-positive rates: `hack/vigil-corpus/README.md`.
 
 #### 5.2.1 Distributed Chroma over MinIO (namespace `chroma`)
 
@@ -426,17 +416,19 @@ and deployed by `deploy.sh` with `DEPLOY_VECTOR_DB=1` (default):
 | **MinIO** (`minio:9000`, PVC 20 Gi) | S3 API, `chroma-storage` bucket | all WAL fragments and compacted index segments; the reason query nodes can stay stateless |
 | OTel collector | OTLP sink | chroma components export traces/metrics there; failures are non-fatal |
 
-Corpus: the Job `vigil-corpus-loader` (`images/vigil-corpus-loader/`, stdlib
-Python) downloads the pre-embedded corpora from HuggingFace and loads them
-into collections `vigil_instruction_bypass`
-(`deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2`, 8 800 vectors) and
-`vigil_jailbreak` (`deadbits/vigil-jailbreak-all-MiniLM-L6-v2`, 104 vectors)
-— 384-dim `all-MiniLM-L6-v2` embeddings, collections created with
-**cosine** space (the loader tries spann- then hnsw-shaped configs). The Job
-is idempotent (skips loaded collections; `FORCE_LOAD=1` re-adds). It is the
-only pod in the namespace with internet egress (NetworkPolicy
-`allow-corpus-loader-egress`). It runs on stock `python:alpine` with its
-script in a ConfigMap, and writes through the gateway with the writer token.
+Corpus: the Job `vigil-corpus-loader` runs `load_corpus.py` (stdlib Python,
+from a ConfigMap) on the corpus image `vigil-corpus:<name>-<sha12>` that
+`deploy.sh` builds (the pinned `python:alpine` plus one `vigil-corpus/1`
+file). It checks the file's sha256 against the committed lock
+(`hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json`) before writing, then
+fills `vigil_e5s_v1_whole` (41 164 texts) and `vigil_e5s_v1_sentence`
+(163 965 sentences), 384-dim e5 vectors in **cosine** space, each collection
+carrying its threshold and model in its metadata. Idempotent: a collection
+already holding this build is skipped; another build under the same name is
+refused unless `RECREATE=1`. Without `CORPUS_URL` the loader still knows the
+legacy deadbits download (the only reason it keeps HTTPS egress,
+`allow-corpus-loader-egress`). It writes through the gateway with the writer
+token.
 
 Deployment, tokens and tests: `manifests/chroma/README.md`. Local test
 clusters use a one-pod Chroma behind the same gateway
@@ -520,8 +512,8 @@ like a developer laptop whose only internet is the security perimeter.
 - **Provable perimeter coverage**: even OpenCode's background
   title-generator call (model `gpt-5.4-nano`) traverses the gateway and
   shows up in redaction logs — there is no bypass path from the container.
-- **Vigil access**: `/analyze` is directly reachable for interactive
-  injection probing (`curl $VIGIL_URL/analyze`).
+- **Vigil access**: `/analyze/prompt` is directly reachable for interactive
+  injection probing (`curl $VIGIL_URL/analyze/prompt`).
 
 ---
 
@@ -579,7 +571,7 @@ answers "how risky is this MCP server today" without a client-side join.
 | 8 | Vigil config | **ConfigMap** `vigil-server-conf` → etcd, mounted `/conf` | vigil pods | permanent | scanner profile (all input scanners enabled) |
 | 9a | **Distributed Chroma — object segments** | **MinIO** (`minio.chroma:9000`, PVC 20 Gi, bucket `chroma-storage` auto-created) | `chroma` ns, MinIO Deployment | permanent (PVC) | WAL fragments + compacted HNSW/SPANN index segments of the Vigil corpora |
 | 9b | **Distributed Chroma — catalog** | **Postgres 15** (`postgres.chroma:5432`, PVC 5 Gi) | `chroma` ns | permanent (PVC) | tenants/databases/collections/segment placement (SysDB), migrated by the chart's `sysdb-migration` Job |
-| 9c | **Vigil corpora** | collections `vigil_instruction_bypass` (8 800×384d) + `vigil_jailbreak` (104×384d), cosine space | inside Chroma (query nodes serve them; replicas stay stateless) | permanent via 9a | known injection/jailbreak prompts, HF `deadbits/*-all-MiniLM-L6-v2` |
+| 9c | **Vigil corpus** | collections `vigil_e5s_v1_whole` (41 164×384d) + `vigil_e5s_v1_sentence` (163 965×384d), cosine space, thresholds in their metadata | inside Chroma (query nodes serve them; replicas stay stateless) | rebuilt from the corpus image (sha256-pinned) | known injections and jailbreaks + our generated poisoned MCP texts (`hack/vigil-corpus/README.md`) |
 | 10 | LLM upstream keys | **Secret** `llm-provider-credentials` (etcd) | `mcp-evals` + mirrored `security-gateways` | permanent | decoded **only** by occludra containers; evaluator's copy only ever configures the dummy-key path |
 | 11 | NetBird identity | Secret `netbird-auth` + emptyDir `/var/lib/netbird` | sidecars/daemonset | emptyDir: pod lifetime (re-enroll on restart) | setup key, peer state, WireGuard keys |
 | 12 | OpenCode session store | files under `$XDG_DATA_HOME` | evaluator container `/tmp` emptyDir; workstation container fs | ephemeral | session transcripts/messages — deliberately throwaway |
@@ -685,7 +677,7 @@ tool_choice normalization → Authorization swapped to gateway key →
 `https://opencode.ai/zen/v1/responses` (SSE) → streamed back → CLI renders.
 The upstream sees: gateway IP, gateway key, scrubbed text, `tool_choice:"auto"`.
 
-**Workstation injection probe**: `curl $VIGIL/analyze` → NodePort 30500 →
+**Workstation injection probe**: `curl $VIGIL/analyze/prompt` → NodePort 30500 →
 scan by the enabled scanner set → verdict JSON.
 
 ---
@@ -729,9 +721,8 @@ password, customer+amount all `[REDACTED]` before the LLM; both
   commit 30d701a4) · component images https://hub.docker.com/u/chromadb
   (per-commit SHA tags) · architecture doc
   https://github.com/chroma-core/chroma/blob/main/docs/mintlify/reference/architecture/distributed.mdx
-- Vigil embedding corpora (all-MiniLM-L6-v2, 384-dim, pre-embedded):
-  https://huggingface.co/datasets/deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2 ·
-  https://huggingface.co/datasets/deadbits/vigil-jailbreak-all-MiniLM-L6-v2
+- Vigil corpus sources and licences: `hack/vigil-corpus/README.md`; embedder
+  https://huggingface.co/intfloat/multilingual-e5-small
 - MinIO: https://min.io (S3-compatible object storage; chroma pins the release
   by digest in `manifests/chroma/minio.yaml`)
 - OpenCode Zen: https://opencode.ai/zen/v1/models
