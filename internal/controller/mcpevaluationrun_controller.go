@@ -132,7 +132,12 @@ type ImageConfig struct {
 	// per-run NetworkPolicy whose only egress is DNS, the API server and the
 	// NetBird control/data planes. MESH_ENFORCE=false restores the legacy
 	// direct-to-provider mode (no sidecar, no per-run policy).
-	MeshEnforce          bool
+	MeshEnforce bool
+	// EvalPublicEgress (legacy mode only, EVAL_PUBLIC_EGRESS, default true)
+	// keeps TCP 443 to every public IP open during the evaluate phase. The
+	// target shares the Pod's network, so this is also the untrusted
+	// server's way out; false leaves DNS, the API server and the gateways.
+	EvalPublicEgress     bool
 	NetBirdImage         string
 	NetBirdManagementURL string
 	NetBirdSecretName    string
@@ -226,6 +231,7 @@ func ImageConfigFromEnv() ImageConfig {
 		ImagePullPolicy:      imagePullPolicyFromEnv(),
 
 		MeshEnforce:          meshEnforce,
+		EvalPublicEgress:     envFlag("EVAL_PUBLIC_EGRESS", true),
 		NetBirdImage:         envOr("NETBIRD_IMAGE", "netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f"),
 		NetBirdManagementURL: envOr("NETBIRD_MANAGEMENT_URL", "https://netbird.example.com:443"),
 		NetBirdSecretName:    envOr("NETBIRD_SECRET_NAME", "netbird-auth"),
@@ -1679,7 +1685,10 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 			egress = append(egress, netbirdRule)
 		}
 	} else {
-		egress = append(egress, gatewaysRule, public443Rule)
+		egress = append(egress, gatewaysRule)
+		if images.EvalPublicEgress {
+			egress = append(egress, public443Rule)
+		}
 	}
 
 	return &networkingv1.NetworkPolicy{
@@ -1688,7 +1697,7 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 			Namespace: run.Namespace,
 			Labels:    labels,
 			Annotations: map[string]string{
-				"security.eval.io/invariant": "evaluate-phase egress: DNS + API server + NetBird overlay (mesh) or gateways + public 443 (legacy)",
+				"security.eval.io/invariant": "evaluate-phase egress: DNS + API server + NetBird overlay (mesh) or gateways (+ public 443 unless EVAL_PUBLIC_EGRESS=false) (legacy)",
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{

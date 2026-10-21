@@ -247,6 +247,7 @@ func TestImageConfigEndpointDerivation(t *testing.T) {
 func TestBuildEvaluateNetworkPolicyLegacyMode(t *testing.T) {
 	images := meshImages()
 	images.MeshEnforce = false
+	images.EvalPublicEgress = true
 	run := testRun()
 	policy := buildEvaluateNetworkPolicy(run, images, []string{"172.21.0.2/32"})
 
@@ -565,5 +566,33 @@ func TestBuildJobUntrustedContainersDoNotShareTheEvaluatorHome(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestBuildEvaluateNetworkPolicyLegacyWithoutPublicEgress(t *testing.T) {
+	images := meshImages()
+	images.MeshEnforce = false
+	images.EvalPublicEgress = false
+	policy := buildEvaluateNetworkPolicy(testRun(), images, []string{"172.21.0.2/32"})
+	if len(policy.Spec.Egress) != 3 {
+		t.Fatalf("want DNS + API server + gateways, got %d rules", len(policy.Spec.Egress))
+	}
+	for _, rule := range policy.Spec.Egress {
+		for _, to := range rule.To {
+			if to.IPBlock != nil && to.IPBlock.CIDR == "0.0.0.0/0" {
+				t.Fatal("public egress rule present with EvalPublicEgress=false")
+			}
+		}
+	}
+}
+
+func TestEvalPublicEgressDefaultsOn(t *testing.T) {
+	t.Setenv("EVAL_PUBLIC_EGRESS", "")
+	if !ImageConfigFromEnv().EvalPublicEgress {
+		t.Fatal("EVAL_PUBLIC_EGRESS unset must keep today's behaviour (public 443 open)")
+	}
+	t.Setenv("EVAL_PUBLIC_EGRESS", "false")
+	if ImageConfigFromEnv().EvalPublicEgress {
+		t.Fatal("EVAL_PUBLIC_EGRESS=false ignored")
 	}
 }
