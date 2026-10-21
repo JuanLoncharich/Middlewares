@@ -32,6 +32,15 @@ type ModelSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	ModelID string `json:"modelID"`
+
+	// ContextTokens is the context window the model is SERVED with, for
+	// providers outside OpenCode's catalog (custom OpenAI-compatible ones:
+	// NVIDIA, a local llama-server). Unset: 128000. A local server started
+	// with a smaller window (-c) must say so, or the agent overflows it.
+	// Ignored for catalog providers, whose limits OpenCode knows.
+	// +kubebuilder:validation:Minimum=1024
+	// +optional
+	ContextTokens int32 `json:"contextTokens,omitempty"`
 }
 
 // AgentConfig holds execution tuning for an agent.

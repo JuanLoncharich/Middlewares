@@ -22,6 +22,10 @@
 #                      http://172.18.0.1:8080/v1 (kind: the `kind` docker network gateway).
 #                      Opens an egress rule Occludra -> exactly that IP/32 and port
 #                      (occludra-egress-local-llm); any other provider deletes the rule.
+#   LLM_CONTEXT_TOKENS context window the custom provider SERVES, declared to the agents as
+#                      spec.model.contextTokens (default: local -> 32768, hack/local-llm/llm's
+#                      CTX; nvidia -> unset = 128000). Must not exceed the server's per-slot
+#                      window (llama-server: -c / -np).
 #   LOCAL_LLM_API_KEY  local: optional, the server's --api-key; written ONLY into
 #                      security-gateways/llm-provider-credentials (UPSTREAM_API_KEY)
 #   OPENCODE_API_KEY   zen: written into Secret llm-provider-credentials in mcp-evals and
@@ -155,6 +159,7 @@ case "$LLM_PROVIDER" in
     LLM_UPSTREAM_BASE_URL="https://integrate.api.nvidia.com/v1" ;;
   local)
     LLM_PROVIDER_ID=local
+    LLM_CONTEXT_TOKENS="${LLM_CONTEXT_TOKENS:-32768}"
     : "${LLM_MODEL:?set LLM_MODEL (the model id the local server answers to)}"
     : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. http://172.18.0.1:8080/v1}"
     LLM_UPSTREAM_BASE_URL="$LOCAL_LLM_URL"
@@ -173,6 +178,12 @@ case "$LLM_PROVIDER" in
     fi ;;
   *) echo "LLM_PROVIDER must be zen, nvidia or local" >&2; exit 1 ;;
 esac
+LLM_CONTEXT_TOKENS="${LLM_CONTEXT_TOKENS:-}"
+if [ -n "$LLM_CONTEXT_TOKENS" ]; then
+  [[ "$LLM_CONTEXT_TOKENS" =~ ^[0-9]+$ ]] && [ "$LLM_CONTEXT_TOKENS" -ge 1024 ] \
+    || { echo "LLM_CONTEXT_TOKENS must be an integer >= 1024, got '$LLM_CONTEXT_TOKENS'" >&2; exit 1; }
+  [ "$LLM_PROVIDER" != zen ] || echo "WARNING: LLM_CONTEXT_TOKENS is ignored for zen (catalog models)" >&2
+fi
 # Check the key up front, before anything is applied to the cluster.
 if [ "$SKIP_SECRET" != "1" ]; then
   if [ "$LLM_PROVIDER" = nvidia ]; then
@@ -257,7 +268,8 @@ log "Applying evaluation namespace, NetworkPolicies, agent personas and sample M
 render_personas() {
   # Quote-agnostic: kustomize re-emits the YAML without the source's quotes.
   sed -e "s|providerID: \"\\?opencode\"\\?\$|providerID: \"$LLM_PROVIDER_ID\"|" \
-      -e "s|modelID: \"\\?muse-spark-1.3-contributor-free\"\\?\$|modelID: \"$LLM_MODEL\"|"
+      -e "s|modelID: \"\\?muse-spark-1.3-contributor-free\"\\?\$|modelID: \"$LLM_MODEL\"|" \
+      ${LLM_CONTEXT_TOKENS:+-e "s|^\\( *\\)modelID: .*\$|&\\n\\1contextTokens: $LLM_CONTEXT_TOKENS|"}
 }
 kubectl kustomize config/samples | render_personas | kubectl apply -f -
 kubectl apply -f config/rbac/runner_role.yaml

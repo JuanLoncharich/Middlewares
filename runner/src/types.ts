@@ -31,6 +31,8 @@ export interface JsonSchema {
 export interface OpenCodeAgentModel {
   providerID: string;
   modelID: string;
+  /** Served context window for custom providers (spec.model.contextTokens). */
+  contextTokens?: number;
 }
 
 export interface OpenCodeAgentConfig {
@@ -741,6 +743,10 @@ export function assertOpenCodeAgent(obj: unknown): OpenCodeAgent {
   if (!isRecord(model) || !isNonEmptyString(model["providerID"]) || !isNonEmptyString(model["modelID"])) {
     throw new ConfigurationError(`OpenCodeAgent ${name}: spec.model.providerID and spec.model.modelID are required`);
   }
+  const contextTokens = model["contextTokens"];
+  if (contextTokens !== undefined && (!isFiniteNumber(contextTokens) || contextTokens < 1024)) {
+    throw new ConfigurationError(`OpenCodeAgent ${name}: spec.model.contextTokens must be a number >= 1024`);
+  }
   if (!isNonEmptyString(spec["systemPrompt"])) {
     throw new ConfigurationError(`OpenCodeAgent ${name}: spec.systemPrompt is required`);
   }
@@ -780,7 +786,11 @@ export function assertOpenCodeAgent(obj: unknown): OpenCodeAgent {
     },
     spec: {
       role: spec["role"],
-      model: { providerID: model["providerID"], modelID: model["modelID"] },
+      model: {
+        providerID: model["providerID"],
+        modelID: model["modelID"],
+        ...(contextTokens !== undefined ? { contextTokens: Math.floor(contextTokens) } : {}),
+      },
       config,
       systemPrompt: spec["systemPrompt"],
       outputFormat: { type: "json_schema", schema: outputFormat["schema"] },

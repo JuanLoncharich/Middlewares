@@ -62,6 +62,9 @@ for a in agents:
     m = a["spec"]["model"]
     if (m["providerID"], m["modelID"]) != (provider_id, model):
         fail.append(f"{a['metadata']['name']}: model {m} != {provider_id}/{model}")
+    want_ctx = 32768 if provider == "local" else None   # local: hack/local-llm/llm's CTX
+    if m.get("contextTokens") != want_ctx:
+        fail.append(f"{a['metadata']['name']}: contextTokens {m.get('contextTokens')!r} != {want_ctx!r}")
 occ = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"] == "occludra"]
 env = {e["name"]: e.get("value") for e in occ[0]["spec"]["template"]["spec"]["containers"][0]["env"]} if occ else {}
 if env.get("OCCLUDRA_UPSTREAM_BASE_URL") != upstream:
@@ -139,6 +142,8 @@ elif ! grep -q "not a hostname" "$WORK/host.log"; then echo "  FAIL: hostname re
 elif run_deploy "$WORK/nourl" LLM_PROVIDER=local LLM_MODEL=m; then echo "  FAIL: missing LOCAL_LLM_URL accepted"; rc=1
 elif run_deploy "$WORK/nomodel" LLM_PROVIDER=local LOCAL_LLM_URL=http://172.18.0.1:8080/v1; then
   echo "  FAIL: missing LLM_MODEL accepted"; rc=1
+elif run_deploy "$WORK/ctx" LLM_PROVIDER=local LOCAL_LLM_URL=http://172.18.0.1:8080/v1 LLM_MODEL=m LLM_CONTEXT_TOKENS=32k; then
+  echo "  FAIL: LLM_CONTEXT_TOKENS=32k accepted"; rc=1
 else echo "  ok"; fi
 
 [ "$rc" = 0 ] && echo "PASS" || { echo "FAILED"; for f in "$WORK"/*.log; do echo "--- $f"; tail -5 "$f"; done; }

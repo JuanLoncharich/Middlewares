@@ -50,6 +50,7 @@ import { runFuzz, renderFuzzMarkdown } from "./fuzz.js";
 import { runProbes, renderProbeMarkdown } from "./probes.js";
 import { collectStaticEvidence, renderStaticMarkdown } from "./static.js";
 import { createMeshFetch, startMeshProxyBridge, waitForSocks5Proxy, type MeshBridge, type MeshFetch } from "./meshhttp.js";
+import { customModelLimit } from "./providers.js";
 import { DEFAULT_TRANSFORMER_THRESHOLD, excerptOf, VigilClient, type VigilScannerHit, type VigilVerdict } from "./vigil.js";
 import {
   fuzzSegments,
@@ -243,8 +244,6 @@ interface OpencodeHandle {
 
 /** Providers OpenCode already knows (catalog entries); everything else is a custom OpenAI-compatible endpoint. */
 const CATALOG_PROVIDERS = new Set(["opencode", "anthropic"]);
-const CUSTOM_MODEL_CONTEXT = 128_000;
-const CUSTOM_MODEL_OUTPUT = 8_192;
 function isCustomProvider(providerID: string): boolean {
   return !CATALOG_PROVIDERS.has(providerID);
 }
@@ -281,7 +280,7 @@ async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEn
               [agent.spec.model.modelID]: {
                 name: agent.spec.model.modelID,
                 tool_call: false,
-                limit: { context: CUSTOM_MODEL_CONTEXT, output: CUSTOM_MODEL_OUTPUT },
+                limit: customModelLimit(agent.spec.model.contextTokens),
               },
             },
           }

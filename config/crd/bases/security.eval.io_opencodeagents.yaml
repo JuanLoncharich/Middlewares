@@ -61,6 +61,10 @@ spec:
               model:
                 description: Model selects the provider/model the agent runs on.
                 properties:
+                  contextTokens:
+                    format: int32
+                    minimum: 1024
+                    type: integer
                   modelID:
                     minLength: 1
                     type: string
