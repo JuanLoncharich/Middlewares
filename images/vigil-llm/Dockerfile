@@ -26,7 +26,9 @@
 #     truthy and auto-update was always on — parse it as a boolean;
 #  9. one SentenceTransformer per process (the Embedder reuses the vector
 #     client's), so the multilingual-e5-small embedder is loaded once;
-# 10. no Flask reloader: it loaded every model a second time in a child.
+# 10. no Flask reloader: it loaded every model a second time in a child;
+# 11. the e5 embedder is baked in at a pinned revision (only the files it
+#     loads), instead of a 2.2 GB repository download at every boot.
 # Runtime notes for the manifests: start the server directly (skip upstream's
 # entrypoint dataset loader: its 1536-dim ada-002 vectors never match the
 # 384-dim MiniLM embedder, and re-streaming them took ~6 min per start) and
@@ -146,6 +148,20 @@ RUN sed -i 's/^                self.model = SentenceTransformer(model)$/        
 # never edits its own code; the reloader only cost memory.
 RUN sed -i "s/^    app.run(host='0.0.0.0', use_reloader=True)$/    app.run(host='0.0.0.0', use_reloader=False)/" vigil-server.py \
  && grep -q "use_reloader=False" vigil-server.py
+
+# Patch 11 — the embedder ships in the image, pinned. sentence-transformers
+# 2.2.2 downloads a model's WHOLE repository at every boot: 2.2 GB for
+# multilingual-e5-small (ONNX and OpenVINO exports included), more than the
+# pod's 2Gi tmp volume and slower than its startup probe (measured in kind).
+# Only the files it loads (~480 MB), at the revision the corpus was built
+# with; remote_vectordb.load_model picks /app/models/<org>_<name> up. The
+# corpus's embedding probe still checks the result at the first scan.
+ARG E5_MODEL=intfloat/multilingual-e5-small
+ARG E5_REVISION=614241f622f53c4eeff9890bdc4f31cfecc418b3
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('${E5_MODEL}', revision='${E5_REVISION}', local_dir='/app/models/$(echo ${E5_MODEL} | tr / _)', local_dir_use_symlinks=False, allow_patterns=['modules.json', 'config.json', 'config_sentence_transformers.json', 'sentence_bert_config.json', '1_Pooling/*', 'model.safetensors', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'sentencepiece.bpe.model'])" \
+ && test -f /app/models/intfloat_multilingual-e5-small/modules.json \
+ && test -f /app/models/intfloat_multilingual-e5-small/model.safetensors \
+ && rm -rf /app/models/*/.cache && du -sh /app/models
 
 ENV HF_HOME=/cache/hf \
     SENTENCE_TRANSFORMERS_HOME=/cache/st \

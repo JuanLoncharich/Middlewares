@@ -87,8 +87,11 @@ class Embedder:
         import torch
         from sentence_transformers import SentenceTransformer
 
+        from remote_vectordb import MODELS_DIR
+
         self.torch = torch
-        self.st = SentenceTransformer(model, device=device)
+        baked = os.path.join(MODELS_DIR, model.replace("/", "_"))   # inside the Vigil image
+        self.st = SentenceTransformer(baked if os.path.isfile(os.path.join(baked, "modules.json")) else model, device=device)
         self.prefix = prefix
         self.dim = self.st.get_sentence_embedding_dimension()
 

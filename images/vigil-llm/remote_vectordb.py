@@ -86,11 +86,25 @@ def sentences(text: str) -> List[str]:
     return out
 
 
+# Embedders baked into the image (Dockerfile patch 11), one directory per
+# model named like sentence-transformers' cache ("org/name" -> "org_name").
+MODELS_DIR = os.environ.get("VIGIL_MODELS_DIR", "/app/models")
+
+
 @functools.lru_cache(maxsize=None)
 def load_model(name: str):
-    """One SentenceTransformer per process: Vigil's Embedder shares it (Dockerfile patch)."""
+    """One SentenceTransformer per process: Vigil's Embedder shares it (Dockerfile patch 9).
+
+    A copy baked into the image is used when present: sentence-transformers
+    2.2.2 would otherwise download the model's whole repository at every boot
+    (2.2 GB for multilingual-e5-small, ONNX and OpenVINO exports included).
+    """
     from sentence_transformers import SentenceTransformer
 
+    baked = os.path.join(MODELS_DIR, name.replace("/", "_"))
+    if os.path.isfile(os.path.join(baked, "modules.json")):
+        logger.success(f"Embedder {name} from the image ({baked})")
+        return SentenceTransformer(baked)
     return SentenceTransformer(name)
 
 
