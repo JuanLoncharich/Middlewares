@@ -36,7 +36,9 @@ done
   || { echo "gpu-node.conf: NODES_LAN and NODES_ZT must be non-empty and the same length" >&2; exit 1; }
 
 KC=(kubectl --context "$KUBE_CONTEXT")
-SLICE=k0s-gpu.slice
+# No dash in the name: systemd nests "a-b.slice" under "a.slice", and the
+# kubelet's --cgroup-root must then name the nested path.
+SLICE=k0sgpu.slice
 UNIT=k0s-gpu-worker.service
 FW_COMMENT_ZT="gpu-node vxlan zt"
 FW_COMMENT_LAN="gpu-node vxlan node-lan"
@@ -70,7 +72,7 @@ preflight() {
     chk "ping node ${NODES_ZT[$i]} over ZeroTier"           "ping -c1 -W2 ${NODES_ZT[$i]}"
   done
   chk "k0s binary installed (/usr/local/bin/k0s)"           'test -x /usr/local/bin/k0s'
-  chk "systemd unit + slice installed"                      'systemctl cat '"$UNIT"' '"$SLICE"
+  chk "systemd unit installed (up writes the slice)"        'systemctl cat '"$UNIT"
   chk "unit is NOT enabled at boot"                         '[ "$(systemctl is-enabled '"$UNIT"' 2>/dev/null)" != enabled ]'
   chk "no leftover Node object $NODE_NAME"                  '! node_exists'
   return $fail
@@ -119,10 +121,11 @@ render_units() {
 
 render_service() {   # needs the ZeroTier address, so done at `up`
   local ip="${1:-127.0.0.1}" args
-  args="$(sudo cat /etc/k0s/gpu-node/kubelet-args | sed "s|__NODE_IP__|$ip|")"
+  # The cgroup root always follows SLICE, also for args saved by an older install.
+  args="$(sudo cat /etc/k0s/gpu-node/kubelet-args | sed -e "s|__NODE_IP__|$ip|" -e "s|--cgroup-root=/[^ ]*|--cgroup-root=/$SLICE|")"
   sed -e "s|__TOKEN_FILE__|$TOKEN_FILE|" -e "s|__NODE_LABEL__|$NODE_LABEL|" \
-      -e "s|__NODE_TAINT__|$NODE_TAINT|" -e "s|__KUBELET_ARGS__|$args|" \
-      /etc/k0s/gpu-node/worker.service.tmpl | sudo tee /etc/systemd/system/$UNIT >/dev/null
+      -e "s|__NODE_TAINT__|$NODE_TAINT|" -e "s|__KUBELET_ARGS__|$args|" -e "s|__SLICE__|$SLICE|" \
+      "$HERE/systemd/k0s-gpu-worker.service.tmpl" | sudo tee /etc/systemd/system/$UNIT >/dev/null
   sudo systemctl daemon-reload
 }
 
@@ -192,6 +195,7 @@ up() {
   local ip; ip="$(zt_ip)"
   trap 'warn "up failed — rolling back"; down_cmd || true' ERR
   net_up
+  render_units
   render_service "$ip"
   log "starting $UNIT (limits: ${CPU_CORES} cores, ${MEM_LIMIT_GIB} GiB RAM, VRAM soft cap $((VRAM_LIMIT_BYTES/1024/1024/1024)) GiB)"
   sudo systemctl start "$UNIT"

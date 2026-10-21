@@ -90,11 +90,11 @@ DIRECT. Two things make VXLAN work across it, both verified with UDP/4789 tests:
 
 | Resource | Limit | How it is enforced |
 |---|---|---|
-| CPU | 4 cores | `CPUQuota=400%` on `k0s-gpu.slice`; kubelet `--system-reserved` so the scheduler sees 4 |
+| CPU | 4 cores | `CPUQuota=400%` on `k0sgpu.slice`; kubelet `--system-reserved` so the scheduler sees 4 |
 | RAM | **6 GiB** (was 4) | `MemoryMax=6G` (+`MemoryHigh`, swap off) on the slice; kubelet sees ~5 GiB allocatable. The full GPU Vigil measured ~3.4 GiB host RAM + ~1 GiB for k0s, so 4 GiB cannot hold it |
 | VRAM | 8 GiB budget — **not enforced** | Full GPU Vigil measured ~1.8 GiB. No hard per-container VRAM limit exists on consumer NVIDIA GPUs, and vigil-llm (torch) sets no cap of its own; `VRAM_LIMIT_BYTES` is only reported |
 
-The kubelet runs with `--cgroup-root=/k0s-gpu.slice`, so pods fall under the
+The kubelet runs with `--cgroup-root=/k0sgpu.slice`, so pods fall under the
 same limits as k0s itself.
 
 ## Order of operations

@@ -6,7 +6,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Slice=k0s-gpu.slice
+Slice=__SLICE__
 # runc must be on PATH: nvidia-container-runtime wraps the runc that k0s ships.
 Environment=PATH=/var/lib/k0s/bin:/usr/local/sbin:/usr/local/bin:/usr/bin
 ExecStart=/usr/local/bin/k0s worker \
