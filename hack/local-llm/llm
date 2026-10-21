@@ -25,6 +25,10 @@
 #   LLM_IP        fixed IP on the docker network (default 172.18.0.250)
 #   PORT          (default 8080)
 #   DOCKER_NET    (default kind)
+#   PUBLISH       a host IPv4 to publish the port on instead of joining DOCKER_NET, for a
+#                 cluster that reaches this machine over an overlay (k0s over ZeroTier:
+#                 PUBLISH=<this PC's ZeroTier IP>). Only that address listens; set
+#                 LOCAL_LLM_API_KEY, since every peer on that network can reach it.
 #   IMAGE         llama.cpp server image (default: server-cuda build 11610, pinned by digest)
 set -euo pipefail
 
@@ -33,6 +37,8 @@ IMAGE="${IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:b0baccbe2e00b5d74e63f85f9f023c
 LLM_IP="${LLM_IP:-172.18.0.250}"
 PORT="${PORT:-8080}"
 DOCKER_NET="${DOCKER_NET:-kind}"
+PUBLISH="${PUBLISH:-}"
+[ -z "$PUBLISH" ] || LLM_IP="$PUBLISH"
 CTX="${CTX:-32768}"
 NGL="${NGL:-999}"
 N_CPU_MOE="${N_CPU_MOE:-0}"
@@ -49,17 +55,24 @@ up() {
   local dir file alias
   dir="$(cd "$(dirname "$MODEL")" && pwd)"; file="$(basename "$MODEL")"
   alias="${MODEL_ALIAS:-${file%.gguf}}"
-  docker network inspect "$DOCKER_NET" >/dev/null 2>&1 \
-    || die "docker network '$DOCKER_NET' not found (create the kind cluster first: test/kind/create-cluster.sh)"
+  local net_args
+  if [ -n "$PUBLISH" ]; then
+    ip -4 -o addr | grep -q " $PUBLISH/" || die "PUBLISH=$PUBLISH is not an address of this machine"
+    net_args=(-p "$PUBLISH:$PORT:$PORT")
+  else
+    docker network inspect "$DOCKER_NET" >/dev/null 2>&1 \
+      || die "docker network '$DOCKER_NET' not found (create the kind cluster first: test/kind/create-cluster.sh)"
+    net_args=(--network "$DOCKER_NET" --ip "$LLM_IP")
+  fi
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   local env_args=()
   if [ -n "${LOCAL_LLM_API_KEY:-}" ]; then
     env_args=(-e LLAMA_API_KEY)   # value taken from this environment
   else
-    echo "llm: LOCAL_LLM_API_KEY not set — the server accepts any client on $DOCKER_NET" >&2
+    echo "llm: LOCAL_LLM_API_KEY not set — the server accepts any client that reaches $LLM_IP" >&2
   fi
   LLAMA_API_KEY="${LOCAL_LLM_API_KEY:-}" docker run -d --name "$NAME" \
-    --gpus all --network "$DOCKER_NET" --ip "$LLM_IP" \
+    --gpus all "${net_args[@]}" \
     -v "$dir:/models:ro" "${env_args[@]}" \
     "$IMAGE" \
     -m "/models/$file" --alias "$alias" \

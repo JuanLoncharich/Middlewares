@@ -1,7 +1,15 @@
 # Container images. Pull requests build them (no push); pushes to main and
-# v* tags push them to GHCR under the repository owner, tagged with the
-# commit (sha-<7>) and, for tags, the tag name. Never :latest. Images are
-# not signed (cosign is a separate decision).
+# v* tags push them to Docker Hub (docker.io/<DOCKERHUB_USERNAME>, public),
+# tagged with the commit (sha-<7>) and, for tags, the tag name. Never
+# :latest. Images are not signed (cosign is a separate decision).
+#
+# After a push to main, the `render` job re-renders deploy/k0s/generated with
+# the new tag and commits it; Flux in the cluster applies that commit
+# (deploy/README.md).
+#
+# Needs the repository secret DOCKERHUB_TOKEN (a Docker Hub access token with
+# read/write) and, unless the account is jjhonson, the variable
+# DOCKERHUB_USERNAME.
 #
 # Not built here: the GPU Vigil (12 GB, hack/gpu-node/build-vigil-gpu.sh) and
 # the corpus image (its data file is built locally, hack/vigil-corpus/).
@@ -31,7 +39,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +66,9 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Image name
         id: name
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'jjhonson' }}
+        run: echo "image=docker.io/${DOCKERHUB_USERNAME}/${{ matrix.name }}" >> "$GITHUB_OUTPUT"
       - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: meta
         with:
@@ -71,9 +80,9 @@ jobs:
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         if: github.event_name != 'pull_request'
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME || 'jjhonson' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context }}
@@ -85,3 +94,31 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  render:
+    name: render deploy/k0s
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Render with the images just pushed
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'jjhonson' }}
+        run: |
+          pip install --quiet pyyaml==6.0.2
+          sed -i "s|^IMG_REGISTRY=.*|IMG_REGISTRY=docker.io/${DOCKERHUB_USERNAME}|" deploy/k0s/render.env
+          sed -i "s|^IMG_TAG=.*|IMG_TAG=sha-${GITHUB_SHA::7}|" deploy/k0s/render.env
+          hack/gitops/render.sh deploy/k0s
+      - name: Commit if anything changed
+        run: |
+          git add deploy/k0s
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "deploy/k0s: images sha-${GITHUB_SHA::7}"
+          # Pushes made with GITHUB_TOKEN start no workflow, so this cannot loop.
+          git pull --rebase origin main
+          git push origin HEAD:main
