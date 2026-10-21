@@ -41,6 +41,11 @@ KC=(kubectl --context "$KUBE_CONTEXT")
 SLICE=k0sgpu.slice
 UNIT=k0s-gpu-worker.service
 FW_COMMENT_ZT="gpu-node vxlan zt"
+# Path MTU to a node's LAN address through its ZeroTier peer, measured with
+# ping -M do: 1200 passes, 1228 is lost. With the interface's 2800 every TLS
+# handshake to the API server stalled for 4-7 s on lost large packets, and
+# the konnectivity agent (kubectl logs/exec) never connected.
+ROUTE_MTU="${ROUTE_MTU:-1200}"
 FW_COMMENT_LAN="gpu-node vxlan node-lan"
 
 log()  { printf '\033[1;34m[gpu-node]\033[0m %s\n' "$*"; }
@@ -164,7 +169,7 @@ net_up() {
   sudo ufw allow in on "$ZT_IFACE" from "$NODE_LAN_SUBNET" to any port 4789 proto udp comment "$FW_COMMENT_LAN" >/dev/null
   log "routes: node LAN addresses via ZeroTier (VXLAN return path)"
   for i in "${!NODES_LAN[@]}"; do
-    sudo ip route replace "${NODES_LAN[$i]}/32" via "${NODES_ZT[$i]}" dev "$ZT_IFACE"
+    sudo ip route replace "${NODES_LAN[$i]}/32" via "${NODES_ZT[$i]}" dev "$ZT_IFACE" mtu "$ROUTE_MTU"
   done
 }
 
