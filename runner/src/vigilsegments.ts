@@ -77,14 +77,17 @@ export function surfaceSegments(surface: AdvertisedSurface): ScanSegment[] {
   return out;
 }
 
-/** Gate 2: what the server answered to fuzz cases (our own case texts are not scanned). */
+/**
+ * Gate 2: what the server answered to fuzz cases (our own case texts are not
+ * scanned). Every case's response excerpt reaches the fuzz persona's prompt
+ * ("## All fuzz cases"), successful ones included, so all are scanned.
+ */
 export function fuzzSegments(fuzz: FuzzReport): ScanSegment[] {
   const out: ScanSegment[] = [];
   for (const n of fuzz.notableResponses) {
     push(out, `fuzz ${n.caseId} (${n.tool}): notable response`, n.excerpt);
   }
   for (const c of fuzz.cases) {
-    if (c.errorClass === "ok") continue;
     push(out, `fuzz ${c.caseId} (${c.tool}): error message`, c.errorMessage);
     push(out, `fuzz ${c.caseId} (${c.tool}): response`, c.responseExcerpt);
   }

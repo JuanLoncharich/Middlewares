@@ -3,7 +3,7 @@ import { startTelemetry, stopTelemetry, evaluationTrace, inSpan, requestTraceHea
  * Evaluator container entrypoint.
  *
  * Orchestrates the four-pass OpenCode evaluation of an MCP server:
- *   1. static   – SAST over /workspace (agent gets read-only file tools)
+ *   1. static   – SAST over /workspace (evidence pre-collected with file:line context; no tools)
  *   2. dynamic  – live JSON-RPC enumeration + schema/protocol fuzzing
  *   3. adversarial – rogue-behaviour / prompt-injection / SSRF probes
  *   4. synthesis – aggregate scoring, risk category, remediation plan
@@ -250,8 +250,8 @@ function isCustomProvider(providerID: string): boolean {
 
 async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEnv, signal: AbortSignal): Promise<OpencodeHandle> {
   const modelRef = `${agent.spec.model.providerID}/${agent.spec.model.modelID}`;
-  // Agents must never mutate /workspace or reach the network via tools: the
-  // static auditor gets read-only file tools, every other persona gets none.
+  // Agents must never mutate /workspace or reach the network via tools:
+  // every persona runs with every tool denied (toolsForKind below).
   const permission: NonNullable<Config["permission"]> = "deny";
   const config: Config = {
     model: modelRef,
@@ -365,7 +365,7 @@ function extractJsonFromTextParts(parts: Array<{ type: string; text?: string }>)
 // a `tool_choice` that several providers (incl. OpenCode Zen free tier) reject
 // with 400 the moment OTHER tools are also advertised, and the evaluation
 // evidence is pre-collected with file:line context anyway. See README.
-function toolsForKind(kind: AgentKind, freeTierGate: boolean): Record<string, boolean> {
+function toolsForKind(freeTierGate: boolean): Record<string, boolean> {
   // OpenCode Zen's free-tier gate rejects /responses bodies that carry no
   // tool definitions named bash+read ("free tier can only be used from
   // within OpenCode"). Advertising the minimum pair satisfies the gate
@@ -376,9 +376,6 @@ function toolsForKind(kind: AgentKind, freeTierGate: boolean): Record<string, bo
   // NIM) get NO tools: models there otherwise loop calling the denied tools
   // and the prompt never returns (measured with z-ai/glm-5.3).
   const gate = freeTierGate ? { bash: true, read: true } : { bash: false, read: false };
-  if (kind === "static") {
-    return { ...gate, edit: false, write: false, patch: false, glob: false, grep: false, list: false, webfetch: false, websearch: false, task: false, todowrite: false, skill: false };
-  }
   return {
     ...gate,
     edit: false,
@@ -456,7 +453,7 @@ async function runAgentPrompt(
       directory,
       model: { providerID: agent.spec.model.providerID, modelID: agent.spec.model.modelID },
       system: agent.spec.systemPrompt,
-      tools: toolsForKind(kind, !isCustomProvider(agent.spec.model.providerID)),
+      tools: toolsForKind(!isCustomProvider(agent.spec.model.providerID)),
       format: { type: "json_schema", schema: agent.spec.outputFormat.schema, retryCount },
       parts: [{ type: "text", text: contractedMessage }],
     });
@@ -524,7 +521,7 @@ function buildStaticMessage(server: MCPServer, evidence: StaticEvidence, env: Ru
     ``,
     renderStaticMarkdown(evidence, env.workspaceDir),
     ``,
-    `Use your read-only file tools on ${env.workspaceDir} to confirm every hit before reporting it.`,
+    `You have no tools: judge every hit from the excerpts above, and report only what they show.`,
     `Produce the JSON report now.`,
   ].join("\n");
 }
