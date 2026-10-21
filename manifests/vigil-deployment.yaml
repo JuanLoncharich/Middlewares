@@ -45,7 +45,7 @@
 # VECTOR DB: the vectordb scanner queries the distributed Chroma cluster
 # (manifests/chroma/ — coordinator, log service, compactors, query nodes over
 # MinIO) through the image's REST v2 client (images/vigil-llm/
-# remote_vectordb.py), collections vigil_e5s_v2_whole / _sentence / _benign
+# remote_vectordb.py), collections vigil_e5s_v3_whole / _sentence / _benign
 # (our calibrated corpus, hack/vigil-corpus/) loaded by the vigil-corpus-loader Job. Upstream's local on-disk ChromaDB is
 # not used. NetworkPolicy vigil-to-chroma (below) opens that one path.
 apiVersion: v1
@@ -83,13 +83,13 @@ data:
     token_env = CHROMA_TOKEN
     tenant = default_tenant
     database = default_database
-    # Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json):
+    # Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json):
     # whole texts vs the whole chunk, single sentences vs each sentence of
     # it, each collection with its own calibrated threshold (metadata); a hit
     # must also be closer than the nearest benign tool/MCP-server text.
-    collections = vigil_e5s_v2_whole
-    sentence_collections = vigil_e5s_v2_sentence
-    benign_collections = vigil_e5s_v2_benign
+    collections = vigil_e5s_v3_whole
+    sentence_collections = vigil_e5s_v3_sentence
+    benign_collections = vigil_e5s_v3_benign
     timeout_s = 5
     n_results = 5
     # Upstream's local-database keys; unused while chroma_url is set.

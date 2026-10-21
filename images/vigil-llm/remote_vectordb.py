@@ -23,6 +23,16 @@ text to a fixed false-positive rate. A query is "hybrid":
     a short benign tool that shares words with a short attack does not
     count. Only hits are returned, so [scanner:vectordb] threshold must not
     filter again (server.conf sets it to 2.0, above any cosine distance).
+  - optionally a trained HEAD (corpus e5s-v3 on): a logistic regression on
+    the same embeddings, stored in the whole collection's metadata
+    (vigil_head_w, vigil_head_b, vigil_head_threshold). Each window (the
+    whole text when it has >= 3 words, and each sentence) whose score
+    w.x + b exceeds the threshold is a hit of kind "head". It catches
+    attacks that are not near any corpus entry; the corpus build calibrated
+    kNN and head together to one false-positive budget. A head hit reports
+    distance = 1 / (1 + e^score), the model's probability that the window is
+    benign, so like a distance smaller means more suspicious. No extra
+    Chroma call: the vectors are the ones already computed.
   Before the first query the client checks that its embedder reproduces the
   corpus: model name equal, and the embedding of the corpus's probe text
   within 0.01 of the recorded one (a different model revision, library
@@ -53,6 +63,7 @@ Stdlib HTTP only (urllib), like the corpus loader.
 
 import functools
 import json
+import math
 import os
 import re
 import threading
@@ -147,6 +158,7 @@ class RemoteVectorDB:
         self._ids: Dict[str, str] = {}
         self._meta: Dict[str, dict] = {}
         self._mode: Optional[str] = None  # "calibrated" | "legacy", decided on first use
+        self._head: Optional[tuple] = None  # (weights, bias, threshold) when the corpus carries one
         self._lock = threading.Lock()
         token = os.environ.get(token_env, "")
         self._auth = {"Authorization": f"Bearer {token}"} if token else {}
@@ -200,12 +212,25 @@ class RemoteVectorDB:
         hits = []
         # Like sentences, a whole text needs MIN_SENTENCE_WORDS words to be
         # evidence: two-word texts ("no response") sit near short attacks.
-        whole_collections = self.collections if len(text.split()) >= MIN_SENTENCE_WORDS else []
+        whole_ok = len(text.split()) >= MIN_SENTENCE_WORDS
+        whole_collections = self.collections if whole_ok else []
+        if self._head is not None:
+            w, b, thr = self._head
+            windows = ([(0, text, "whole")] if whole_ok else []) + [(i, s, "sentence") for i, s in enumerate(sents, start=1)]
+            for i, window, kind in windows:
+                score = sum(x * y for x, y in zip(w, vectors[i])) + b
+                if score > thr:
+                    # Rank like the kNN hits (smaller is stronger): 1 at the threshold.
+                    rank = math.exp(thr - score)
+                    hits.append((1.0 / (1.0 + math.exp(score)), window,
+                                 {"collection": "head", "kind": f"head:{kind}", "score": round(score, 4),
+                                  "threshold": thr, "rank": rank}))
         for name in whole_collections:
             thr = self._meta[name]["vigil_threshold"]
             for doc, meta, dist in self._nearest(name, vectors[:1], self.n_results)[0]:
                 if dist < thr and dist < benign[0]:
-                    hits.append((dist, doc, {**meta, "threshold": thr, "kind": "whole", "benign_distance": benign[0]}))
+                    hits.append((dist, doc, {**meta, "threshold": thr, "kind": "whole", "benign_distance": benign[0],
+                                             "rank": dist / thr}))
         if sents:
             for name in self.sentence_collections:
                 thr = self._meta[name]["vigil_threshold"]
@@ -213,9 +238,10 @@ class RemoteVectorDB:
                     for doc, meta, dist in row:
                         if dist < thr and dist < benign[i]:
                             hits.append((dist, doc, {**meta, "threshold": thr, "kind": "sentence",
-                                                     "input_sentence": sent, "benign_distance": benign[i]}))
-        # Closest relative to its own threshold first; one hit per corpus text.
-        hits.sort(key=lambda h: h[0] / h[2]["threshold"])
+                                                     "input_sentence": sent, "benign_distance": benign[i],
+                                                     "rank": dist / thr}))
+        # Strongest relative to its own threshold first; one hit per corpus text.
+        hits.sort(key=lambda h: h[2]["rank"])
         seen, out = set(), []
         for h in hits:
             if h[1] not in seen:
@@ -257,11 +283,31 @@ class RemoteVectorDB:
                 raise RemoteVectorDBError(f"collections disagree on the text prefix: {sorted(prefixes)}")
             self._prefix = prefixes.pop()
             self._check_probe(names)
+            self._head = self._load_head(self._meta[self.collections[0]])
             self._mode = "calibrated"
             logger.success(
                 "Remote vector db: calibrated hybrid mode, thresholds "
                 + ", ".join(f"{n}={self._meta[n]['vigil_threshold']:.4f}" for n in self.collections + self.sentence_collections)
-                + (f"; two-sided against {self.benign_collections}" if self.benign_collections else "; one-sided"))
+                + (f"; two-sided against {self.benign_collections}" if self.benign_collections else "; one-sided")
+                + (f"; trained head threshold {self._head[2]:.4f}" if self._head else "; no trained head"))
+
+    def _load_head(self, m: dict) -> Optional[tuple]:
+        """The trained head from the whole collection's metadata, or None when the corpus has none."""
+        keys = ("vigil_head_w", "vigil_head_b", "vigil_head_threshold")
+        present = [k for k in keys if k in m]
+        if not present:
+            return None
+        if len(present) != len(keys):
+            raise RemoteVectorDBError(f"incomplete trained head in {self.collections[0]!r}: only {present}")
+        try:
+            w = [float(x) for x in json.loads(m["vigil_head_w"])]
+            b, thr = float(m["vigil_head_b"]), float(m["vigil_head_threshold"])
+        except (TypeError, ValueError) as err:
+            raise RemoteVectorDBError(f"unusable trained head in {self.collections[0]!r}") from err
+        dim = len(self.embed([self._prefix + "dimension check"])[0])
+        if len(w) != dim:
+            raise RemoteVectorDBError(f"trained head has {len(w)} weights, the embedder gives {dim} dimensions")
+        return w, b, thr
 
     def _check_probe(self, names: List[str]) -> None:
         m = self._meta[names[0]]

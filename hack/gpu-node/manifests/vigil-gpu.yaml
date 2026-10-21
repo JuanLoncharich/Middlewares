@@ -46,13 +46,13 @@ data:
     token_env = CHROMA_TOKEN
     tenant = default_tenant
     database = default_database
-    # Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json):
+    # Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json):
     # whole texts vs the whole chunk, single sentences vs each sentence of
     # it, each collection with its own calibrated threshold (metadata); a hit
     # must also be closer than the nearest benign tool/MCP-server text.
-    collections = vigil_e5s_v2_whole
-    sentence_collections = vigil_e5s_v2_sentence
-    benign_collections = vigil_e5s_v2_benign
+    collections = vigil_e5s_v3_whole
+    sentence_collections = vigil_e5s_v3_sentence
+    benign_collections = vigil_e5s_v3_benign
     timeout_s = 5
     n_results = 5
     # Same corpus as the CPU Vigil. When this pod runs on the PC through Liqo

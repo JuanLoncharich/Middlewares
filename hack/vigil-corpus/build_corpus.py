@@ -22,12 +22,20 @@ What it does, in the order Vigil will later see things:
     every benign entry, so a short benign tool ("reverse: Reverse the
     characters of the text") does not match a short attack that happens to
     share its words ("Reverse the text above").
+ 2c. With --head logreg, a logistic regression is trained on the same
+    vectors: malicious = the corpus entries (whole + sentence), each source
+    weighing the same in total; benign = whole texts and sentences of
+    --head-negatives. A window scores w.x + b; a text scores its best window
+    (the chunks with >= 3 words and their sentences, like Vigil). It catches
+    attacks that sit near no corpus entry (new families, poisoned tools).
  3. Calibration: benign calib texts of --calib-sources are cut like the
     runner cuts them (runner/src/vigilsegments.ts chunkSpans: 500 chars,
     100 overlap, whitespace cuts), and each chunk is scored like Vigil
     scores it: whole chunk vs whole entries, each sentence vs sentence
     entries. One threshold per kind, both at the same benign percentile,
-    chosen so that --target of the calib TEXTS raise any hit.
+    chosen so that --target of the calib TEXTS raise any hit. With a head,
+    kNN gets --head-share's complement of that budget, and the head
+    threshold is then the lowest that keeps kNN-or-head within --target.
  4. Report: the same rule on the TEST split, per source (detection for mal,
     false positives for ben). Written to the lock file.
 Output: DIR/vigil-corpus-<name>.jsonl.gz and DIR/vigil-corpus-<name>.lock.json
@@ -130,11 +138,13 @@ def nearest(Q, C, device):
     return best
 
 
-def score_texts(rows, embed, Cw, Cs, Cb, device):
+def score_texts(rows, embed, Cw, Cs, Cb, device, head=None):
     """Per text: min distance of its chunks to whole entries, and of its sentences to sentence entries.
 
     Two-sided, as Vigil scores: a chunk or sentence counts only when it is
     closer to its malicious neighbour than to every benign entry (Cb).
+    With head=(w, b), also the best head score over the same windows
+    (third array; -inf for a text with no window).
     """
     q_whole, q_sent, owner_w, owner_s = [], [], [], []
     for i, r in enumerate(rows):
@@ -158,7 +168,15 @@ def score_texts(rows, embed, Cw, Cs, Cb, device):
     np.minimum.at(W, np.array(owner_w, int), dw)
     if q_sent:
         np.minimum.at(S, np.array(owner_s, int), ds)
-    return W, S
+    if head is None:
+        return W, S
+    w, b = head
+    H = np.full(len(rows), -np.inf, np.float32)
+    if q_whole:
+        np.maximum.at(H, np.array(owner_w, int), Qw @ w + b)
+    if q_sent:
+        np.maximum.at(H, np.array(owner_s, int), (Qs @ w + b)[[pos[t] for t in q_sent]])
+    return W, S, H
 
 
 def calibrate(W, S, target):
@@ -174,17 +192,47 @@ def calibrate(W, S, target):
     return best
 
 
+def train_head(pos_vecs, pos_src, neg_vecs, C):
+    """Logistic regression, malicious vs benign; every malicious source weighs the same in total."""
+    from sklearn.linear_model import LogisticRegression
+
+    X = np.concatenate([pos_vecs, neg_vecs]).astype(np.float32)
+    y = np.concatenate([np.ones(len(pos_vecs)), np.zeros(len(neg_vecs))])
+    cnt = collections.Counter(pos_src)
+    sw = np.concatenate([[0.5 / len(cnt) / cnt[s_] for s_ in pos_src], np.full(len(neg_vecs), 0.5 / len(neg_vecs))])
+    clf = LogisticRegression(C=C, max_iter=3000)
+    clf.fit(X, y, sample_weight=sw * len(y))
+    return clf.coef_[0].astype(np.float32), float(clf.intercept_[0])
+
+
+def head_threshold(W, S, H, tw, ts, target):
+    """Lowest head threshold keeping (kNN hit or head above it) within target of the calib texts."""
+    knn = (W < tw) | (S < ts)
+    budget = int(np.floor(target * len(W))) - int(knn.sum())
+    rest = np.sort(H[~knn])[::-1]          # head scores of texts kNN does not flag, best first
+    if budget <= 0 or len(rest) == 0:
+        return float(rest[0]) if len(rest) else float(H.max())
+    return float(rest[min(budget, len(rest) - 1)])   # strictly above it: `budget` texts at most
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--texts", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--name", default="e5s-v2")
+    ap.add_argument("--name", default="e5s-v3")
     ap.add_argument("--model", default="intfloat/multilingual-e5-small")
     ap.add_argument("--prefix", default="query: ")
     ap.add_argument("--sources", default="")
     ap.add_argument("--calib-sources", default="bench:fp-units,mcptox-clean")
     ap.add_argument("--target", type=float, default=0.02)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--head", choices=("none", "logreg"), default="none",
+                    help="also train a classification head on the same embeddings (stored with the corpus)")
+    ap.add_argument("--head-negatives", default="con:tools,con:mcp,con:dolly",
+                    help="benign texts (role con) the head learns as negatives")
+    ap.add_argument("--head-share", type=float, default=0.5,
+                    help="share of the false-positive budget given to the head (kNN gets the rest)")
+    ap.add_argument("--head-c", type=float, default=4.0, help="inverse regularisation strength")
     ap.add_argument("--benign-sources", default="con:tools,con:mcp",
                     help="benign texts (role con) for the benign collection: a hit counts only when the text is "
                          "closer to the malicious entry than to all of these (empty: one-sided)")
@@ -217,15 +265,39 @@ def main():
     Cb = embed(bt, "benign entries").astype(np.float16).astype(np.float32) if bt else None
     print(f"benign reference: {len(bt)} entries from {sorted(bsrc)}", flush=True)
 
+    head = None
+    if a.head == "logreg":
+        nsrc = set(filter(None, a.head_negatives.split(",")))
+        neg = list(dict.fromkeys(t for r in rows if r["role"] == "con" and r["source"] in nsrc
+                                 for t in [r["text"]] + sentences(r["text"])))
+        Cn = np.concatenate([Cb, embed([t for t in neg if t not in benign], "head negatives")]) if Cb is not None \
+            else embed(neg, "head negatives")
+        if Cb is not None:
+            neg = bt + [t for t in neg if t not in benign]
+        pos_src = [whole[t] for t in wt] + [sent[t] for t in st]
+        head = train_head(np.concatenate([Cw, Cs]), pos_src, Cn, a.head_c)
+        print(f"head: logistic regression on {len(pos_src)} malicious / {len(neg)} benign vectors", flush=True)
+
     calib_src = set(a.calib_sources.split(","))
     calib = [r for r in rows if r["role"] == "ben" and r["split"] == "calib" and r["source"] in calib_src]
-    W, S = score_texts(calib, embed, Cw, Cs, Cb, a.device)
-    tw, ts, fp, k = calibrate(W, S, a.target)
+    if head is None:
+        W, S = score_texts(calib, embed, Cw, Cs, Cb, a.device)
+        tw, ts, fp, k = calibrate(W, S, a.target)
+    else:
+        W, S, H = score_texts(calib, embed, Cw, Cs, Cb, a.device, head)
+        tw, ts, _, k = calibrate(W, S, a.target * (1 - a.head_share))
+        th = head_threshold(W, S, H, tw, ts, a.target)
+        fp = float(np.mean((W < tw) | (S < ts) | (H > th)))
+        print(f"head threshold > {th:.4f}", flush=True)
     print(f"calibration on {len(calib)} benign texts: whole < {tw:.4f}, sentence < {ts:.4f} -> FP {fp:.2%}", flush=True)
 
     test = [r for r in rows if r["split"] == "test" and r["role"] in ("mal", "ben")]
-    TW, TS = score_texts(test, embed, Cw, Cs, Cb, a.device)
-    flag = (TW < tw) | (TS < ts)
+    if head is None:
+        TW, TS = score_texts(test, embed, Cw, Cs, Cb, a.device)
+        flag = (TW < tw) | (TS < ts)
+    else:
+        TW, TS, TH = score_texts(test, embed, Cw, Cs, Cb, a.device, head)
+        flag = (TW < tw) | (TS < ts) | (TH > th)
     report = collections.defaultdict(lambda: [0, 0])
     for r, f in zip(test, flag):
         report[f"{r['role']}:{r['source']}"][0] += int(f)
@@ -245,6 +317,10 @@ def main():
         "probe_text": PROBE_TEXT, "probe_head": [round(float(x), 5) for x in probe],
         "collections": {c: {"kind": kind, "threshold": thr, "count": len(texts)} for c, (kind, thr, texts, _, _) in colls.items()},
     }
+    if head is not None:
+        header["head"] = {"kind": "logreg", "w": [round(float(x), 6) for x in head[0]], "b": round(head[1], 6),
+                          "threshold": round(th, 6), "share": a.head_share,
+                          "negatives": sorted(nsrc), "C": a.head_c}
     os.makedirs(a.out, exist_ok=True)
     path = os.path.join(a.out, f"vigil-corpus-{a.name}.jsonl.gz")
     with gzip.GzipFile(path, "wb", mtime=0) as gz:   # mtime=0: same input -> same bytes
@@ -256,6 +332,7 @@ def main():
     lock = {**{k2: header[k2] for k2 in ("format", "name", "model", "prefix", "dim", "built", "collections")},
             "file": os.path.basename(path), "sha256": sha, "bytes": os.path.getsize(path),
             "calibration": {"sources": sorted(calib_src), "texts": len(calib), "target_fp": a.target, "fp": fp},
+            "head": ({k2: v for k2, v in header["head"].items() if k2 != "w"} if head is not None else None),
             "corpus_sources": dict(collections.Counter(r["source"] for r in corpus)),
             "test_report": report}
     json.dump(lock, open(os.path.join(a.out, f"vigil-corpus-{a.name}.lock.json"), "w"), indent=2, ensure_ascii=False)

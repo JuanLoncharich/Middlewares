@@ -19,7 +19,7 @@
 #                                images/vigil-corpus-loader/Dockerfile.corpus); required unless
 #                                SKIP_CORPUS_LOAD=1
 #   VIGIL_CORPUS_LOCK            lock file pinning that corpus (default
-#                                hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json): file name + sha256
+#                                hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json): file name + sha256
 #   CHROMA_ROTATE_TOKENS=1       replace both tokens (gateway and Vigil pods are restarted)
 #
 # Tokens: Secret chroma-auth (namespace chroma: reader-token, writer-token)
@@ -34,7 +34,7 @@ CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 CHROMA_QUERY_REPLICAS="${CHROMA_QUERY_REPLICAS:-2}"
 CHROMA_COMPACTION_REPLICAS="${CHROMA_COMPACTION_REPLICAS:-2}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
-VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json}"
+VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json}"
 CHROMA_ROTATE_TOKENS="${CHROMA_ROTATE_TOKENS:-0}"
 
 k() { kubectl ${CONTEXT:+--context "$CONTEXT"} "$@"; }

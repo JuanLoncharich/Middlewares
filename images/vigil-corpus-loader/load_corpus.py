@@ -16,13 +16,18 @@ sha256 checked BEFORE anything is written, and each collection gets the
 header's model, prefix, kind, threshold and embedding probe as metadata —
 the remote Vigil client reads its thresholds from there and refuses a corpus
 its embedder does not reproduce. Collection names carry the corpus name
-(e.g. vigil_e5s_v2_whole), so a new corpus never mixes with an old one.
+(e.g. vigil_e5s_v3_whole), so a new corpus never mixes with an old one.
 
 Without CORPUS_URL, the legacy deadbits corpora:
 
 Collections (defaults, overridable via env):
     vigil_instruction_bypass  <- deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2
     vigil_jailbreak           <- deadbits/vigil-jailbreak-all-MiniLM-L6-v2
+
+PRUNE_OTHER=1 (calibrated corpus only): after a complete load, delete every
+other collection whose name starts with vigil_ (an older corpus build, the
+legacy deadbits corpora), so the vector store holds one corpus. Vigil only
+reads the collections its server.conf names.
 
 Idempotent: a collection whose count is already > 0 is skipped unless
 FORCE_LOAD=1. Designed to run as a K8s Job (manifests/chroma/corpus-loader-job.yaml);
@@ -54,6 +59,7 @@ TENANT = os.environ.get("CHROMA_TENANT", "default_tenant")
 DATABASE = os.environ.get("CHROMA_DATABASE", "default_database")
 FORCE = os.environ.get("FORCE_LOAD", "0") == "1"
 RECREATE = os.environ.get("RECREATE", "0") == "1"
+PRUNE_OTHER = os.environ.get("PRUNE_OTHER", "0") == "1"
 BATCH = int(os.environ.get("BATCH_SIZE", "500"))
 RETRIES = int(os.environ.get("RETRIES", "8"))
 TIMEOUT = int(os.environ.get("HTTP_TIMEOUT_S", "120"))
@@ -249,7 +255,7 @@ def fetch_verified(url, sha256):
 
 
 def collection_metadata(header, name, spec):
-    return {
+    meta = {
         "vigil_corpus": header["name"],
         "vigil_corpus_sha256": CORPUS_SHA256,
         "vigil_embedding_model": header["model"],
@@ -259,6 +265,16 @@ def collection_metadata(header, name, spec):
         "vigil_probe_text": header["probe_text"],
         "vigil_probe_head": json.dumps(header["probe_head"]),
     }
+    # The trained head (corpus e5s-v3 on) rides on the whole-text collection,
+    # where Vigil's client looks for it.
+    head = header.get("head")
+    if head and spec["kind"] == "whole":
+        meta.update({
+            "vigil_head_w": json.dumps(head["w"]),
+            "vigil_head_b": float(head["b"]),
+            "vigil_head_threshold": float(head["threshold"]),
+        })
+    return meta
 
 
 def load_calibrated(url):
@@ -324,14 +340,27 @@ def load_calibrated(url):
         if final != want:
             raise RuntimeError(f"collection {name!r} holds {final} vectors after loading, expected {want}")
         log(f"collection {name!r} now holds {final} vectors (threshold {header['collections'][name]['threshold']:.4f})")
+    return set(header["collections"])
+
+
+def prune_other(keep):
+    """Delete vigil_* collections that are not part of the corpus just loaded."""
+    _, colls = request("GET", api("/collections?limit=1000"), ok=(200,))
+    for c in colls or []:
+        name = c.get("name", "")
+        if name.startswith("vigil_") and name not in keep:
+            log(f"PRUNE_OTHER=1: deleting {name!r} (not in this corpus)")
+            request("DELETE", api(f"/collections/{name}"), ok=(200, 204))
 
 
 def main():
     log(f"chroma frontend: {CHROMA_URL} (tenant={TENANT} database={DATABASE})")
     wait_for_frontend()
     if CORPUS_URL:
-        load_calibrated(CORPUS_URL)
+        keep = load_calibrated(CORPUS_URL)
         log("calibrated corpus loaded")
+        if PRUNE_OTHER:
+            prune_other(keep)
         return
     failures = 0
     for spec in CORPORA:

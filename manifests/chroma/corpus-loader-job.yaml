@@ -17,8 +17,11 @@
 #
 # Collections (multilingual-e5-small, 384-dim, cosine), with their calibrated
 # thresholds in the collection metadata:
-#   vigil_<name>_whole     whole malicious texts
+#   vigil_<name>_whole     whole malicious texts (+ the trained head, e5s-v3 on)
 #   vigil_<name>_sentence  their single sentences
+#   vigil_<name>_benign    the benign reference
+# PRUNE_OTHER=1: once this build is complete, other vigil_* collections (older
+# builds, the legacy corpora) are deleted, so Chroma holds one corpus.
 #
 # NetworkPolicy: the only pod in `chroma` allowed HTTPS egress is this Job
 # (see networkpolicy.yaml) — not needed for the calibrated corpus, which is
@@ -62,6 +65,8 @@ spec:
               value: file:///corpus/__CORPUS_FILE__
             - name: CORPUS_SHA256
               value: "__CORPUS_SHA256__"
+            - name: PRUNE_OTHER
+              value: "1"
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
