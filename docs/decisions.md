@@ -200,3 +200,71 @@ Decisions made before this log existed are not back-filled here.
 - **Reason:** who may reach the operator was a side effect of which optional stack was
   installed. Least privilege, written in one place next to the operator.
   Who decided: Juan. r-baggioII to be told (her file is removed).
+
+### 2026-10-21 — Vigil's vector corpus: our own, calibrated, multilingual-e5-small, hybrid scan
+- **Decision:** replace deadbits' pre-embedded MiniLM corpora (8 900 texts,
+  raw threshold 0.4) with our corpus (`hack/vigil-corpus/`): the previous
+  sources plus HackAPrompt and Mosscap, plus poisoned MCP tool texts we
+  generate with the local LLM (MCPTox and the repo fixtures stay test-only).
+  Embedder `intfloat/multilingual-e5-small`. "Hybrid" scan: the whole runner
+  chunk against whole texts, and each of its sentences against single
+  sentences, each with its own threshold calibrated to 2 % false positives on
+  benign tool-like text.
+- **Reason:** measured on held-out data (corpus-3 study): the old setup
+  detected 0 % of HackAPrompt and of MCPTox tool poisoning, ~5 % of attacks
+  hidden inside benign text; the new one detects most of them at the same
+  false-positive budget, and e5 is the best of six models tried for MCP and
+  Spanish text at ~400 ms per chunk on 2 CPUs.
+- **Alternatives:** bge-small-en (better on unseen attack families, English
+  only); keep MiniLM; bigger models (bge-m3, Qwen3-0.6B: no gain, 10× slower).
+- **Who decided:** Juan (corpus, method, model, own MCP corpus).
+
+### 2026-10-21 — Thresholds and model identity travel with the corpus
+- **Decision:** each Chroma collection's metadata carries its threshold, the
+  embedding model, the text prefix and an embedding probe; Vigil reads them
+  and fails closed if its embedder does not reproduce the probe or the names
+  disagree. The corpus file is pinned by sha256 in a committed lock file and
+  shipped as an image (`vigil-corpus:<name>-<sha12>`, the pinned
+  python:alpine plus the file) that deploy.sh builds after checking the hash.
+- **Reason:** a threshold only means something for one corpus build and one
+  embedder; keeping them apart (server.conf vs Chroma) would let a reload or
+  a model update silently change every verdict. The image route reuses the
+  registry every deploy already pushes to; no public data hosting needed.
+- **Alternatives:** thresholds in server.conf; the file on a public URL
+  (GitHub release / HF dataset — publishing the dataset is Juan's call).
+- **Who decided:** the agent.
+
+### 2026-10-21 — sentence-transformers stays at upstream's 2.2.2 inside Vigil
+- **Decision:** no library upgrade for the e5 embedder.
+- **Reason:** measured in the image: 2.2.2's e5 embeddings equal 5.1.1's to
+  1.6e-7; upgrading would drag transformers and huggingface_hub under the
+  pinned deberta scanner for no gain.
+- **Who decided:** the agent.
+
+### 2026-10-21 — Occludra's " (proxy)" text marker becomes opt-in
+- **Decision:** `OCCLUDRA_RESPONSE_MARKER=1` to append it; by default answers
+  pass unmodified and every inference answer carries `X-Occludra-Proxy: true`.
+- **Reason:** the marker rewrote the model's answer that the evaluation
+  agents read back; the header proves the path without touching content.
+- **Who decided:** the agent (Juan: Occludra may be changed freely).
+
+### 2026-10-21 — `spec.model.contextTokens` on OpenCodeAgent
+- **Decision:** optional field (>= 1024) declaring the context a custom
+  provider really serves; deploy.sh fills it (`LLM_CONTEXT_TOKENS`, 32768 for
+  `local`). Unset keeps the 128K default.
+- **Alternatives:** an evaluator env var (one value for every persona).
+- **Who decided:** the agent.
+
+### 2026-10-21 — Cloner and target get their own /tmp
+- **Decision:** emptyDirs `cloner-tmp` and `target-tmp`; only the evaluator
+  (and its NetBird sidecar) mount `tmp`, the evaluator's HOME.
+- **Reason:** untrusted code (repository build steps, the server under test)
+  could plant files in the evaluator's HOME, e.g. an OpenCode config.
+- **Who decided:** the agent.
+
+### 2026-10-21 — operator-ingress-policy merged into the integration line
+- **Decision:** the operator's own Ingress policy (it replaces observability's
+  `operator-observability` policy and edits `hack/deploy-observability.sh`)
+  is merged into `m3-integration`, not into `main`.
+- **Who decided:** Juan ("ya hablé con Rocío"); merging to main still needs
+  his OK.

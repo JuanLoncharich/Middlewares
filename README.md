@@ -155,33 +155,36 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
 `kubectl apply -f manifests/…`.
 
 * **Vigil-LLM** (inbound) — before any untrusted MCP payload (initialize
-  instructions, tool descriptions, fuzz/probe responses) enters a prompt, the
-  evaluator POSTs it to `vigil-service:5000/analyze/prompt`. A verdict of
-  *injection detected* aborts the run, scores it `0` with
-  `riskCategory=Malicious`, records a `Critical` finding and surfaces through
-  the CRD status/termination message. `VIGIL_ENFORCE=monitor` downgrades
-  detections to log+finding; in the default `strict` mode an *unreachable*
-  scanner also fails the run (fail-closed). Set `VIGIL_ENABLED=0` to disable.
-  The deployment runs the real **vigil-llm** image — `VIGIL_IMG`, built by
-  `deploy.sh` from the pinned upstream source (`VIGIL_SRC_REPO`@
-  `VIGIL_SRC_REF`, commit `f2b4c134d0…`) into
-  `$IMG_REGISTRY/vigil-llm:$IMG_TAG`; upstream publishes no image of its
-  own, only a Dockerfile. Override `VIGIL_IMG` to run a prebuilt/mirrored
-  image your cluster can pull (`SKIP_BUILD=1` + `VIGIL_IMG` is the air-gap
-  path); models download from HuggingFace at boot. The `vigil-server-conf`
-  ConfigMap follows the pinned commit's INI config schema (mounted at
-  `/app/conf/server.conf`) with the **transformer** prompt-injection
-  classifier (`laiyer/deberta-v3-base-prompt-injection`), **YARA** rules
-  (bundled with the image) and the **vectordb** similarity scanner enabled;
-  response-side scanners stay off the evaluation path — the runner feeds raw
-  untrusted payloads, not model responses. The vector plane is the **distributed Chroma cluster**
-  (`manifests/chroma/`, namespace `chroma`: SysDB coordinator + log-service
-  WAL + 2 query nodes + 2 compactors over **MinIO**, with the Vigil corpora
-  `deadbits/*-all-MiniLM-L6-v2`, 8 900+ vectors, loaded by the
-  `vigil-corpus-loader` Job), queried through `chroma-gateway` with a
-  read-only token (`manifests/chroma/README.md`). Pods scale via HPA (CPU 70 %,
-  `VIGIL_HPA_MIN`→8) with a PDB at 50 %; classifier replicas are
-  memory-hungry, so laptop-class nodes should deploy with
+  instructions, tool/prompt/resource descriptions and schemas, every fuzz and
+  probe response) enters a prompt, the evaluator sends it to
+  `vigil-service:5000/analyze/prompt`, each text on its own, as plain text,
+  in 500-character chunks (`runner/src/vigilsegments.ts`). Three scanners
+  vote: the **transformer** classifier
+  (`laiyer/deberta-v3-base-prompt-injection`, threshold 0.98), our **YARA**
+  rules (`manifests/vigil-yara/`) and the **vectordb** similarity scanner.
+  When the transformer and a second scanner agree, the run is aborted, scored
+  `0` with `riskCategory=Malicious` and a `Critical` finding (the MCPServer
+  then shows `Malicious` too); one scanner alone records a warning and a
+  `Medium` finding. `VIGIL_ENFORCE=monitor` downgrades aborts to
+  log+finding; in the default `strict` mode an unreachable or failing
+  scanner fails the run (fail-closed: scanner errors answer HTTP 500).
+  `VIGIL_ENABLED=0` disables it.
+  The **vectordb** scanner compares each chunk, and each of its sentences,
+  with our calibrated corpus (`hack/vigil-corpus/`): about 40 000 known
+  malicious prompts and injections (deadbits, LLMail-Inject, HackAPrompt,
+  Mosscap, Gandalf and others, plus poisoned MCP tool texts we generated with
+  a local LLM), embedded with `intfloat/multilingual-e5-small`, with one
+  distance threshold per collection calibrated to a 2 % false-positive rate
+  on benign tool-like text. The corpus lives in Chroma (namespace `chroma`,
+  distributed over MinIO in production, one pod in kind), loaded by the
+  `vigil-corpus-loader` Job from a file pinned by sha256, and queried through
+  `chroma-gateway` with a read-only token (`manifests/chroma/README.md`).
+  The image is the real **vigil-llm**, built by `deploy.sh` from the pinned
+  upstream source (`VIGIL_SRC_REPO`@`VIGIL_SRC_REF`, commit `f2b4c134d0…`)
+  with our patches (`images/vigil-llm/Dockerfile` lists them); upstream
+  publishes no image. `SKIP_BUILD=1` + `VIGIL_IMG` is the air-gap path;
+  models download from HuggingFace at boot. Pods scale via HPA (CPU 70 %,
+  `VIGIL_HPA_MIN`→8) with a PDB at 50 %; on laptop-class nodes deploy with
   `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`.
 * **Occludra** (outbound) — every OpenCode provider is pinned to
   `occludra-service:8080/v1` (`OCCLUDRA_BASE_URL`): the gateway regex-scrubs
