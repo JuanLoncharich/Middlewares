@@ -6,6 +6,8 @@
 #   gpu-node preflight   read-only checks (no changes)
 #   gpu-node install     one-time: k0s binary, systemd unit+slice, containerd
 #                        NVIDIA runtime, join token (asks for sudo)
+#   gpu-node token       new join token (TOKEN_EXPIRY) made with kubectl and
+#                        written to TOKEN_FILE; no SSH to the controller
 #   gpu-node up          open firewall + routes, start k0s, wait Ready + GPU,
 #                        start the GPU scanner
 #   gpu-node down        stop the scanner, drain, stop k0s, delete the Node
@@ -122,6 +124,24 @@ render_service() {   # needs the ZeroTier address, so done at `up`
       -e "s|__NODE_TAINT__|$NODE_TAINT|" -e "s|__KUBELET_ARGS__|$args|" \
       /etc/k0s/gpu-node/worker.service.tmpl | sudo tee /etc/systemd/system/$UNIT >/dev/null
   sudo systemctl daemon-reload
+}
+
+# New join token made with kubectl (join-token.py): needs cluster-admin on
+# KUBE_CONTEXT, but no SSH to the controller. Never printed, never on argv;
+# the Secret expires on its own.
+token_cmd() {
+  local api secret_file id
+  api="$("${KC[@]}" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  log "creating a $TOKEN_EXPIRY worker join token for $api into $TOKEN_FILE (not printed)"
+  secret_file="$(mktemp)"; chmod 600 "$secret_file"
+  id="$("${KC[@]}" -n default get configmap kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' \
+    | API="$api" EXPIRY="$TOKEN_EXPIRY" python3 "$HERE/join-token.py" 3>"$secret_file" 2>&1 >"$secret_file.tok")" \
+    || { rm -f "$secret_file" "$secret_file.tok"; die "join-token.py failed: $id"; }
+  "${KC[@]}" apply -f "$secret_file" >/dev/null || { rm -f "$secret_file" "$secret_file.tok"; die "could not create the bootstrap token"; }
+  sudo install -m 0600 "$secret_file.tok" "$TOKEN_FILE"
+  rm -f "$secret_file" "$secret_file.tok"
+  sudo test -s "$TOKEN_FILE" || die "empty token"
+  log "token $id written (Secret kube-system/bootstrap-token-$id, expires in $TOKEN_EXPIRY)"
 }
 
 fetch_token() {
@@ -276,6 +296,7 @@ cluster_revert() {
 case "${1:-}" in
   preflight) preflight ;;
   install)   install_cmd ;;
+  token)     token_cmd ;;
   up)        up ;;
   down)      down_cmd ;;
   status)    status ;;
