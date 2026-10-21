@@ -174,3 +174,9 @@ Decisions made before this log existed are not back-filled here.
   firewall rule narrow.
 - **Alternatives:** LoadBalancer (needs MetalLB); NFD for one node.
 - **Who decided:** the agent, with Juan's go-ahead to run it.
+
+### 2026-10-14 — Real local LLM instead of a mock (`LLM_PROVIDER=local`)
+- **Decision:** e2e and local runs use a real model served by llama-server on the GPU machine,
+  behind Occludra, reached through an opt-in egress rule (`occludra-egress-local-llm`: Occludra →
+  that IP/32:port only, deleted for any other provider). Replaces the mock-LLM plan.
+  Who decided: Juan.

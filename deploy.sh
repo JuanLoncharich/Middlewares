@@ -3,6 +3,7 @@
 #
 #   IMG_REGISTRY=ghcr.io/<you> OPENCODE_API_KEY=<zen-key> ./deploy.sh
 #   IMG_REGISTRY=ghcr.io/<you> LLM_PROVIDER=nvidia NVIDIA_API_KEY=<nvapi-key> ./deploy.sh
+#   IMG_REGISTRY=ghcr.io/<you> LLM_PROVIDER=local LOCAL_LLM_URL=http://172.18.0.1:8080/v1 LLM_MODEL=<id> ./deploy.sh
 #
 # Steps: build & push the four images, install CRDs + operator (mcp-eval-system),
 # apply the evaluation namespace / NetworkPolicies / agent personas / sample
@@ -11,10 +12,18 @@
 # Env:
 #   IMG_REGISTRY       registry prefix for the images (required)
 #   IMG_TAG            image tag (default: 20260930 — frozen; never ship :latest)
-#   LLM_PROVIDER       upstream LLM provider behind Occludra: zen (default, OpenCode Zen) or nvidia
-#                      (NVIDIA NIM). Sets Occludra's upstream URL and the four agent personas' model.
+#   LLM_PROVIDER       upstream LLM provider behind Occludra: zen (default, OpenCode Zen), nvidia
+#                      (NVIDIA NIM) or local (an OpenAI-compatible server such as llama-server,
+#                      reached by IP). Sets Occludra's upstream URL and the four agent personas' model.
 #   LLM_MODEL          model id for the personas (default: zen -> muse-spark-1.3-contributor-free,
-#                      nvidia -> z-ai/glm-5.3)
+#                      nvidia -> z-ai/glm-5.3; required for local, and added verbatim to
+#                      Occludra's model allowlist)
+#   LOCAL_LLM_URL      local: base URL of the server as http(s)://<IPv4>:<port>/v1, e.g.
+#                      http://172.18.0.1:8080/v1 (kind: the `kind` docker network gateway).
+#                      Opens an egress rule Occludra -> exactly that IP/32 and port
+#                      (occludra-egress-local-llm); any other provider deletes the rule.
+#   LOCAL_LLM_API_KEY  local: optional, the server's --api-key; written ONLY into
+#                      security-gateways/llm-provider-credentials (UPSTREAM_API_KEY)
 #   OPENCODE_API_KEY   zen: written into Secret llm-provider-credentials in mcp-evals and
 #                      security-gateways (required unless SKIP_SECRET=1)
 #   ANTHROPIC_API_KEY  zen: optionally added to the same Secrets when using provider `anthropic`
@@ -144,12 +153,32 @@ case "$LLM_PROVIDER" in
     LLM_PROVIDER_ID=nvidia
     LLM_MODEL="${LLM_MODEL:-z-ai/glm-5.3}"
     LLM_UPSTREAM_BASE_URL="https://integrate.api.nvidia.com/v1" ;;
-  *) echo "LLM_PROVIDER must be zen or nvidia" >&2; exit 1 ;;
+  local)
+    LLM_PROVIDER_ID=local
+    : "${LLM_MODEL:?set LLM_MODEL (the model id the local server answers to)}"
+    : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. http://172.18.0.1:8080/v1}"
+    LLM_UPSTREAM_BASE_URL="$LOCAL_LLM_URL"
+    # NetworkPolicy ipBlocks take addresses, not names: require an IPv4
+    # literal so the egress rule opens exactly one host and port.
+    if [[ "$LOCAL_LLM_URL" =~ ^(https?)://([0-9]{1,3}(\.[0-9]{1,3}){3})(:([0-9]{1,5}))?(/.*)?$ ]]; then
+      LOCAL_LLM_IP="${BASH_REMATCH[2]}"
+      LOCAL_LLM_PORT="${BASH_REMATCH[5]}"
+      if [ -z "$LOCAL_LLM_PORT" ]; then
+        if [ "${BASH_REMATCH[1]}" = https ]; then LOCAL_LLM_PORT=443; else LOCAL_LLM_PORT=80; fi
+      fi
+    else
+      echo "LOCAL_LLM_URL must be http(s)://<IPv4>[:port][/path], got '$LOCAL_LLM_URL':" >&2
+      echo "  the egress rule needs an IP address, not a hostname" >&2
+      exit 1
+    fi ;;
+  *) echo "LLM_PROVIDER must be zen, nvidia or local" >&2; exit 1 ;;
 esac
 # Check the key up front, before anything is applied to the cluster.
 if [ "$SKIP_SECRET" != "1" ]; then
   if [ "$LLM_PROVIDER" = nvidia ]; then
     : "${NVIDIA_API_KEY:?set NVIDIA_API_KEY (LLM_PROVIDER=nvidia) or SKIP_SECRET=1}"
+  elif [ "$LLM_PROVIDER" = local ]; then
+    :   # LOCAL_LLM_API_KEY is optional (llama-server without --api-key)
   else
     : "${OPENCODE_API_KEY:?set OPENCODE_API_KEY (OpenCode Zen key) or SKIP_SECRET=1}"
   fi
@@ -240,11 +269,16 @@ kubectl apply -f config/rbac/runner_role.yaml
 #  nvidia: the real key only in security-gateways (UPSTREAM_API_KEY, read by
 #          Occludra); mcp-evals gets a placeholder because the evaluator's
 #          custom provider never sends a real key (Occludra swaps it).
+#  local:  same shape; the gateway Secret is empty without LOCAL_LLM_API_KEY.
 llm_secret_env() {
   local ns="$1"
-  if [ "$LLM_PROVIDER" = nvidia ]; then
+  if [ "$LLM_PROVIDER" = nvidia ] || [ "$LLM_PROVIDER" = local ]; then
     if [ "$ns" = security-gateways ]; then
-      printf 'UPSTREAM_API_KEY=%s\n' "$NVIDIA_API_KEY"
+      if [ "$LLM_PROVIDER" = nvidia ]; then
+        printf 'UPSTREAM_API_KEY=%s\n' "$NVIDIA_API_KEY"
+      elif [ -n "${LOCAL_LLM_API_KEY:-}" ]; then
+        printf 'UPSTREAM_API_KEY=%s\n' "$LOCAL_LLM_API_KEY"
+      fi
     else
       printf 'OPENCODE_API_KEY=%s\n' egress-via-occludra
     fi
@@ -280,7 +314,22 @@ substitute_gateway_images() {
       -e "s|__VIGIL_MAX_UNAVAILABLE__|$VIGIL_MAX_UNAVAILABLE|g" \
       -e "/name: OCCLUDRA_UPSTREAM_BASE_URL\$/{n;s|value: \"\"|value: \"$LLM_UPSTREAM_BASE_URL\"|;}" \
       ${profile_args[@]+"${profile_args[@]}"} \
-      ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"}
+      ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"} \
+    | allow_local_model
+}
+# LLM_PROVIDER=local: add exactly the configured model id (anchored, regex-
+# escaped) to Occludra's model allowlist rather than widening the shared
+# patterns. A no-op for other providers and for manifests without the list.
+allow_local_model() {
+  if [ "$LLM_PROVIDER" != local ]; then cat; return; fi
+  LLM_MODEL="$LLM_MODEL" python3 -c '
+import json, os, re, sys
+entry = json.dumps("^" + re.escape(os.environ["LLM_MODEL"]) + "$")
+for line in sys.stdin:
+    sys.stdout.write(line)
+    if line.rstrip("\n") == "      allow:":
+        sys.stdout.write("        - " + entry + "   # LLM_PROVIDER=local (deploy.sh)\n")
+'
 }
 apply_gateway_manifest() {
   substitute_gateway_images < "$1" | kubectl apply -f -
@@ -355,6 +404,38 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
     apply_vigil_yara_rules
     substitute_gateway_images < manifests/vigil-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
   fi
+  # gateway-egress lets Occludra reach private addresses only on NetBird
+  # ports, so a local LLM server (a private IP) needs its own rule: exactly
+  # that IP and port, only while LLM_PROVIDER=local. Every other provider
+  # deletes it, so switching back leaves no opening behind.
+  if [ "$LLM_PROVIDER" = local ]; then
+    log "Allowing Occludra -> local LLM $LOCAL_LLM_IP:$LOCAL_LLM_PORT (NetworkPolicy occludra-egress-local-llm)"
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: occludra-egress-local-llm
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  annotations:
+    security.eval.io/reason: "LLM_PROVIDER=local: Occludra's upstream is $LOCAL_LLM_URL"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: occludra
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: $LOCAL_LLM_IP/32
+      ports:
+        - protocol: TCP
+          port: $LOCAL_LLM_PORT
+EOF
+  else
+    kubectl -n security-gateways delete networkpolicy occludra-egress-local-llm --ignore-not-found
+  fi
   if [ "$MESH_ENFORCE" != "true" ]; then
     echo "NOTE: MESH_ENFORCE=false — NetBird enrollment secrets skipped." >&2
   elif [ -n "${NETBIRD_SETUP_KEY:-}" ]; then
@@ -375,6 +456,12 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
   if [ "$SKIP_SECRET" != "1" ]; then
     log "Writing LLM credentials into security-gateways (Occludra is the upstream egress point)"
     apply_llm_secret security-gateways
+    # Occludra reads the key from env, i.e. once at pod start: pods created
+    # by the apply above can start before this Secret is written (measured
+    # in kind: 1 s apart, first replica ran keyless), and a rotated key never
+    # reaches running pods. Restart so every replica has the current key.
+    kubectl -n security-gateways rollout restart deployment/occludra
+    kubectl -n security-gateways rollout status deployment/occludra --timeout=180s
   else
     echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
   fi
