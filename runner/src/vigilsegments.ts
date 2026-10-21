@@ -80,7 +80,8 @@ export function surfaceSegments(surface: AdvertisedSurface): ScanSegment[] {
 /**
  * Gate 2: what the server answered to fuzz cases (our own case texts are not
  * scanned). Every case's response excerpt reaches the fuzz persona's prompt
- * ("## All fuzz cases"), successful ones included, so all are scanned.
+ * ("## All fuzz cases"), successful ones included, so all are scanned —
+ * except answers that only echo our own input back (echoOfInput).
  */
 export function fuzzSegments(fuzz: FuzzReport): ScanSegment[] {
   const out: ScanSegment[] = [];
@@ -88,6 +89,7 @@ export function fuzzSegments(fuzz: FuzzReport): ScanSegment[] {
     push(out, `fuzz ${n.caseId} (${n.tool}): notable response`, n.excerpt);
   }
   for (const c of fuzz.cases) {
+    if (c.echoOfInput) continue; // only our own payload, echoed back
     push(out, `fuzz ${c.caseId} (${c.tool}): error message`, c.errorMessage);
     push(out, `fuzz ${c.caseId} (${c.tool}): response`, c.responseExcerpt);
   }
@@ -98,10 +100,11 @@ export function fuzzSegments(fuzz: FuzzReport): ScanSegment[] {
 export function probeSegments(probes: ProbeReport): ScanSegment[] {
   const out: ScanSegment[] = [];
   for (const b of probes.benignCalls) {
-    push(out, `probe ${b.tool}: output`, b.outputExcerpt);
+    if (b.fromServer !== false) push(out, `probe ${b.tool}: output`, b.outputExcerpt);
     for (const h of b.hits) push(out, `probe ${b.tool}: ${h.flag} hit`, h.excerpt);
   }
   for (const a of probes.activeProbes) {
+    if (a.fromServer === false || a.echoOfInput) continue; // our own note / our own payload echoed
     push(out, `active probe ${a.tool}.${a.parameter} (${a.kind}): evidence`, a.evidence);
   }
   for (const h of probes.serverInstructionsHits) {

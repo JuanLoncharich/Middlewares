@@ -198,7 +198,10 @@ class RemoteVectorDB:
                 if row:
                     benign[i] = min(benign[i], row[0][2])
         hits = []
-        for name in self.collections:
+        # Like sentences, a whole text needs MIN_SENTENCE_WORDS words to be
+        # evidence: two-word texts ("no response") sit near short attacks.
+        whole_collections = self.collections if len(text.split()) >= MIN_SENTENCE_WORDS else []
+        for name in whole_collections:
             thr = self._meta[name]["vigil_threshold"]
             for doc, meta, dist in self._nearest(name, vectors[:1], self.n_results)[0]:
                 if dist < thr and dist < benign[0]:

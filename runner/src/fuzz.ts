@@ -430,6 +430,7 @@ export async function runFuzz(client: McpClient, tools: McpToolDefinition[], opt
       excerpt = text.slice(0, 300);
       notable.push(...inspectResponse(text, fuzzCase));
     }
+    const errorMessage = outcome.error?.message;
     results.push({
       caseId: fuzzCase.id,
       tool: fuzzCase.tool,
@@ -438,8 +439,10 @@ export async function runFuzz(client: McpClient, tools: McpToolDefinition[], opt
       errorClass,
       latencyMs: outcome.latencyMs,
       errorCode: outcome.error?.code,
-      errorMessage: outcome.error?.message ?? outcome.transportError,
+      errorMessage,
+      ...(outcome.transportError ? { transportError: outcome.transportError } : {}),
       responseExcerpt: excerpt,
+      ...(isEchoOfInput(`${excerpt} ${errorMessage ?? ""}`, fuzzCase.args) ? { echoOfInput: true } : {}),
     });
   };
 
@@ -537,4 +540,30 @@ export function renderFuzzMarkdown(report: FuzzReport): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * True when a fuzz answer says nothing beyond our own input: every string we
+ * sent (as is, reversed, upper- or lower-cased) removed, fewer than 3 letters
+ * or digits remain. An echo or reverse tool answers our attack payloads with
+ * the payloads themselves; scanning that would flag our own text (measured:
+ * the benign fixture's reverse tool answering "..\\..\\windows\\win.ini").
+ */
+export function isEchoOfInput(answer: string, args: unknown): boolean {
+  const inputs: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") inputs.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v !== null && typeof v === "object") Object.values(v as Record<string, unknown>).forEach(walk);
+  };
+  walk(args);
+  let rest = answer;
+  for (const s of inputs.filter((x) => x.trim().length >= 4).sort((a, b) => b.length - a.length)) {
+    const rev = Array.from(s).reverse().join("");
+    for (const form of new Set([s, rev, s.toUpperCase(), s.toLowerCase(), rev.toUpperCase(), rev.toLowerCase()])) {
+      rest = rest.split(form).join(" ");
+    }
+  }
+  if (rest === answer) return false;
+  return (rest.match(/[\p{L}\p{N}]/gu) ?? []).length < 3;
 }

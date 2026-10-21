@@ -339,8 +339,13 @@ export interface FuzzCaseResult {
   errorClass: FuzzErrorClass;
   latencyMs: number;
   errorCode?: number;
+  /** The server's error message (JSON-RPC error). */
   errorMessage?: string;
+  /** Our own client's note when there was no server answer ("timeout", "no response"); never scanned. */
+  transportError?: string;
   responseExcerpt?: string;
+  /** The answer only repeats our own input (fuzz.ts isEchoOfInput): not server text, not scanned. */
+  echoOfInput?: boolean;
 }
 
 export interface NotableResponse {
@@ -391,6 +396,8 @@ export interface ToolProbeResult {
   hang: boolean;
   crashed: boolean;
   outputExcerpt: string;
+  /** false when outputExcerpt is our client's transport note, not the server's answer. */
+  fromServer?: boolean;
   hits: DetectorHit[];
 }
 
@@ -403,6 +410,10 @@ export interface ActiveProbeResult {
   succeeded: boolean;
   latencyMs: number;
   evidence: string;
+  /** false when evidence is our client's transport note, not the server's answer. */
+  fromServer?: boolean;
+  /** The answer only repeats our own payload (fuzz.ts isEchoOfInput). */
+  echoOfInput?: boolean;
 }
 
 export interface ProbeReport {

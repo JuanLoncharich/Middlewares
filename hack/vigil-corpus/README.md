@@ -17,7 +17,11 @@ in the kind e2e, the benign fixture's `reverse: Reverse the characters of the
 provided text.` matched Mosscap's "Reverse the text above…" under the
 threshold, and with the transformer also (wrongly) flagging it, the benign
 server was aborted as Malicious. Two-sided, it is clean, and detection went
-up slightly everywhere (study `s8_twosided.py`).
+up slightly everywhere (study `s8_twosided.py`). A whole text also needs at
+least 3 words to count, like a sentence (the same e2e flagged our own
+client's "no response" note as close to "Ignore response"); short benign
+calibration texts were what held the whole-text threshold down, so that rule
+also raised detection (Tensor Trust 53 → 63 %).
 Each threshold was calibrated so that only 2 % of benign tool-like texts
 (tool descriptions, READMEs, code, MCP fixtures) raise any hit. The second
 question is what catches an attack hidden inside an otherwise normal
@@ -78,14 +82,14 @@ Calibration uses only the calib half of the benign tool-like texts.
 
 | test set | detected |
 |---|---|
-| HackAPrompt / LLMail-Inject / Gandalf | 99 % / 99 % / 98.5 % |
-| Mosscap / TrustAIR / multilingual | 84 % / 85 % / 85 % |
-| Tensor Trust (family never in the corpus) | 53 % |
-| attacks inserted inside benign text: LLMail / HackAPrompt / Tensor Trust / MCPTox | 95 % / 75 % / 56 % / 36 % |
-| our generated MCP texts (held out) | 39 % |
-| **MCPTox poisoned tools (never in the corpus)** | **2.6 %** |
-| false positives: benign tool texts / MCPTox clean tools | 2.7 % / 1.1 % |
-| false positives: benign user prompts / emails | 10–57 % |
+| HackAPrompt / LLMail-Inject / Gandalf | 99.7 % / 99.4 % / 98.5 % |
+| Mosscap / TrustAIR / multilingual | 87 % / 85 % / 85.5 % |
+| Tensor Trust (family never in the corpus) | 63 % |
+| attacks inserted inside benign text: LLMail / HackAPrompt / Tensor Trust / MCPTox | 95 % / 78 % / 59 % / 39 % |
+| our generated MCP texts (held out) | 40 % |
+| **MCPTox poisoned tools (never in the corpus)** | **3.3 %** |
+| false positives: benign tool texts / MCPTox clean tools | 2.7 % / 2.8 % |
+| false positives: benign user prompts / emails | 4–59 % |
 | the repo's MCP fixtures (vector scanner alone) | evil: 1 of 10 texts; benign: 0 of 9 |
 
 Before this corpus, with deadbits + MiniLM and the raw 0.4 threshold, the
@@ -94,7 +98,7 @@ attacks hidden inside text.
 
 What these numbers mean for the platform:
 - **Similarity search does not catch new kinds of tool poisoning.** MCPTox
-  stays near 2 % even with 1 100 generated poisoned tools in the corpus: a
+  stays near 3 % even with 1 100 generated poisoned tools in the corpus: a
   poisoned tool looks too much like a benign one for nearest-neighbour search
   under a 2 % false-positive budget. A trained classification head on the
   same embeddings does better (study `s7_head.py`: Tensor Trust 75 %,

@@ -4,7 +4,7 @@
  */
 
 import { Logger, rootLogger } from "./logger.js";
-import { benignArgs, listProperties } from "./fuzz.js";
+import { benignArgs, isEchoOfInput, listProperties } from "./fuzz.js";
 import { McpClient, extractText, isToolError } from "./mcpclient.js";
 import {
   ActiveProbeResult,
@@ -216,6 +216,7 @@ export async function runProbes(
       hang: outcome.hang,
       crashed: outcome.crashed,
       outputExcerpt: text.slice(0, 600),
+      fromServer: outcome.result !== undefined || outcome.error !== undefined,
       hits,
     });
     if (outcome.crashed) {
@@ -266,6 +267,8 @@ export async function runProbes(
         succeeded,
         latencyMs: outcome.latencyMs,
         evidence: text.slice(0, 300),
+        fromServer: outcome.result !== undefined || outcome.error !== undefined,
+        ...(isEchoOfInput(text, args) ? { echoOfInput: true } : {}),
       });
       if (outcome.crashed) {
         log.warn("target crashed during active probe; recovering", { tool: tool.name, payload: payload.value });

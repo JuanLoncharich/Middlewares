@@ -4,11 +4,11 @@
   "model": "intfloat/multilingual-e5-small",
   "prefix": "query: ",
   "dim": 384,
-  "built": "2026-10-21T16:15:34+00:00",
+  "built": "2026-10-21T16:56:58+00:00",
   "collections": {
     "vigil_e5s_v2_whole": {
       "kind": "whole",
-      "threshold": 0.09006869792938232,
+      "threshold": 0.09484952688217163,
       "count": 41164
     },
     "vigil_e5s_v2_sentence": {
@@ -23,7 +23,7 @@
     }
   },
   "file": "vigil-corpus-e5s-v2.jsonl.gz",
-  "sha256": "a342ad7139d2a4493a8ea52239d31354998766bfe0d646c061bb80a3e6b500ca",
+  "sha256": "74e7084f579069561ab06ed52be1278c2e3389ee6be16d65b66d8d2f07b29dce",
   "bytes": 201240310,
   "calibration": {
     "sources": [
@@ -60,9 +60,9 @@
       "pct": 3.8
     },
     "ben:benign:deepset-benign": {
-      "flagged": 30,
+      "flagged": 33,
       "of": 154,
-      "pct": 19.5
+      "pct": 21.4
     },
     "ben:benign:jackhhao-benign": {
       "flagged": 25,
@@ -70,19 +70,19 @@
       "pct": 10.5
     },
     "ben:benign:llmail-fp-emails": {
-      "flagged": 46,
+      "flagged": 48,
       "of": 81,
-      "pct": 56.8
+      "pct": 59.3
     },
     "ben:benign:trustair-regular": {
-      "flagged": 268,
+      "flagged": 282,
       "of": 528,
-      "pct": 50.8
+      "pct": 53.4
     },
     "ben:mcptox-clean": {
-      "flagged": 2,
+      "flagged": 5,
       "of": 177,
-      "pct": 1.1
+      "pct": 2.8
     },
     "mal:bipia-code": {
       "flagged": 9,
@@ -95,14 +95,14 @@
       "pct": 61.5
     },
     "mal:embedded:gandalf-ignore": {
-      "flagged": 41,
+      "flagged": 43,
       "of": 67,
-      "pct": 61.2
+      "pct": 64.2
     },
     "mal:embedded:hackaprompt": {
-      "flagged": 113,
+      "flagged": 117,
       "of": 150,
-      "pct": 75.3
+      "pct": 78.0
     },
     "mal:embedded:llmail-inject-p2": {
       "flagged": 143,
@@ -110,14 +110,14 @@
       "pct": 95.3
     },
     "mal:embedded:mcptox-poisoned": {
-      "flagged": 54,
+      "flagged": 58,
       "of": 150,
-      "pct": 36.0
+      "pct": 38.7
     },
     "mal:embedded:tensortrust": {
-      "flagged": 84,
+      "flagged": 88,
       "of": 150,
-      "pct": 56.0
+      "pct": 58.7
     },
     "mal:gandalf-ignore": {
       "flagged": 66,
@@ -125,9 +125,9 @@
       "pct": 98.5
     },
     "mal:hackaprompt": {
-      "flagged": 581,
+      "flagged": 583,
       "of": 585,
-      "pct": 99.3
+      "pct": 99.7
     },
     "mal:injecagent": {
       "flagged": 6,
@@ -135,29 +135,29 @@
       "pct": 85.7
     },
     "mal:llmail-inject-p2": {
-      "flagged": 801,
+      "flagged": 806,
       "of": 811,
-      "pct": 98.8
+      "pct": 99.4
     },
     "mal:mcpgen-test": {
-      "flagged": 43,
+      "flagged": 44,
       "of": 110,
-      "pct": 39.1
+      "pct": 40.0
     },
     "mal:mcptox-poisoned": {
-      "flagged": 8,
+      "flagged": 10,
       "of": 304,
-      "pct": 2.6
+      "pct": 3.3
     },
     "mal:mosscap": {
-      "flagged": 943,
+      "flagged": 975,
       "of": 1125,
-      "pct": 83.8
+      "pct": 86.7
     },
     "mal:tensortrust": {
-      "flagged": 427,
+      "flagged": 507,
       "of": 809,
-      "pct": 52.8
+      "pct": 62.7
     },
     "mal:trustair-jailbreak": {
       "flagged": 75,

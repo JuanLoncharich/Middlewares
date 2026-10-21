@@ -207,6 +207,10 @@ class CalibratedCorpusTest(unittest.TestCase):
         # 0.12 from WHOLE_DOC: under the whole threshold (0.20), over the sentence one (0.15)
         self.assertEqual(db().query(NEAR_WHOLE)["documents"][0], [WHOLE_DOC])
 
+    def test_two_word_text_is_never_a_whole_hit(self):
+        VEC["key leak"] = VEC[WHOLE_DOC]   # exactly a corpus vector, but two words
+        self.assertEqual(db().query("key leak")["documents"][0], [])
+
     def test_benign_text_has_no_hits(self):
         res = db().query("Returns the current weather for a city. Units are metric by default.")
         self.assertEqual(res, {"documents": [[]], "metadatas": [[]], "distances": [[]]})
