@@ -29,6 +29,8 @@
 #                 cluster that reaches this machine over an overlay (k0s over ZeroTier:
 #                 PUBLISH=<this PC's ZeroTier IP>). Only that address listens; set
 #                 LOCAL_LLM_API_KEY, since every peer on that network can reach it.
+#   WEBUI         1 = serve llama.cpp's chat page at http://$LLM_IP:$PORT/ (default 0; it asks
+#                 for the API key under Settings)
 #   IMAGE         llama.cpp server image (default: server-cuda build 11610, pinned by digest)
 set -euo pipefail
 
@@ -44,6 +46,7 @@ NGL="${NGL:-999}"
 N_CPU_MOE="${N_CPU_MOE:-0}"
 REASONING="${REASONING:-auto}"
 REASONING_BUDGET="${REASONING_BUDGET:-2048}"
+WEBUI="${WEBUI:-0}"
 
 die() { echo "llm: $*" >&2; exit 1; }
 base_url() { echo "http://$LLM_IP:$PORT"; }
@@ -79,7 +82,7 @@ up() {
     --host 0.0.0.0 --port "$PORT" \
     -c "$CTX" -ngl "$NGL" --n-cpu-moe "$N_CPU_MOE" \
     --reasoning "$REASONING" --reasoning-budget "$REASONING_BUDGET" \
-    --jinja --no-webui >/dev/null
+    --jinja $([ "$WEBUI" = 1 ] || echo --no-webui) >/dev/null
   echo "llm: starting $alias at $(base_url)/v1 (CTX=$CTX N_CPU_MOE=$N_CPU_MOE REASONING=$REASONING budget=$REASONING_BUDGET)"
   local i
   for i in $(seq 1 180); do
