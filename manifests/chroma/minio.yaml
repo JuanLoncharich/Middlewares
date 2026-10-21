@@ -109,7 +109,7 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 256Mi
+              memory: 640Mi   # measured ~650Mi holding the corpus
             limits:
               cpu: "1"
               memory: 1Gi

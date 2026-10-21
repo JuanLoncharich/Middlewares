@@ -67,6 +67,12 @@ spec:
               value: "__CORPUS_SHA256__"
             - name: PRUNE_OTHER
               value: "1"
+            # Chroma answers 429 ("log needs compaction") while the compactor
+            # catches up: smaller batches, and up to ~20 min of backoff.
+            - name: BATCH_SIZE
+              value: "250"
+            - name: RETRIES
+              value: "40"
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534

@@ -222,7 +222,7 @@ spec:
         resources:
           requests:
             cpu: 250m
-            memory: 256Mi
+            memory: 640Mi
           limits:
             cpu: '1'
             memory: 1Gi
@@ -2349,7 +2349,7 @@ spec:
             memory: 1536Mi
           requests:
             cpu: 200m
-            memory: 384Mi
+            memory: 1Gi
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -3025,6 +3025,10 @@ spec:
           value: 2d9653151abcc51d641daba458fb74c966f0d1825da177eb1a975acb277b2acc
         - name: PRUNE_OTHER
           value: '1'
+        - name: BATCH_SIZE
+          value: '250'
+        - name: RETRIES
+          value: '40'
         securityContext:
           runAsNonRoot: true
           runAsUser: 65534
