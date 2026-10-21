@@ -11,8 +11,10 @@
 #
 # Restarts the server after a crash so the evaluator can reconnect and keep
 # fuzzing; never exits non-zero because of the server (the evaluator decides
-# the verdict). This container has no credentials, no CA bundle, and no
-# network egress by policy.
+# the verdict). This container has no credentials and no CA bundle. It
+# shares the evaluation Pod's network namespace, so it has exactly the
+# evaluator's egress for the evaluate phase (the per-run NetworkPolicy built
+# by the operator), not none.
 set -u
 
 IPC="${IPC_DIR:-/ipc}"
