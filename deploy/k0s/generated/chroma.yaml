@@ -574,58 +574,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
@@ -711,58 +713,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
@@ -848,58 +852,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
@@ -985,58 +991,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
@@ -1154,58 +1162,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
@@ -1291,58 +1301,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
@@ -1428,58 +1440,60 @@ data:
     \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  log:\n    grpc:\n      host: \"\
     rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 60000 # 1 minute\n\
     \      memberlist_provider:\n        custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name:\
-    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  dispatcher:\n    num_worker_threads: 4\n    dispatcher_queue_size:\
-    \ 1000\n    worker_queue_size: 100\n    task_queue_limit: 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size:\
-    \ 1000\n    max_concurrent_jobs: 50\n    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size:\
-    \ 10000\n    max_partition_size: 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size:\
-    \ 1000\n  work_queue:\n    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 10000\n      request_timeout_ms: 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n     \
-    \ block_manager_config:\n        max_block_size_bytes: 8388608 # 8MB\n        block_cache_config:\n          lru:\n  \
-    \          name: \"block_cache\"\n            capacity: 1000\n        num_concurrent_block_flushes: 40\n      sparse_index_manager_config:\n\
-    \        sparse_index_cache_config:\n          lru:\n            name: \"sparse_index_cache\"\n            capacity: 1000\n\
-    \  bloom_filter_manager:\n    cache_config:\n      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n\
-    \    enabled_collection_ids: [\"all\"]\n    storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"\
-    ~/tmp\"\n    hnsw_cache_config:\n      memory:\n        name: \"hnsw_cache\"\n        capacity: 8192 # 8192 MiB = 8GB\n\
-    \    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size: 5242880 # 5MiB\n    pl_garbage_collection:\n  \
-    \    enabled: true\n      policy:\n        random_sample:\n          sample_size: 0.1\n    hnsw_garbage_collection:\n\
-    \      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n      cache_config:\n        memory:\n  \
-    \        name: \"usearch_cache\"\n          capacity: 8192 # 8192 MiB = 8GB\nwork_queue_service:\n  service_name: \"work-queue-service\"\
-    \n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name:\
-    \ \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\
-    \n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n    rendezvous_hashing:\n\
-    \      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n  storage:\n    admission_controlled_s3:\n\
-    \      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n\
-    \        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes:\
-    \ 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n          max_concurrent_requests: 30\n  \
-    \        bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"workqueue_state.parquet\"\n    persistence:\n\
-    \      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n  num_records_before_backpressure: 100000\n\
-    \  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold: 10\n  opentelemetry:\n    service_name:\
-    \ \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n    filters:\n      - crate_name:\
-    \ \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n        filter_level: \"trace\"\n  storage:\n\
-    \    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials: \"Minio\"\n\
-    \        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n        upload_part_size_bytes: 536870912\
-    \ # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
-    \          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n    memory:\n      capacity:\
-    \ 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n      batch_size_bytes: 8388608\
-    \ # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name: \"garbage-collector\"\n  otel_endpoint:\
-    \ \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"garbage_collector\"\n\
-    \      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions created at time < now() - relative_cutoff_time_seconds\
-    \ (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins: 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\
-    \n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port: 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms:\
-    \ 60000\n  dispatcher_config:\n    num_worker_threads: 4\n    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n\
-    \  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\n      connect_timeout_ms: 60000\n      request_timeout_ms:\
-    \ 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n      hasher: Murmur3\n  memberlist_provider:\n   \
-    \ custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name: \"garbage-collection-service-memberlist\"\
-    \n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\n      port: 50051\n      connect_timeout_ms:\
-    \ 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n        custom_resource:\n          kube_namespace:\
-    \ \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\n          queue_size: 100\nsysdb_service:\n\
-    \  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n\
-    \    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n    preferred:\
-    \ tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n      config:\n\
-    \        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"chroma-storage\"\
-    \n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms: 60000\
-    \ # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes: 8388608\
-    \ # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
+    \ \"rust-log-service-memberlist\"\n          queue_size: 100\n  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's\
+    \ values (8 GB caches,\n  # 50 concurrent jobs) are for big machines: with them the compactor was\n  # OOM-killed loading\
+    \ the 240k-vector corpus, the log stopped being compacted\n  # and Chroma refused writes (HTTP 429 \"log needs compaction\"\
+    ).\n  dispatcher:\n    num_worker_threads: 2\n    dispatcher_queue_size: 1000\n    worker_queue_size: 100\n    task_queue_limit:\
+    \ 10000\n    active_io_tasks: 10000\n  compactor:\n    compaction_manager_queue_size: 1000\n    max_concurrent_jobs: 2\n\
+    \    compaction_interval_sec: 10\n    min_compaction_size: 10\n    max_compaction_size: 10000\n    max_partition_size:\
+    \ 5000\n    disabled_collections: [] # uuids to disable compaction for\n    fetch_log_batch_size: 1000\n  work_queue:\n\
+    \    grpc:\n      host: \"work-queue-service.chroma\"\n      port: 50051\n      connect_timeout_ms: 10000\n      request_timeout_ms:\
+    \ 10000\n  task_runner:\n    enabled: true\n  blockfile_provider:\n    arrow:\n      block_manager_config:\n        max_block_size_bytes:\
+    \ 8388608 # 8MB\n        block_cache_config:\n          lru:\n            name: \"block_cache\"\n            capacity:\
+    \ 32 # blocks of <= 8 MiB\n        num_concurrent_block_flushes: 4\n      sparse_index_manager_config:\n        sparse_index_cache_config:\n\
+    \          lru:\n            name: \"sparse_index_cache\"\n            capacity: 64\n  bloom_filter_manager:\n    cache_config:\n\
+    \      lru:\n        name: \"bloom_filter_cache\"\n        capacity: 1000\n    enabled_collection_ids: [\"all\"]\n   \
+    \ storage_fetch_threshold: 100\n  hnsw_provider:\n    hnsw_temporary_path: \"~/tmp\"\n    hnsw_cache_config:\n      memory:\n\
+    \        name: \"hnsw_cache\"\n        capacity: 256 # MiB\n    permitted_parallelism: 180\n  spann_provider:\n    pl_block_size:\
+    \ 5242880 # 5MiB\n    pl_garbage_collection:\n      enabled: true\n      policy:\n        random_sample:\n          sample_size:\
+    \ 0.1\n    hnsw_garbage_collection:\n      enabled: true\n      policy: \"full_rebuild\"\n    usearch_provider:\n    \
+    \  cache_config:\n        memory:\n          name: \"usearch_cache\"\n          capacity: 256 # MiB\nwork_queue_service:\n\
+    \  service_name: \"work-queue-service\"\n  my_port: 50051\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"worker\"\n      filter_level: \"trace\"\n  memberlist_provider:\n    custom_resource:\n\
+    \      kube_namespace: \"chroma\"\n      memberlist_name: \"fn-consumer-memberlist\"\n      queue_size: 100\n  assignment_policy:\n\
+    \    rendezvous_hashing:\n      hasher: Murmur3\n  sysdb:\n    grpc:\n      host: \"sysdb.chroma\"\n      port: 50051\n\
+    \  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\n        credentials:\
+    \ \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 30000 # 1 minute\n        upload_part_size_bytes:\
+    \ 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n        count_based_policy:\n\
+    \          max_concurrent_requests: 30\n          bandwidth_allocation: [0.7, 0.3]\n  work_queue:\n    storage_path: \"\
+    workqueue_state.parquet\"\n    persistence:\n      time_threshold_seconds: 2\n      pending_threshold: 100\nlog_service:\n\
+    \  num_records_before_backpressure: 100000\n  record_count_threshold: 10\n  reinsert_threshold: 0\n  suggested_compaction_threshold:\
+    \ 10\n  opentelemetry:\n    service_name: \"rust-log-service\"\n    endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n    filters:\n      - crate_name: \"chroma_log\"\n        filter_level: \"trace\"\n      - crate_name: \"wal3\"\n  \
+    \      filter_level: \"trace\"\n  storage:\n    admission_controlled_s3:\n      s3_config:\n        bucket: \"chroma-storage\"\
+    \n        credentials: \"Minio\"\n        connect_timeout_ms: 5000\n        request_timeout_ms: 60000 # 1 minute\n   \
+    \     upload_part_size_bytes: 536870912 # 512MiB\n        download_part_size_bytes: 8388608 # 8MiB\n      rate_limiting_policy:\n\
+    \        count_based_policy:\n          max_concurrent_requests: 500\n          bandwidth_allocation: [1.0]\n  cache:\n\
+    \    memory:\n      capacity: 100000000 # 100 MB\n  writer:\n    throttle_fragment:\n      batch_interval_us: 100000\n\
+    \      batch_size_bytes: 8388608 # 8MiB\n      throughput: 3300\n      headroom: 200\ngarbage_collector:\n  service_name:\
+    \ \"garbage-collector\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n \
+    \   - crate_name: \"garbage_collector\"\n      filter_level: \"debug\"\n  relative_cutoff_time_seconds: 60 # GC all versions\
+    \ created at time < now() - relative_cutoff_time_seconds (1 minute)\n  max_collections_to_gc: 1000\n  gc_interval_mins:\
+    \ 1\n  disallow_collections: []\n  default_mode: \"deletev2\"\n  sysdb_config:\n    host: \"sysdb.chroma\"\n    port:\
+    \ 50051\n    connect_timeout_ms: 60000\n    request_timeout_ms: 60000\n  dispatcher_config:\n    num_worker_threads: 4\n\
+    \    dispatcher_queue_size: 10000\n    worker_queue_size: 10000\n  storage_config:\n    s3:\n      bucket: \"chroma-storage\"\
+    \n      connect_timeout_ms: 60000\n      request_timeout_ms: 60000 # 1 minute\n  assignment_policy:\n    rendezvous_hashing:\n\
+    \      hasher: Murmur3\n  memberlist_provider:\n    custom_resource:\n      kube_namespace: \"chroma\"\n      memberlist_name:\
+    \ \"garbage-collection-service-memberlist\"\n      queue_size: 100\n  log:\n    grpc:\n      host: \"rust-log-service.chroma\"\
+    \n      port: 50051\n      connect_timeout_ms: 5000\n      request_timeout_ms: 5000\n      memberlist_provider:\n    \
+    \    custom_resource:\n          kube_namespace: \"chroma\"\n          memberlist_name: \"rust-log-service-memberlist\"\
+    \n          queue_size: 100\nsysdb_service:\n  service_name: \"rust-sysdb-service\"\n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\
+    \n  otel_filters:\n    - crate_name: \"rust_sysdb\"\n      filter_level: \"trace\"\n  port: 50051\n  regions_and_topologies:\n\
+    \    preferred: tilt-config-1\n    regions:\n    - name: tilt-config-1\n      provider: tilt\n      region: config-1\n\
+    \      config:\n        storage:\n          admission_controlled_s3:\n            s3_config:\n              bucket: \"\
+    chroma-storage\"\n              credentials: \"Minio\"\n              connect_timeout_ms: 5000\n              request_timeout_ms:\
+    \ 60000 # 1 minute\n              upload_part_size_bytes: 536870912 # 512MiB\n              download_part_size_bytes:\
+    \ 8388608 # 8MiB\n            rate_limiting_policy:\n              count_based_policy:\n                max_concurrent_requests:\
     \ 1000\n                bandwidth_allocation: [1.0]\n    topologies: []\nfn_consumer_service:\n  service_name: \"fn-consumer\"\
     \n  otel_endpoint: \"http://otel-collector.chroma.svc.cluster.local:4317\"\n  otel_filters:\n    - crate_name: \"worker\"\
     \n      filter_level: \"trace\"\n  my_member_id: \"fn-consumer-0\"\n  poll_interval_sec: 3\n  max_concurrent_workers:\
