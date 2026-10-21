@@ -324,9 +324,15 @@ llm_secret_env() {
     else
       printf 'OPENCODE_API_KEY=%s\n' egress-via-occludra
     fi
-  else
+  elif [ "$ns" = security-gateways ]; then
     printf 'OPENCODE_API_KEY=%s\n' "$OPENCODE_API_KEY"
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY"; fi
+  else
+    # Zen too: the evaluation namespace runs untrusted code and never needs
+    # the real key — Occludra drops the client's Authorization and sends its
+    # own (images/occludra-gateway/main.go). Bypassing Occludra
+    # (OCCLUDRA_ENABLED=false, dev only) means creating this Secret by hand.
+    printf 'OPENCODE_API_KEY=%s\n' egress-via-occludra
   fi
 }
 apply_llm_secret() {

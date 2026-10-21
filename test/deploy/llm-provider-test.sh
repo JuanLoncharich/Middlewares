@@ -103,8 +103,8 @@ else:
     if pols: fail.append("local-LLM egress policy rendered for a non-local provider")
     if not deleted: fail.append("non-local deploy does not delete a leftover local-LLM policy")
 if provider == "zen":
-    for ns, s in (("security-gateways", gw), ("mcp-evals", ev)):
-        if s != {"OPENCODE_API_KEY": key}: fail.append(f"{ns} secret keys {sorted(s)} (want OPENCODE_API_KEY)")
+    if gw != {"OPENCODE_API_KEY": key}: fail.append(f"security-gateways secret keys {sorted(gw)} (want the real OPENCODE_API_KEY)")
+    if ev != {"OPENCODE_API_KEY": "egress-via-occludra"}: fail.append("mcp-evals must hold only the placeholder (the real Zen key stays with Occludra)")
 for f in fail: print("  FAIL:", f)
 sys.exit(1 if fail else 0)
 PY
