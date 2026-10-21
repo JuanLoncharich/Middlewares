@@ -420,10 +420,12 @@ Corpus: the Job `vigil-corpus-loader` runs `load_corpus.py` (stdlib Python,
 from a ConfigMap) on the corpus image `vigil-corpus:<name>-<sha12>` that
 `deploy.sh` builds (the pinned `python:alpine` plus one `vigil-corpus/1`
 file). It checks the file's sha256 against the committed lock
-(`hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json`) before writing, then
-fills `vigil_e5s_v2_whole` (41 164 texts), `vigil_e5s_v2_sentence`
-(163 965 sentences) and the benign reference `vigil_e5s_v2_benign` (35 330), 384-dim e5 vectors in **cosine** space, each collection
-carrying its threshold and model in its metadata. Idempotent: a collection
+(`hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json`) before writing, then
+fills `vigil_e5s_v3_whole` (41 164 texts), `vigil_e5s_v3_sentence`
+(163 965 sentences) and the benign reference `vigil_e5s_v3_benign` (35 330), 384-dim e5 vectors in **cosine** space, each collection
+carrying its threshold and model in its metadata (the whole collection also
+the trained head: logistic-regression weights, bias, threshold). With
+`PRUNE_OTHER=1` it then deletes older `vigil_*` collections. Idempotent: a collection
 already holding this build is skipped; another build under the same name is
 refused unless `RECREATE=1`. Without `CORPUS_URL` the loader still knows the
 legacy deadbits download (the only reason it keeps HTTPS egress,
@@ -571,7 +573,7 @@ answers "how risky is this MCP server today" without a client-side join.
 | 8 | Vigil config | **ConfigMap** `vigil-server-conf` → etcd, mounted `/conf` | vigil pods | permanent | scanner profile (all input scanners enabled) |
 | 9a | **Distributed Chroma — object segments** | **MinIO** (`minio.chroma:9000`, PVC 20 Gi, bucket `chroma-storage` auto-created) | `chroma` ns, MinIO Deployment | permanent (PVC) | WAL fragments + compacted HNSW/SPANN index segments of the Vigil corpora |
 | 9b | **Distributed Chroma — catalog** | **Postgres 15** (`postgres.chroma:5432`, PVC 5 Gi) | `chroma` ns | permanent (PVC) | tenants/databases/collections/segment placement (SysDB), migrated by the chart's `sysdb-migration` Job |
-| 9c | **Vigil corpus** | collections `vigil_e5s_v2_whole` (41 164×384d) + `_sentence` (163 965) + `_benign` (35 330), cosine space, thresholds in their metadata | inside Chroma (query nodes serve them; replicas stay stateless) | rebuilt from the corpus image (sha256-pinned) | known injections and jailbreaks + our generated poisoned MCP texts (`hack/vigil-corpus/README.md`) |
+| 9c | **Vigil corpus** | collections `vigil_e5s_v3_whole` (41 164×384d) + `_sentence` (163 965) + `_benign` (35 330), cosine space, thresholds and the trained head in their metadata | inside Chroma (query nodes serve them; replicas stay stateless) | rebuilt from the corpus image (sha256-pinned) | known injections and jailbreaks + our generated poisoned MCP texts (`hack/vigil-corpus/README.md`) |
 | 10 | LLM upstream keys | **Secret** `llm-provider-credentials` (etcd) | `mcp-evals` + mirrored `security-gateways` | permanent | decoded **only** by occludra containers; evaluator's copy only ever configures the dummy-key path |
 | 11 | NetBird identity | Secret `netbird-auth` + emptyDir `/var/lib/netbird` | sidecars/daemonset | emptyDir: pod lifetime (re-enroll on restart) | setup key, peer state, WireGuard keys |
 | 12 | OpenCode session store | files under `$XDG_DATA_HOME` | evaluator container `/tmp` emptyDir; workstation container fs | ephemeral | session transcripts/messages — deliberately throwaway |

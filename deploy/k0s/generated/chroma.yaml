@@ -2830,21 +2830,25 @@ data:
     \ \"t\": text, \"s\": source, \"e\":\nbase64 float16 vector}). The file is fetched (https:// or file://), its\nsha256\
     \ checked BEFORE anything is written, and each collection gets the\nheader's model, prefix, kind, threshold and embedding\
     \ probe as metadata \u2014\nthe remote Vigil client reads its thresholds from there and refuses a corpus\nits embedder\
-    \ does not reproduce. Collection names carry the corpus name\n(e.g. vigil_e5s_v2_whole), so a new corpus never mixes with\
+    \ does not reproduce. Collection names carry the corpus name\n(e.g. vigil_e5s_v3_whole), so a new corpus never mixes with\
     \ an old one.\n\nWithout CORPUS_URL, the legacy deadbits corpora:\n\nCollections (defaults, overridable via env):\n  \
     \  vigil_instruction_bypass  <- deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2\n    vigil_jailbreak           <- deadbits/vigil-jailbreak-all-MiniLM-L6-v2\n\
-    \nIdempotent: a collection whose count is already > 0 is skipped unless\nFORCE_LOAD=1. Designed to run as a K8s Job (manifests/chroma/corpus-loader-job.yaml);\n\
-    safe to re-run on every deploy.\n\nAuth: CHROMA_URL is chroma-gateway (manifests/chroma/gateway.yaml); the\nwriter token\
-    \ comes from CHROMA_TOKEN (a Secret) and is sent only to\nCHROMA_URL, never to the dataset hosts.\n\nStdlib only (urllib/json)\
-    \ so the image stays python:alpine with zero pip\ndependencies and works air-gapped except for the HF download itself.\n\
-    \"\"\"\n\nimport base64\nimport gzip\nimport hashlib\nimport io\nimport json\nimport struct\nimport os\nimport sys\nimport\
-    \ time\nimport urllib.error\nimport urllib.request\n\nCHROMA_URL = os.environ.get(\"CHROMA_URL\", \"http://chroma-gateway.chroma.svc.cluster.local:8080\"\
+    \nPRUNE_OTHER=1 (calibrated corpus only): after a complete load, delete every\nother collection whose name starts with\
+    \ vigil_ (an older corpus build, the\nlegacy deadbits corpora), so the vector store holds one corpus. Vigil only\nreads\
+    \ the collections its server.conf names.\n\nIdempotent: a collection whose count is already > 0 is skipped unless\nFORCE_LOAD=1.\
+    \ Designed to run as a K8s Job (manifests/chroma/corpus-loader-job.yaml);\nsafe to re-run on every deploy.\n\nAuth: CHROMA_URL\
+    \ is chroma-gateway (manifests/chroma/gateway.yaml); the\nwriter token comes from CHROMA_TOKEN (a Secret) and is sent\
+    \ only to\nCHROMA_URL, never to the dataset hosts.\n\nStdlib only (urllib/json) so the image stays python:alpine with\
+    \ zero pip\ndependencies and works air-gapped except for the HF download itself.\n\"\"\"\n\nimport base64\nimport gzip\n\
+    import hashlib\nimport io\nimport json\nimport struct\nimport os\nimport sys\nimport time\nimport urllib.error\nimport\
+    \ urllib.request\n\nCHROMA_URL = os.environ.get(\"CHROMA_URL\", \"http://chroma-gateway.chroma.svc.cluster.local:8080\"\
     ).rstrip(\"/\")\nCHROMA_TOKEN = os.environ.get(\"CHROMA_TOKEN\", \"\")\nTENANT = os.environ.get(\"CHROMA_TENANT\", \"\
     default_tenant\")\nDATABASE = os.environ.get(\"CHROMA_DATABASE\", \"default_database\")\nFORCE = os.environ.get(\"FORCE_LOAD\"\
-    , \"0\") == \"1\"\nRECREATE = os.environ.get(\"RECREATE\", \"0\") == \"1\"\nBATCH = int(os.environ.get(\"BATCH_SIZE\"\
-    , \"500\"))\nRETRIES = int(os.environ.get(\"RETRIES\", \"8\"))\nTIMEOUT = int(os.environ.get(\"HTTP_TIMEOUT_S\", \"120\"\
-    ))\n\nCORPORA = [\n    {\n        \"collection\": os.environ.get(\"COLLECTION_INSTRUCTION_BYPASS\", \"vigil_instruction_bypass\"\
-    ),\n        \"url\": os.environ.get(\n            \"CORPUS_INSTRUCTION_BYPASS_URL\",\n            \"https://huggingface.co/datasets/deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2/resolve/main/embeddings.json\"\
+    , \"0\") == \"1\"\nRECREATE = os.environ.get(\"RECREATE\", \"0\") == \"1\"\nPRUNE_OTHER = os.environ.get(\"PRUNE_OTHER\"\
+    , \"0\") == \"1\"\nBATCH = int(os.environ.get(\"BATCH_SIZE\", \"500\"))\nRETRIES = int(os.environ.get(\"RETRIES\", \"\
+    8\"))\nTIMEOUT = int(os.environ.get(\"HTTP_TIMEOUT_S\", \"120\"))\n\nCORPORA = [\n    {\n        \"collection\": os.environ.get(\"\
+    COLLECTION_INSTRUCTION_BYPASS\", \"vigil_instruction_bypass\"),\n        \"url\": os.environ.get(\n            \"CORPUS_INSTRUCTION_BYPASS_URL\"\
+    ,\n            \"https://huggingface.co/datasets/deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2/resolve/main/embeddings.json\"\
     ,\n        ),\n    },\n    {\n        \"collection\": os.environ.get(\"COLLECTION_JAILBREAK\", \"vigil_jailbreak\"),\n\
     \        \"url\": os.environ.get(\n            \"CORPUS_JAILBREAK_URL\",\n            \"https://huggingface.co/datasets/deadbits/vigil-jailbreak-all-MiniLM-L6-v2/resolve/main/embeddings.json\"\
     ,\n        ),\n    },\n]\n\nEXPECTED_DIM = 384  # all-MiniLM-L6-v2\nCORPUS_URL = os.environ.get(\"CORPUS_URL\", \"\")\n\
@@ -2909,42 +2913,51 @@ data:
     \ (the lock file's sha256)\")\n    log(f\"downloading {url} ...\")\n    with urllib.request.urlopen(url, timeout=600)\
     \ as resp:\n        data = resp.read()\n    got = hashlib.sha256(data).hexdigest()\n    if got != sha256:\n        raise\
     \ RuntimeError(f\"{url}: sha256 {got} != pinned {sha256}; refusing to load\")\n    log(f\"sha256 ok ({len(data) / 1e6:.0f}\
-    \ MB)\")\n    return data\n\n\ndef collection_metadata(header, name, spec):\n    return {\n        \"vigil_corpus\": header[\"\
+    \ MB)\")\n    return data\n\n\ndef collection_metadata(header, name, spec):\n    meta = {\n        \"vigil_corpus\": header[\"\
     name\"],\n        \"vigil_corpus_sha256\": CORPUS_SHA256,\n        \"vigil_embedding_model\": header[\"model\"],\n   \
     \     \"vigil_text_prefix\": header[\"prefix\"],\n        \"vigil_kind\": spec[\"kind\"],\n        \"vigil_threshold\"\
     : float(spec[\"threshold\"]),\n        \"vigil_probe_text\": header[\"probe_text\"],\n        \"vigil_probe_head\": json.dumps(header[\"\
-    probe_head\"]),\n    }\n\n\ndef load_calibrated(url):\n    # Streamed: the decompressed file is several times the download.\n\
-    \    lines = (line.decode() for line in gzip.GzipFile(fileobj=io.BytesIO(fetch_verified(url, CORPUS_SHA256))))\n    header\
-    \ = json.loads(next(lines))\n    if header.get(\"format\") != \"vigil-corpus/1\":\n        raise RuntimeError(f\"{url}:\
-    \ not a vigil-corpus/1 file: {str(header)[:200]}\")\n    dim = int(header[\"dim\"])\n    ids = {}\n    for name, spec\
-    \ in header[\"collections\"].items():\n        coll_id = get_or_create_collection(name, collection_metadata(header, name,\
-    \ spec))\n        existing = collection_count(coll_id)\n        _, coll = request(\"GET\", api(f\"/collections/{name}\"\
-    ), ok=(200,))\n        held = (coll.get(\"metadata\") or {}).get(\"vigil_corpus_sha256\") if isinstance(coll, dict) else\
-    \ None\n        if existing > 0 and held != CORPUS_SHA256 and not RECREATE:\n            raise RuntimeError(f\"collection\
-    \ {name!r} holds another corpus build (sha256 {held}); RECREATE=1 replaces it\")\n        if existing > 0 and RECREATE:\n\
-    \            log(f\"RECREATE=1: dropping {name!r} ({existing} vectors)\")\n            request(\"DELETE\", api(f\"/collections/{coll_id}\"\
-    ), ok=(200, 204))\n            coll_id = get_or_create_collection(name, collection_metadata(header, name, spec))\n   \
-    \         existing = collection_count(coll_id)\n        if existing == spec[\"count\"] and not FORCE:\n            log(f\"\
-    collection {name!r} already holds its {existing} vectors; skipping (FORCE_LOAD=1 to reload)\")\n            continue\n\
-    \        if existing:\n            log(f\"collection {name!r} holds {existing} of {spec['count']} vectors; adding (ids\
-    \ are stable)\")\n        ids[name] = coll_id\n    batches = {name: ([], [], [], []) for name in ids}\n    counts = dict.fromkeys(ids,\
-    \ 0)\n\n    def flush(name):\n        b_ids, b_emb, b_doc, b_meta = batches[name]\n        if b_ids:\n            # upsert:\
-    \ a re-run after a partial load rewrites the same ids\n            request(\"POST\", api(f\"/collections/{ids[name]}/upsert\"\
-    ),\n                    {\"ids\": b_ids, \"embeddings\": b_emb, \"documents\": b_doc, \"metadatas\": b_meta}, ok=(200,\
-    \ 201))\n            for part in batches[name]:\n                part.clear()\n\n    for line in lines:\n        e = json.loads(line)\n\
-    \        name = e[\"c\"]\n        if name not in ids:\n            continue\n        raw = base64.b64decode(e[\"e\"])\n\
-    \        if len(raw) != 2 * dim:\n            raise RuntimeError(f\"{name}: vector of {len(raw) // 2} dims, header says\
-    \ {dim}\")\n        b_ids, b_emb, b_doc, b_meta = batches[name]\n        b_ids.append(f\"{name}-{counts[name]}\")\n  \
-    \      b_emb.append(list(struct.unpack(f\"<{dim}e\", raw)))\n        b_doc.append(e[\"t\"])\n        b_meta.append({\"\
-    source\": e[\"s\"]})\n        counts[name] += 1\n        if len(b_ids) >= BATCH:\n            flush(name)\n          \
-    \  if counts[name] % (BATCH * 40) == 0:\n                log(f\"  {name}: {counts[name]} / {header['collections'][name]['count']}\"\
-    )\n    for name in ids:\n        flush(name)\n        final = collection_count(ids[name])\n        want = header[\"collections\"\
-    ][name][\"count\"]\n        if final != want:\n            raise RuntimeError(f\"collection {name!r} holds {final} vectors\
-    \ after loading, expected {want}\")\n        log(f\"collection {name!r} now holds {final} vectors (threshold {header['collections'][name]['threshold']:.4f})\"\
-    )\n\n\ndef main():\n    log(f\"chroma frontend: {CHROMA_URL} (tenant={TENANT} database={DATABASE})\")\n    wait_for_frontend()\n\
-    \    if CORPUS_URL:\n        load_calibrated(CORPUS_URL)\n        log(\"calibrated corpus loaded\")\n        return\n\
-    \    failures = 0\n    for spec in CORPORA:\n        try:\n            load_corpus(spec)\n        except Exception as\
-    \ err:  # noqa: BLE001 - report every corpus, fail the job at the end\n            log(f\"ERROR loading {spec['collection']}:\
+    probe_head\"]),\n    }\n    # The trained head (corpus e5s-v3 on) rides on the whole-text collection,\n    # where Vigil's\
+    \ client looks for it.\n    head = header.get(\"head\")\n    if head and spec[\"kind\"] == \"whole\":\n        meta.update({\n\
+    \            \"vigil_head_w\": json.dumps(head[\"w\"]),\n            \"vigil_head_b\": float(head[\"b\"]),\n         \
+    \   \"vigil_head_threshold\": float(head[\"threshold\"]),\n        })\n    return meta\n\n\ndef load_calibrated(url):\n\
+    \    # Streamed: the decompressed file is several times the download.\n    lines = (line.decode() for line in gzip.GzipFile(fileobj=io.BytesIO(fetch_verified(url,\
+    \ CORPUS_SHA256))))\n    header = json.loads(next(lines))\n    if header.get(\"format\") != \"vigil-corpus/1\":\n    \
+    \    raise RuntimeError(f\"{url}: not a vigil-corpus/1 file: {str(header)[:200]}\")\n    dim = int(header[\"dim\"])\n\
+    \    ids = {}\n    for name, spec in header[\"collections\"].items():\n        coll_id = get_or_create_collection(name,\
+    \ collection_metadata(header, name, spec))\n        existing = collection_count(coll_id)\n        _, coll = request(\"\
+    GET\", api(f\"/collections/{name}\"), ok=(200,))\n        held = (coll.get(\"metadata\") or {}).get(\"vigil_corpus_sha256\"\
+    ) if isinstance(coll, dict) else None\n        if existing > 0 and held != CORPUS_SHA256 and not RECREATE:\n         \
+    \   raise RuntimeError(f\"collection {name!r} holds another corpus build (sha256 {held}); RECREATE=1 replaces it\")\n\
+    \        if existing > 0 and RECREATE:\n            log(f\"RECREATE=1: dropping {name!r} ({existing} vectors)\")\n   \
+    \         request(\"DELETE\", api(f\"/collections/{coll_id}\"), ok=(200, 204))\n            coll_id = get_or_create_collection(name,\
+    \ collection_metadata(header, name, spec))\n            existing = collection_count(coll_id)\n        if existing == spec[\"\
+    count\"] and not FORCE:\n            log(f\"collection {name!r} already holds its {existing} vectors; skipping (FORCE_LOAD=1\
+    \ to reload)\")\n            continue\n        if existing:\n            log(f\"collection {name!r} holds {existing} of\
+    \ {spec['count']} vectors; adding (ids are stable)\")\n        ids[name] = coll_id\n    batches = {name: ([], [], [],\
+    \ []) for name in ids}\n    counts = dict.fromkeys(ids, 0)\n\n    def flush(name):\n        b_ids, b_emb, b_doc, b_meta\
+    \ = batches[name]\n        if b_ids:\n            # upsert: a re-run after a partial load rewrites the same ids\n    \
+    \        request(\"POST\", api(f\"/collections/{ids[name]}/upsert\"),\n                    {\"ids\": b_ids, \"embeddings\"\
+    : b_emb, \"documents\": b_doc, \"metadatas\": b_meta}, ok=(200, 201))\n            for part in batches[name]:\n      \
+    \          part.clear()\n\n    for line in lines:\n        e = json.loads(line)\n        name = e[\"c\"]\n        if name\
+    \ not in ids:\n            continue\n        raw = base64.b64decode(e[\"e\"])\n        if len(raw) != 2 * dim:\n     \
+    \       raise RuntimeError(f\"{name}: vector of {len(raw) // 2} dims, header says {dim}\")\n        b_ids, b_emb, b_doc,\
+    \ b_meta = batches[name]\n        b_ids.append(f\"{name}-{counts[name]}\")\n        b_emb.append(list(struct.unpack(f\"\
+    <{dim}e\", raw)))\n        b_doc.append(e[\"t\"])\n        b_meta.append({\"source\": e[\"s\"]})\n        counts[name]\
+    \ += 1\n        if len(b_ids) >= BATCH:\n            flush(name)\n            if counts[name] % (BATCH * 40) == 0:\n \
+    \               log(f\"  {name}: {counts[name]} / {header['collections'][name]['count']}\")\n    for name in ids:\n  \
+    \      flush(name)\n        final = collection_count(ids[name])\n        want = header[\"collections\"][name][\"count\"\
+    ]\n        if final != want:\n            raise RuntimeError(f\"collection {name!r} holds {final} vectors after loading,\
+    \ expected {want}\")\n        log(f\"collection {name!r} now holds {final} vectors (threshold {header['collections'][name]['threshold']:.4f})\"\
+    )\n    return set(header[\"collections\"])\n\n\ndef prune_other(keep):\n    \"\"\"Delete vigil_* collections that are\
+    \ not part of the corpus just loaded.\"\"\"\n    _, colls = request(\"GET\", api(\"/collections?limit=1000\"), ok=(200,))\n\
+    \    for c in colls or []:\n        name = c.get(\"name\", \"\")\n        if name.startswith(\"vigil_\") and name not\
+    \ in keep:\n            log(f\"PRUNE_OTHER=1: deleting {name!r} (not in this corpus)\")\n            request(\"DELETE\"\
+    , api(f\"/collections/{name}\"), ok=(200, 204))\n\n\ndef main():\n    log(f\"chroma frontend: {CHROMA_URL} (tenant={TENANT}\
+    \ database={DATABASE})\")\n    wait_for_frontend()\n    if CORPUS_URL:\n        keep = load_calibrated(CORPUS_URL)\n \
+    \       log(\"calibrated corpus loaded\")\n        if PRUNE_OTHER:\n            prune_other(keep)\n        return\n  \
+    \  failures = 0\n    for spec in CORPORA:\n        try:\n            load_corpus(spec)\n        except Exception as err:\
+    \  # noqa: BLE001 - report every corpus, fail the job at the end\n            log(f\"ERROR loading {spec['collection']}:\
     \ {err}\")\n            failures += 1\n    if failures:\n        raise SystemExit(f\"{failures} corpus load(s) failed\"\
     )\n    log(\"all corpora loaded\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
 kind: ConfigMap
@@ -2979,7 +2992,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: loader
-        image: docker.io/jjhonson/vigil-corpus:e5s-v2-74e7084f5790
+        image: docker.io/jjhonson/vigil-corpus:e5s-v3-2d9653151abc
         imagePullPolicy: IfNotPresent
         command:
         - python
@@ -2993,9 +3006,11 @@ spec:
               name: chroma-auth
               key: writer-token
         - name: CORPUS_URL
-          value: file:///corpus/vigil-corpus-e5s-v2.jsonl.gz
+          value: file:///corpus/vigil-corpus-e5s-v3.jsonl.gz
         - name: CORPUS_SHA256
-          value: 74e7084f579069561ab06ed52be1278c2e3389ee6be16d65b66d8d2f07b29dce
+          value: 2d9653151abcc51d641daba458fb74c966f0d1825da177eb1a975acb277b2acc
+        - name: PRUNE_OTHER
+          value: '1'
         securityContext:
           runAsNonRoot: true
           runAsUser: 65534

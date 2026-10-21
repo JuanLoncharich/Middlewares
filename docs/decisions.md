@@ -296,3 +296,17 @@ Decisions made before this log existed are not back-filled here.
 - **Alternatives:** keep it open (the old behaviour); an FQDN allowlist
   (needs Cilium).
 - **Who decided:** Juan.
+
+### 2026-10-21 — A trained head beside the kNN scan (corpus e5s-v3)
+- **Decision:** Vigil's vector scanner also scores every window with a
+  logistic regression trained on the same e5 embeddings (corpus entries vs
+  benign tool, MCP and general texts). The weights live in the whole
+  collection's metadata; kNN and head share the 2 % false-positive budget
+  (half each).
+- **Reason:** nearest-neighbour search does not generalise to attack
+  families the corpus lacks. Held-out: Tensor Trust 63 → 84 %, generated
+  MCP 40 → 55 %, MCPTox 3 → 14 %, MCPTox hidden in text 39 → 49 %, with
+  tool-text false positives 2.7/2.8 → 4.1/0.6 %.
+- **Alternatives:** kNN only (v2); a small MLP head (similar results in the
+  study, more to maintain); fine-tuning the embedder (much more work and GPU).
+- **Who decided:** Juan.

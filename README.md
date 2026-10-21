@@ -173,9 +173,11 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
   with our calibrated corpus (`hack/vigil-corpus/`): about 40 000 known
   malicious prompts and injections (deadbits, LLMail-Inject, HackAPrompt,
   Mosscap, Gandalf and others, plus poisoned MCP tool texts we generated with
-  a local LLM), embedded with `intfloat/multilingual-e5-small`, with one
-  distance threshold per collection calibrated to a 2 % false-positive rate
-  on benign tool-like text. The corpus lives in Chroma (namespace `chroma`,
+  a local LLM), embedded with `intfloat/multilingual-e5-small`, plus a
+  logistic-regression head trained on the same embeddings that catches
+  attack families the corpus lacks. Distance thresholds and head threshold
+  are calibrated together to a 2 % false-positive rate on benign tool-like
+  text. The corpus lives in Chroma (namespace `chroma`,
   distributed over MinIO in production, one pod in kind), loaded by the
   `vigil-corpus-loader` Job from a file pinned by sha256, and queried through
   `chroma-gateway` with a read-only token (`manifests/chroma/README.md`).

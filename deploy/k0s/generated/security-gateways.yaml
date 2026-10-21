@@ -94,7 +94,7 @@ spec:
           sizeLimit: 128Mi
       containers:
       - name: gateway
-        image: docker.io/jjhonson/occludra-gateway:sha-4ae8725
+        image: docker.io/jjhonson/occludra-gateway:sha-1276e3f
         imagePullPolicy: Always
         ports:
         - name: http
@@ -474,10 +474,10 @@ data:
     \ over REST v2\n# (images/vigil-llm/remote_vectordb.py). Required: if Chroma does not\n# answer, the scan answers 500\
     \ and the evaluation fails closed.\n# chroma-gateway checks a bearer token: the reader token reaches the\n# pod as env\
     \ CHROMA_TOKEN (Secret chroma-reader, hack/chroma/deploy.sh).\nchroma_url = http://chroma-gateway.chroma.svc.cluster.local:8080\n\
-    token_env = CHROMA_TOKEN\ntenant = default_tenant\ndatabase = default_database\n# Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json):\n\
+    token_env = CHROMA_TOKEN\ntenant = default_tenant\ndatabase = default_database\n# Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json):\n\
     # whole texts vs the whole chunk, single sentences vs each sentence of\n# it, each collection with its own calibrated\
-    \ threshold (metadata); a hit\n# must also be closer than the nearest benign tool/MCP-server text.\ncollections = vigil_e5s_v2_whole\n\
-    sentence_collections = vigil_e5s_v2_sentence\nbenign_collections = vigil_e5s_v2_benign\ntimeout_s = 5\nn_results = 5\n\
+    \ threshold (metadata); a hit\n# must also be closer than the nearest benign tool/MCP-server text.\ncollections = vigil_e5s_v3_whole\n\
+    sentence_collections = vigil_e5s_v3_sentence\nbenign_collections = vigil_e5s_v3_benign\ntimeout_s = 5\nn_results = 5\n\
     # Upstream's local-database keys; unused while chroma_url is set.\ncollection = vigil-local\n# Writable path: the container\
     \ root filesystem is read-only; /tmp is an\n# emptyDir.\ndb_dir = /tmp/vigil-vdb\n\n[auto_update]\n# Do not mutate the\
     \ corpus from scan traffic \u2014 deterministic scans.\nenabled = false\nthreshold = 3\n\n[scanners]\ninput_scanners =\
@@ -549,7 +549,7 @@ spec:
           sizeLimit: 256Mi
       containers:
       - name: vigil
-        image: docker.io/jjhonson/vigil-llm:sha-4ae8725
+        image: docker.io/jjhonson/vigil-llm:sha-1276e3f
         imagePullPolicy: Always
         command:
         - python
