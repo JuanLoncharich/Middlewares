@@ -469,21 +469,41 @@ async function runAgentPrompt(
     // a server-side StructuredOutputError while the text parts still carry a
     // JSON answer — recover it before failing.
     let structured = extractStructuredOutput(info);
+    let parts = result.data.parts;
     if (structured === undefined) {
-      structured = extractJsonFromTextParts(result.data.parts);
+      structured = extractJsonFromTextParts(parts);
       if (structured !== undefined) {
         log.warn("structured output missing; recovered JSON from text parts", { agent: name });
       }
     }
+    // Custom providers run without tool calling, so OpenCode cannot enforce
+    // the schema and its retries never happen: when the answer carries no
+    // JSON at all, ask again in the same session, up to retryCount (max 2).
+    for (let attempt = 1; structured === undefined && isCustomProvider(agent.spec.model.providerID) && attempt <= Math.min(retryCount, 2); attempt++) {
+      log.warn("no JSON in the answer; asking again for the JSON object only", { agent: name, attempt });
+      const again = await handle.client.session.prompt({
+        sessionID: session.data.id,
+        directory,
+        model: { providerID: agent.spec.model.providerID, modelID: agent.spec.model.modelID },
+        system: agent.spec.systemPrompt,
+        tools: toolsForKind(false),
+        parts: [{ type: "text", text: "Your previous answer contained no JSON object. You have NO tools in this session: do not call any tool or write a tool call. Everything you can use is in the first message. Reply now with ONLY the JSON object that follows the required schema — no prose, no code fence." }],
+      });
+      if (again.error !== undefined || again.data === undefined) break;
+      parts = again.data.parts;
+      structured = extractJsonFromTextParts(parts);
+    }
     if (structured === undefined) {
-      if (info.error !== undefined && info.error.name === "StructuredOutputError") {
-        throw new StructuredOutputExhaustedError(name, info.error.data.retries, info.error.data.message);
-      }
-      const text = result.data.parts
+      // What the model said instead (redacted by the logger like any field), to tell
+      // a refusal, an empty answer and prose apart.
+      const text = parts
         .map((p) => (p.type === "text" ? p.text : ""))
         .join("")
         .slice(0, 300);
-      throw new StructuredOutputExhaustedError(name, retryCount, `no structured output on assistant message (text: ${text})`);
+      if (info.error !== undefined && info.error.name === "StructuredOutputError") {
+        throw new StructuredOutputExhaustedError(name, info.error.data.retries, `${info.error.data.message} (text: ${JSON.stringify(text)})`);
+      }
+      throw new StructuredOutputExhaustedError(name, retryCount, `no structured output on assistant message (text: ${JSON.stringify(text)})`);
     }
     return { structured, durationMs: Date.now() - started };
   };
@@ -668,7 +688,8 @@ function parseSynthesis(raw: unknown, agentName: string): SynthesisOutput {
   const safetyScore = clampScore(raw["safetyScore"] ?? raw["safety_score"] ?? raw["score"]);
   const reliabilityScore = clampScore(raw["reliabilityScore"] ?? raw["reliability_score"] ?? safetyScore);
   if (safetyScore === null && reliabilityScore === null) {
-    throw new StructuredOutputExhaustedError(agentName, 0, "synthesis output lacks safetyScore and reliabilityScore");
+    throw new StructuredOutputExhaustedError(agentName, 0,
+      `synthesis output lacks safetyScore and reliabilityScore (keys: ${JSON.stringify(Object.keys(raw).slice(0, 20))})`);
   }
   const riskCategory: RiskCategory = isRiskCategory(raw["riskCategory"]) ? raw["riskCategory"] : "Unknown";
   const summary = typeof raw["summary"] === "string" ? raw["summary"] : "";
