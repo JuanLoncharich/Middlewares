@@ -105,6 +105,13 @@
 #   CHROMA_IMG_TAG               chroma component image tag (short commit SHA from the `chromadb`
 #                                Docker Hub org; keep in vintage with the vendored chart).
 #   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
+#   VIGIL_CORPUS_LOCK            lock of Vigil's calibrated corpus (default
+#                                hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json: file name, sha256,
+#                                thresholds, test report). Vigil's server.conf names its collections.
+#   VIGIL_CORPUS_FILE            that corpus file (default hack/vigil-corpus/dist/<file from the lock>;
+#                                build it with hack/vigil-corpus/build_corpus.py). Checked against the
+#                                lock's sha256, then baked into $IMG_REGISTRY/vigil-corpus:<name>-<sha12>.
+#   VIGIL_CORPUS_IMG             that image (default as above; with SKIP_BUILD=1, an already pushed one).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -123,6 +130,14 @@ DEPLOY_NETBIRD_CP="${DEPLOY_NETBIRD_CP:-0}"
 DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
+VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json}"
+if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
+  [ -f "$VIGIL_CORPUS_LOCK" ] || { echo "ERROR: corpus lock $VIGIL_CORPUS_LOCK missing" >&2; exit 1; }
+  read -r VIGIL_CORPUS_NAME VIGIL_CORPUS_BASENAME VIGIL_CORPUS_SHA256 < <(python3 -c \
+    'import json,sys; l=json.load(open(sys.argv[1])); print(l["name"], l["file"], l["sha256"])' "$VIGIL_CORPUS_LOCK")
+  VIGIL_CORPUS_FILE="${VIGIL_CORPUS_FILE:-hack/vigil-corpus/dist/$VIGIL_CORPUS_BASENAME}"
+  VIGIL_CORPUS_IMG="${VIGIL_CORPUS_IMG:-$IMG_REGISTRY/vigil-corpus:$VIGIL_CORPUS_NAME-${VIGIL_CORPUS_SHA256:0:12}}"
+fi
 WORKSTATION_NODEPORT="${WORKSTATION_NODEPORT:-0}"
 WORKSTATION_CIDR="${WORKSTATION_CIDR:-172.21.0.0/16}"
 # Vigil sizing: defaults fit multi-node production. The real vigil-llm image
@@ -235,6 +250,16 @@ if [ "$SKIP_BUILD" != "1" ]; then
       "$VIGIL_SRC_DIR"
     rm -rf "$VIGIL_SRC_DIR"
     docker push "$VIGIL_IMG"
+  fi
+  if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
+    log "Building the Vigil corpus image ($VIGIL_CORPUS_IMG)"
+    [ -f "$VIGIL_CORPUS_FILE" ] || { echo "ERROR: $VIGIL_CORPUS_FILE missing — build it (hack/vigil-corpus/README.md) or set VIGIL_CORPUS_FILE" >&2; exit 1; }
+    echo "$VIGIL_CORPUS_SHA256  $VIGIL_CORPUS_FILE" | sha256sum -c --quiet \
+      || { echo "ERROR: $VIGIL_CORPUS_FILE does not match the sha256 in $VIGIL_CORPUS_LOCK" >&2; exit 1; }
+    docker build -f images/vigil-corpus-loader/Dockerfile.corpus \
+      --build-context corpus="$(dirname "$VIGIL_CORPUS_FILE")" --build-arg CORPUS_FILE="$VIGIL_CORPUS_BASENAME" \
+      -t "$VIGIL_CORPUS_IMG" images/vigil-corpus-loader
+    docker push "$VIGIL_CORPUS_IMG"
   fi
 fi
 
@@ -389,7 +414,8 @@ if [ "$DEPLOY_VECTOR_DB" != "1" ] && [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ] \
        "Secret chroma-reader to even start), so evaluations will fail closed." >&2
 fi
 if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
-  CHROMA_IMG_TAG="$CHROMA_IMG_TAG" SKIP_CORPUS_LOAD="$SKIP_CORPUS_LOAD" hack/chroma/deploy.sh
+  CHROMA_IMG_TAG="$CHROMA_IMG_TAG" SKIP_CORPUS_LOAD="$SKIP_CORPUS_LOAD" \
+    VIGIL_CORPUS_IMG="${VIGIL_CORPUS_IMG:-}" VIGIL_CORPUS_LOCK="$VIGIL_CORPUS_LOCK" hack/chroma/deploy.sh
 fi
 
 if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then

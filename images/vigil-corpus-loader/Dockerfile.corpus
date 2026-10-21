@@ -1,0 +1,10 @@
+# The calibrated corpus as an image, so the loader Job needs no download:
+# the pinned python:alpine of the loader plus one vigil-corpus/1 file.
+# load_corpus.py itself comes from the ConfigMap (manifests/chroma/corpus-loader-job.yaml).
+#
+#   docker build -f images/vigil-corpus-loader/Dockerfile.corpus \
+#     --build-context corpus=<dir holding the file> --build-arg CORPUS_FILE=<file name> -t <img> images/vigil-corpus-loader
+FROM python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
+ARG CORPUS_FILE
+COPY --from=corpus ${CORPUS_FILE} /corpus/${CORPUS_FILE}
+USER 65534:65534

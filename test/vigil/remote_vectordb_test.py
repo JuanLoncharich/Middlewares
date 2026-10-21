@@ -27,8 +27,8 @@ FIRST_JB = json.load(open(os.path.join(SUBSET, "jb.json")))[0]["text"]
 FIRST_IB = json.load(open(os.path.join(SUBSET, "ib.json")))[3]["text"]
 
 
-def embed(text):
-    return CORPUS[text][0]
+def embed(texts):
+    return [CORPUS[t][0] for t in texts]
 
 
 def db(**kw):
@@ -63,8 +63,8 @@ class RemoteVectorDBTest(unittest.TestCase):
 
     def test_cosine_space(self):
         # Opposite vector: cosine distance ~2 (l2 on unit vectors would give ~4 squared / 2 raw).
-        neg = [-x for x in embed(FIRST_IB)]
-        r = RemoteVectorDB(model="unused", chroma_url=CHROMA, embed_fn=lambda _t: neg,
+        neg = [-x for x in embed([FIRST_IB])[0]]
+        r = RemoteVectorDB(model="unused", chroma_url=CHROMA, embed_fn=lambda ts: [neg for _ in ts],
                            collections="vigil_instruction_bypass", n_results="1")
         far = r.query("anything")["distances"][0][0]
         self.assertLessEqual(far, 2.0 + 1e-3)
@@ -118,6 +118,10 @@ class RemoteVectorDBTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 403)
+
+    def test_legacy_corpus_rejects_sentence_collections(self):
+        with self.assertRaises(RemoteVectorDBError):
+            db(sentence_collections="vigil_jailbreak").query(FIRST_IB)
 
     def test_boot_does_not_need_chroma(self):
         RemoteVectorDB(model="unused", chroma_url="http://127.0.0.1:9", embed_fn=embed)

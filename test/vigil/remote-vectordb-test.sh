@@ -39,3 +39,9 @@ CORPUS_JAILBREAK_URL="file://$WORK/subset/jb.json" \
   python3 images/vigil-corpus-loader/load_corpus.py || { echo "loader failed"; exit 1; }
 
 CHROMA_URL="$CHROMA_GW_URL" CHROMA_TOKEN="$CHROMA_READER" SUBSET_DIR="$WORK/subset" python3 test/vigil/remote_vectordb_test.py
+rc=$?
+
+# The calibrated (vigil-corpus/1) path: loader + hybrid client, same Chroma.
+CHROMA_URL="$CHROMA_GW_URL" CHROMA_READER="$CHROMA_READER" CHROMA_WRITER="$CHROMA_WRITER" WORK="$WORK" \
+  python3 test/vigil/calibrated_corpus_test.py || rc=1
+exit $rc

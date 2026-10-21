@@ -31,7 +31,11 @@ data:
     use_cache = true
     cache_max = 500
     [embedding]
-    model = all-MiniLM-L6-v2
+    # Local SentenceTransformer embedder, downloaded from HuggingFace at boot.
+    # It must be the model the corpus was built with: the vector client
+    # checks the collections' metadata and an embedding probe, and fails
+    # closed on a mismatch (hack/vigil-corpus/, decision 2026-10-21).
+    model = intfloat/multilingual-e5-small
     [vectordb]
     # The corpus lives in the distributed Chroma (manifests/chroma/, loaded by
     # the vigil-corpus-loader Job) and is queried over REST v2
@@ -42,7 +46,11 @@ data:
     token_env = CHROMA_TOKEN
     tenant = default_tenant
     database = default_database
-    collections = vigil_instruction_bypass,vigil_jailbreak
+    # Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json):
+    # whole texts vs the whole chunk, single sentences vs each sentence of
+    # it, each collection with its own calibrated threshold (metadata).
+    collections = vigil_e5s_v1_whole
+    sentence_collections = vigil_e5s_v1_sentence
     timeout_s = 5
     n_results = 5
     # Same corpus as the CPU Vigil. When this pod runs on the PC through Liqo
@@ -61,7 +69,10 @@ data:
     # Same rules as the CPU Vigil (ConfigMap vigil-yara-rules, deploy.sh).
     rules_dir = /app/yara-rules
     [scanner:vectordb]
-    threshold = 0.4
+    # The vector client returns only neighbours already under their
+    # collection's calibrated threshold; 2.0 (above any cosine distance)
+    # keeps upstream's scanner from filtering a second time.
+    threshold = 2.0
     [scanner:transformer]
     model = laiyer/deberta-v3-base-prompt-injection
     threshold = 0.98

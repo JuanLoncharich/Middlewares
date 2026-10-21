@@ -1,23 +1,28 @@
 # ---------------------------------------------------------------------------
-# Corpus loader Job — downloads Vigil's embedding corpora from HuggingFace
-# (deadbits org) and pushes them into the distributed Chroma collections via
-# the frontend REST API.
+# Corpus loader Job — loads Vigil's calibrated corpus (vigil-corpus/1, built
+# by hack/vigil-corpus/build_corpus.py, pinned by the sha256 in its lock file
+# hack/vigil-corpus/*.lock.json) into Chroma through chroma-gateway.
 #
-# No image of our own: stock python:alpine (pinned) runs load_corpus.py
-# (stdlib only) from the ConfigMap vigil-corpus-loader, which
-# hack/chroma/deploy.sh creates from images/vigil-corpus-loader/. So any
-# cluster that can pull from Docker Hub can load the corpus — no registry
-# push needed. It writes through chroma-gateway with the writer token
-# (Secret chroma-auth). Idempotent: collections holding vectors are
-# skipped (FORCE_LOAD=1 to reload); re-applying after a completed Job
-# re-runs it only when the spec changes (deploy.sh deletes+recreates it).
+# The script is load_corpus.py (stdlib only) from the ConfigMap
+# vigil-corpus-loader, which hack/chroma/deploy.sh creates from
+# images/vigil-corpus-loader/. The image is ours only to carry the data:
+# images/vigil-corpus-loader/Dockerfile.corpus = the pinned python:alpine
+# plus the corpus file at /corpus/ (deploy.sh builds and pushes it as
+# $IMG_REGISTRY/vigil-corpus:<name>-<sha12>; __VIGIL_CORPUS_IMG__,
+# __CORPUS_FILE__ and __CORPUS_SHA256__ are filled in by hack/chroma/deploy.sh).
+# The loader checks the file's sha256 before writing anything. It writes with
+# the writer token (Secret chroma-auth). Idempotent: collections already
+# holding this build are skipped (FORCE_LOAD=1 to reload; another build under
+# the same name is refused unless RECREATE=1).
 #
-# Corpus -> collection mapping (all-MiniLM-L6-v2, 384-dim):
-#   deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2 -> vigil_instruction_bypass
-#   deadbits/vigil-jailbreak-all-MiniLM-L6-v2          -> vigil_jailbreak
+# Collections (multilingual-e5-small, 384-dim, cosine), with their calibrated
+# thresholds in the collection metadata:
+#   vigil_<name>_whole     whole malicious texts
+#   vigil_<name>_sentence  their single sentences
 #
 # NetworkPolicy: the only pod in `chroma` allowed HTTPS egress is this Job
-# (see networkpolicy.yaml).
+# (see networkpolicy.yaml) — not needed for the calibrated corpus, which is
+# in the image; kept for the legacy deadbits download (no CORPUS_URL).
 # ---------------------------------------------------------------------------
 apiVersion: batch/v1
 kind: Job
@@ -44,7 +49,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: loader
-          image: python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
+          image: __VIGIL_CORPUS_IMG__
           imagePullPolicy: IfNotPresent
           command: ["python", "/app/load_corpus.py"]
           env:
@@ -53,6 +58,10 @@ spec:
             - name: CHROMA_TOKEN
               valueFrom:
                 secretKeyRef: {name: chroma-auth, key: writer-token}
+            - name: CORPUS_URL
+              value: file:///corpus/__CORPUS_FILE__
+            - name: CORPUS_SHA256
+              value: "__CORPUS_SHA256__"
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -69,7 +78,7 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
-            # 8800+ entries x 384 floats parsed in memory, plus batch state.
+            # The compressed file (~150 MB) in memory, streamed line by line, plus batch state.
             limits:
               cpu: "1"
               memory: 1Gi

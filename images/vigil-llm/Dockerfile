@@ -23,7 +23,9 @@
 #  7. the vectordb scanner queries the distributed Chroma over REST v2
 #     (remote_vectordb.py, needs --build-context vigil-patches=images/vigil-llm);
 #  8. upstream bug: [auto_update] enabled is read as a string, so "false" is
-#     truthy and auto-update was always on — parse it as a boolean.
+#     truthy and auto-update was always on — parse it as a boolean;
+#  9. one SentenceTransformer per process (the Embedder reuses the vector
+#     client's), so the multilingual-e5-small embedder is loaded once.
 # Runtime notes for the manifests: start the server directly (skip upstream's
 # entrypoint dataset loader: its 1536-dim ada-002 vectors never match the
 # 384-dim MiniLM embedder, and re-streaming them took ~6 min per start) and
@@ -126,6 +128,14 @@ RUN sed -i 's/^        self.vectordb = VectorDB(\*\*params)$/        if params.g
 RUN sed -i "s/auto_update = manager_config.get('auto_update', {}).get('enabled', False)$/auto_update = str(manager_config.get('auto_update', {}).get('enabled', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')/" vigil/vigil.py \
  && grep -q "in ('1', 'true', 'yes', 'on')" vigil/vigil.py \
  && python -c "import ast; ast.parse(open('vigil/vigil.py').read())"
+
+# Patch 8 — one embedding model per process. Upstream's Embedder (used by the
+# output similarity scanner) loads its own SentenceTransformer next to the
+# vector db's: with multilingual-e5-small that is ~470 MB twice. It takes the
+# remote client's cached instance instead (same model name -> same object).
+RUN sed -i 's/^                self.model = SentenceTransformer(model)$/                from vigil.core.remote_vectordb import load_model\n                self.model = load_model(model)/' vigil/core/embedding.py \
+ && grep -q 'self.model = load_model(model)' vigil/core/embedding.py \
+ && python -c "import ast; ast.parse(open('vigil/core/embedding.py').read())"
 
 ENV HF_HOME=/cache/hf \
     SENTENCE_TRANSFORMERS_HOME=/cache/st \

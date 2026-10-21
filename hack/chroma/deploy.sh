@@ -15,6 +15,11 @@
 #   CHROMA_QUERY_REPLICAS        query-service replicas (default 2)
 #   CHROMA_COMPACTION_REPLICAS   compaction-service replicas (default 2)
 #   SKIP_CORPUS_LOAD=1           do not run the loader Job
+#   VIGIL_CORPUS_IMG             image carrying the calibrated corpus file (deploy.sh builds it:
+#                                images/vigil-corpus-loader/Dockerfile.corpus); required unless
+#                                SKIP_CORPUS_LOAD=1
+#   VIGIL_CORPUS_LOCK            lock file pinning that corpus (default
+#                                hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json): file name + sha256
 #   CHROMA_ROTATE_TOKENS=1       replace both tokens (gateway and Vigil pods are restarted)
 #
 # Tokens: Secret chroma-auth (namespace chroma: reader-token, writer-token)
@@ -29,6 +34,7 @@ CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 CHROMA_QUERY_REPLICAS="${CHROMA_QUERY_REPLICAS:-2}"
 CHROMA_COMPACTION_REPLICAS="${CHROMA_COMPACTION_REPLICAS:-2}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
+VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json}"
 CHROMA_ROTATE_TOKENS="${CHROMA_ROTATE_TOKENS:-0}"
 
 k() { kubectl ${CONTEXT:+--context "$CONTEXT"} "$@"; }
@@ -166,14 +172,17 @@ k -n chroma rollout status deploy/chroma-gateway --timeout=180s
 
 # ---- corpus ----
 if [ "$SKIP_CORPUS_LOAD" != "1" ]; then
-  log "Loading Vigil embedding corpora (Job vigil-corpus-loader)"
+  : "${VIGIL_CORPUS_IMG:?set VIGIL_CORPUS_IMG (the corpus image deploy.sh builds), or SKIP_CORPUS_LOAD=1}"
+  read -r CORPUS_FILE CORPUS_SHA256 < <(python3 -c 'import json,sys; l=json.load(open(sys.argv[1])); print(l["file"], l["sha256"])' "$VIGIL_CORPUS_LOCK")
+  log "Loading Vigil corpus $CORPUS_FILE (sha256 ${CORPUS_SHA256:0:12}…) from $VIGIL_CORPUS_IMG (Job vigil-corpus-loader)"
   k -n chroma create configmap vigil-corpus-loader \
     --from-file=load_corpus.py=images/vigil-corpus-loader/load_corpus.py --dry-run=client -o yaml | k apply -f -
   # A Job's pod template is immutable: replace it so a new run happens.
   k -n chroma delete job vigil-corpus-loader --ignore-not-found --wait=true
-  k apply -f manifests/chroma/corpus-loader-job.yaml
-  # First (cold) run downloads the datasets from HuggingFace.
-  k -n chroma wait --for=condition=complete job/vigil-corpus-loader --timeout=900s \
+  sed -e "s|__VIGIL_CORPUS_IMG__|$VIGIL_CORPUS_IMG|" -e "s|__CORPUS_FILE__|$CORPUS_FILE|" \
+      -e "s|__CORPUS_SHA256__|$CORPUS_SHA256|" manifests/chroma/corpus-loader-job.yaml | k apply -f -
+  # ~200k vectors through the gateway: minutes on a laptop, longer on the distributed Chroma.
+  k -n chroma wait --for=condition=complete job/vigil-corpus-loader --timeout=1800s \
     || { echo "ERROR: corpus loader did not complete — logs: kubectl -n chroma logs job/vigil-corpus-loader" >&2; exit 1; }
 fi
 echo "Chroma ($VECTOR_DB_MODE) up behind http://chroma-gateway.chroma.svc.cluster.local:8080"
