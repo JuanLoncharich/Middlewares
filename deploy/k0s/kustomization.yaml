@@ -10,3 +10,4 @@ patches:
   # the GPU PC when that is attached (hack/gpu-node). No PC, no scans: the
   # evaluator fails closed.
   - path: patches/vigil-on-gpu-node.yaml
+  - path: patches/occludra-small.yaml
