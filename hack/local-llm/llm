@@ -25,10 +25,13 @@
 #   LLM_IP        fixed IP on the docker network (default 172.18.0.250)
 #   PORT          (default 8080)
 #   DOCKER_NET    (default kind)
-#   PUBLISH       a host IPv4 to publish the port on instead of joining DOCKER_NET, for a
-#                 cluster that reaches this machine over an overlay (k0s over ZeroTier:
-#                 PUBLISH=<this PC's ZeroTier IP>). Only that address listens; set
-#                 LOCAL_LLM_API_KEY, since every peer on that network can reach it.
+#   PUBLISH       host IPv4 address(es), comma-separated, to publish the port on instead of
+#                 joining DOCKER_NET, for a cluster that reaches this machine over an overlay
+#                 (k0s over ZeroTier: PUBLISH=<this PC's ZeroTier IP>). Only those addresses
+#                 listen; the first is the one status/smoke use. An entry ip:hostport publishes
+#                 on another host port (e.g. 10.147.19.21:8082 when 8080 is taken there).
+#                 Set LOCAL_LLM_API_KEY, since
+#                 every peer on those networks can reach it.
 #   WEBUI         1 = serve llama.cpp's chat page at http://$LLM_IP:$PORT/ (default 0; it asks
 #                 for the API key under Settings)
 #   IMAGE         llama.cpp server image (default: server-cuda build 11610, pinned by digest)
@@ -40,7 +43,7 @@ LLM_IP="${LLM_IP:-172.18.0.250}"
 PORT="${PORT:-8080}"
 DOCKER_NET="${DOCKER_NET:-kind}"
 PUBLISH="${PUBLISH:-}"
-[ -z "$PUBLISH" ] || LLM_IP="$PUBLISH"
+if [ -n "$PUBLISH" ]; then first="${PUBLISH%%,*}"; LLM_IP="${first%%:*}"; fi
 CTX="${CTX:-32768}"
 NGL="${NGL:-999}"
 N_CPU_MOE="${N_CPU_MOE:-0}"
@@ -60,8 +63,14 @@ up() {
   alias="${MODEL_ALIAS:-${file%.gguf}}"
   local net_args
   if [ -n "$PUBLISH" ]; then
-    ip -4 -o addr | grep -q " $PUBLISH/" || die "PUBLISH=$PUBLISH is not an address of this machine"
-    net_args=(-p "$PUBLISH:$PORT:$PORT")
+    net_args=()
+    local addr
+    for addr in ${PUBLISH//,/ }; do
+      local host_port="$PORT"
+      [[ "$addr" != *:* ]] || { host_port="${addr#*:}"; addr="${addr%%:*}"; }
+      ip -4 -o addr | grep -q " $addr/" || die "PUBLISH: $addr is not an address of this machine"
+      net_args+=(-p "$addr:$host_port:$PORT")
+    done
   else
     docker network inspect "$DOCKER_NET" >/dev/null 2>&1 \
       || die "docker network '$DOCKER_NET' not found (create the kind cluster first: test/kind/create-cluster.sh)"
