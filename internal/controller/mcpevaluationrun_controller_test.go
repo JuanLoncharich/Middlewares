@@ -517,3 +517,53 @@ func TestBuildJobPassesGitCAAsPEMNotAsCAInfoPath(t *testing.T) {
 		t.Fatalf("GIT_CA_PEM ref = %+v, want optional git-creds/ca.crt", ref)
 	}
 }
+
+// Untrusted code (the cloner runs repository build steps, the target is the
+// server under test) must never mount the evaluator's HOME.
+func TestBuildJobUntrustedContainersDoNotShareTheEvaluatorHome(t *testing.T) {
+	for _, images := range []ImageConfig{meshImages(), {}} {
+		job := (&MCPEvaluationRunReconciler{Images: images}).buildJob(testRun(), &securityv1alpha1.MCPServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "mcp-evals"},
+			Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+		})
+		spec := job.Spec.Template.Spec
+		mounts := map[string]map[string]string{} // container -> mountPath -> volume
+		for _, c := range append(append([]corev1.Container{}, spec.InitContainers...), spec.Containers...) {
+			mounts[c.Name] = map[string]string{}
+			for _, m := range c.VolumeMounts {
+				mounts[c.Name][m.MountPath] = m.Name
+			}
+		}
+		home := mounts[containerEvaluator][mountTmp]
+		if home == "" {
+			t.Fatal("evaluator has no /tmp")
+		}
+		for _, untrusted := range []string{containerCloner, containerTarget} {
+			if mounts[untrusted] == nil {
+				t.Fatalf("no %s container", untrusted)
+			}
+			if mounts[untrusted][mountTmp] == "" {
+				t.Errorf("%s has no /tmp of its own", untrusted)
+			}
+			for path, vol := range mounts[untrusted] {
+				if vol == home {
+					t.Errorf("%s mounts the evaluator's HOME volume %q at %s", untrusted, vol, path)
+				}
+			}
+		}
+		if mounts[containerCloner][mountTmp] == mounts[containerTarget][mountTmp] {
+			t.Error("cloner and target share a /tmp")
+		}
+		declared := map[string]bool{}
+		for _, v := range spec.Volumes {
+			declared[v.Name] = true
+		}
+		for c, ms := range mounts {
+			for path, vol := range ms {
+				if !declared[vol] {
+					t.Errorf("%s mounts undeclared volume %q at %s", c, vol, path)
+				}
+			}
+		}
+	}
+}

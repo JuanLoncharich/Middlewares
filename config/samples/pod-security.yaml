@@ -16,7 +16,8 @@
 #     secrets, no credentials in env)
 #   * target runs as a different UID (10002) than the evaluator (10001)
 #   * target's /workspace mount is read-only; the only writable paths are
-#     /tmp and /ipc (memory-backed emptyDir)
+#     its own /tmp and /ipc (memory-backed emptyDir)
+#   * cloner and target each get their own /tmp, never the evaluator's HOME
 #   * hostNetwork/hostPID/hostIPC are false (defaults, stated explicitly)
 # ---------------------------------------------------------------------------
 apiVersion: v1
@@ -87,7 +88,7 @@ spec:
           mountPath: /workspace
         - name: ipc
           mountPath: /ipc
-        - name: tmp
+        - name: cloner-tmp
           mountPath: /tmp
   containers:
     # ---------------------------------------------------------------- target
@@ -130,7 +131,7 @@ spec:
           readOnly: true
         - name: ipc
           mountPath: /ipc
-        - name: tmp
+        - name: target-tmp
           mountPath: /tmp
     # ------------------------------------------------------------- evaluator
     - name: evaluator
@@ -215,9 +216,15 @@ spec:
       emptyDir:
         medium: Memory
         sizeLimit: 64Mi
-    - name: tmp
+    - name: tmp            # evaluator's HOME (OpenCode config/sessions); untrusted code never mounts it
       emptyDir:
         sizeLimit: 1Gi
+    - name: cloner-tmp     # the cloner runs repository build steps
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: target-tmp     # the server under test
+      emptyDir:
+        sizeLimit: 512Mi
     - name: output
       emptyDir:
         sizeLimit: 256Mi

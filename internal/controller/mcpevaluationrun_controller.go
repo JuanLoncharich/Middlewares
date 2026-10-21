@@ -70,7 +70,9 @@ const (
 
 	volumeWorkspace   = "workspace"
 	volumeIPC         = "ipc"
-	volumeTmp         = "tmp"
+	volumeTmp         = "tmp"        // evaluator + NetBird sidecar: the evaluator's HOME (OpenCode config, sessions)
+	volumeClonerTmp   = "cloner-tmp" // the cloner's own /tmp: it runs repository build code
+	volumeTargetTmp   = "target-tmp" // the untrusted server's own /tmp
 	volumeOutput      = "output"
 	volumeSAToken     = "sa-token"
 	volumeNetBirdStat = "netbird-state"
@@ -1089,6 +1091,26 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 				},
 			},
 		},
+		// Untrusted code never shares the evaluator's HOME: the cloner runs
+		// repository build steps (npm run build, Python build backends) and
+		// the target is the server under test; either could otherwise plant
+		// files (e.g. ~/.config/opencode) that the evaluator reads later.
+		{
+			Name: volumeClonerTmp,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: ptr.To(resource.MustParse("1Gi")),
+				},
+			},
+		},
+		{
+			Name: volumeTargetTmp,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: ptr.To(resource.MustParse("512Mi")),
+				},
+			},
+		},
 		{
 			Name: volumeOutput,
 			VolumeSource: corev1.VolumeSource{
@@ -1160,7 +1182,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	clonerMounts := []corev1.VolumeMount{
 		{Name: volumeWorkspace, MountPath: mountWorkspace},
 		{Name: volumeIPC, MountPath: mountIPC},
-		{Name: volumeTmp, MountPath: mountTmp},
+		{Name: volumeClonerTmp, MountPath: mountTmp},
 	}
 	if server.Spec.CredentialsSecretRef != "" {
 		clonerEnv = append(clonerEnv,
@@ -1237,7 +1259,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: volumeWorkspace, MountPath: mountWorkspace, ReadOnly: true},
 			{Name: volumeIPC, MountPath: mountIPC},
-			{Name: volumeTmp, MountPath: mountTmp},
+			{Name: volumeTargetTmp, MountPath: mountTmp},
 		},
 		SecurityContext: lockedSecurityContext(targetUID),
 		Resources: corev1.ResourceRequirements{
