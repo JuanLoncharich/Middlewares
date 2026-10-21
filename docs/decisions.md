@@ -180,3 +180,23 @@ Decisions made before this log existed are not back-filled here.
   behind Occludra, reached through an opt-in egress rule (`occludra-egress-local-llm`: Occludra →
   that IP/32:port only, deleted for any other provider). Replaces the mock-LLM plan.
   Who decided: Juan.
+
+### 2026-10-13 — KEDA reaches the operator through its own additive NetworkPolicy
+- **Decision:** `manifests/keda/allow-keda-to-operator.yaml` (keda-operator →
+  operator:8082), applied with `DEPLOY_KEDA=1`; observability's policy is untouched.
+  A dedicated operator ingress policy (option C) may come with M3.
+- **Reason:** observability's Ingress policy isolates the operator, which cut KEDA off
+  (reproduced in kind). Who decided: Juan.
+
+### 2026-10-13 — Git history with environment values stays as is (for now)
+- **Decision:** don't rewrite `gpu-node-nvidia`'s history although the repo is public.
+  Who decided: Juan (will handle it later).
+
+### 2026-10-14 — The operator owns its Ingress NetworkPolicy (supersedes the KEDA entry above)
+- **Decision:** `config/manager/network_policy.yaml` makes the operator pods default-deny for
+  Ingress and lists every legitimate client: Prometheus → 8443, KEDA → 8082. It replaces
+  r-baggioII's `operator-observability` (removed from `manifests/observability/integrations/`)
+  and the separate KEDA policy; `deploy.sh` deletes both from existing clusters.
+- **Reason:** who may reach the operator was a side effect of which optional stack was
+  installed. Least privilege, written in one place next to the operator.
+  Who decided: Juan. r-baggioII to be told (her file is removed).

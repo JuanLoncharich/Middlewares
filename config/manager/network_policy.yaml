@@ -1,0 +1,47 @@
+# Who may talk to the operator. Selecting the operator pods for Ingress makes
+# them default-deny: anything not listed below is dropped, including the
+# untrusted MCP target running in mcp-evals. Kubelet health probes (:8081)
+# come from the node itself, which NetworkPolicy always allows.
+#
+# Add a rule here when a new in-cluster client needs the operator; do not
+# rely on other components' policies to open or close these ports.
+#
+# Client pods are matched with matchExpressions, not matchLabels: the
+# config/default kustomization adds app.kubernetes.io/part-of to every
+# matchLabels selector (includeSelectors), which would make the Prometheus
+# and KEDA selectors match nothing. test/deploy/operator-netpol-test.sh
+# checks the rendered output.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controller-manager-ingress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  policyTypes: [Ingress]
+  ingress:
+  # Prometheus (DEPLOY_OBSERVABILITY=1) scrapes each replica's metrics.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchExpressions:
+        - {key: app.kubernetes.io/name, operator: In, values: [prometheus]}
+    ports:
+    - protocol: TCP
+      port: 8443
+  # KEDA's metrics-api scaler (DEPLOY_KEDA=1) polls GET /active-runs to scale
+  # the GPU Vigil 0 <-> 1.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: keda
+      podSelector:
+        matchExpressions:
+        - {key: app.kubernetes.io/name, operator: In, values: [keda-operator]}
+    ports:
+    - protocol: TCP
+      port: 8082

@@ -20,7 +20,9 @@ PY
 fi
 kubectl apply -k manifests/observability
 for namespace in mcp-eval-system mcp-evals security-gateways; do
-  if kubectl get namespace "$namespace" >/dev/null 2>&1; then
+  # mcp-eval-system has no file: the operator bundle owns its Ingress policy.
+  if [[ -f "manifests/observability/integrations/$namespace.yaml" ]] \
+    && kubectl get namespace "$namespace" >/dev/null 2>&1; then
     kubectl apply -f "manifests/observability/integrations/$namespace.yaml"
   fi
 done
