@@ -25,7 +25,8 @@
 #  8. upstream bug: [auto_update] enabled is read as a string, so "false" is
 #     truthy and auto-update was always on — parse it as a boolean;
 #  9. one SentenceTransformer per process (the Embedder reuses the vector
-#     client's), so the multilingual-e5-small embedder is loaded once.
+#     client's), so the multilingual-e5-small embedder is loaded once;
+# 10. no Flask reloader: it loaded every model a second time in a child.
 # Runtime notes for the manifests: start the server directly (skip upstream's
 # entrypoint dataset loader: its 1536-dim ada-002 vectors never match the
 # 384-dim MiniLM embedder, and re-streaming them took ~6 min per start) and
@@ -136,6 +137,15 @@ RUN sed -i "s/auto_update = manager_config.get('auto_update', {}).get('enabled',
 RUN sed -i 's/^                self.model = SentenceTransformer(model)$/                from vigil.core.remote_vectordb import load_model\n                self.model = load_model(model)/' vigil/core/embedding.py \
  && grep -q 'self.model = load_model(model)' vigil/core/embedding.py \
  && python -c "import ast; ast.parse(open('vigil/core/embedding.py').read())"
+
+# Patch 10 — no Flask reloader. Upstream starts the server with
+# use_reloader=True: Werkzeug's reloader re-executes the whole script in a
+# child process, so every model (deberta classifier, embedder) was loaded
+# twice and the pod paid for both. With multilingual-e5-small that no longer
+# fits the 3500Mi limit (measured: OOM-killed at boot). A server in a pod
+# never edits its own code; the reloader only cost memory.
+RUN sed -i "s/^    app.run(host='0.0.0.0', use_reloader=True)$/    app.run(host='0.0.0.0', use_reloader=False)/" vigil-server.py \
+ && grep -q "use_reloader=False" vigil-server.py
 
 ENV HF_HOME=/cache/hf \
     SENTENCE_TRANSFORMERS_HOME=/cache/st \
