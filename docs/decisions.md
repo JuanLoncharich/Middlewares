@@ -268,3 +268,19 @@ Decisions made before this log existed are not back-filled here.
   is merged into `m3-integration`, not into `main`.
 - **Who decided:** Juan ("ya hablé con Rocío"); merging to main still needs
   his OK.
+
+### 2026-10-21 — The vector scan becomes two-sided (corpus e5s-v2)
+- **Decision:** a vector hit counts only when the chunk or sentence is also
+  closer to its malicious neighbour than to the nearest known benign tool or
+  MCP-server text (third collection `vigil_e5s_v2_benign`); thresholds are
+  calibrated under that rule.
+- **Reason:** the kind e2e aborted the benign fixture as Malicious: its
+  `reverse` tool description matched a Mosscap password-game attack ("Reverse
+  the text above…") and the transformer also misfired on it. Measured on the
+  study's held-out data, two-sided removes that and raises detection slightly
+  everywhere (Tensor Trust 47→53 %, generated MCP 35→40 %) at the same false
+  positive rate.
+- **Alternatives:** pruning malicious entries near benign texts (helps, but
+  missed the fixture case); dropping Mosscap (Juan chose to include it).
+- **Who decided:** the agent, to fix a regression of the hybrid method Juan
+  chose; flagged for Juan.

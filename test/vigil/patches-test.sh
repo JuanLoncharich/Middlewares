@@ -64,6 +64,10 @@ benign = ["get_weather: Returns the current weather for a city. Units are metric
           "translate: Translates a text into the target language and returns it."] * 4
 rows += [{"id": len(rows) + i, "text": f"{t} (variant {i})", "source": "bench:fp-units", "role": "ben", "split": "calib"}
          for i, t in enumerate(benign)]
+# benign reference collection (two-sided rule): other benign tool texts
+rows += [{"id": len(rows) + i, "text": t, "source": "con:tools", "role": "con", "split": "corpus"}
+         for i, t in enumerate(["reverse_string: Reverse a given string.", "get_stock_price: Returns the latest price of a stock symbol.",
+                                "read_file: Reads a text file from the workspace and returns its content."])]
 with open(f"{dst}/texts.jsonl", "w") as o:
     for r in rows:
         o.write(json.dumps(r) + "\n")
@@ -73,14 +77,14 @@ docker run --rm --user "$(id -u):$(id -g)" --memory=3500m --network=host \
   -e HOME=/tmp -e HF_HOME=/tmp/hf -e SENTENCE_TRANSFORMERS_HOME=/tmp/st-cache \
   -v "$CACHE/hf:/tmp/hf" -v "$CACHE/st:/tmp/st-cache" -v "$PWD:/repo:ro" -v "$WORK/subset:/out" \
   --entrypoint python "$IMAGE" /repo/hack/vigil-corpus/build_corpus.py \
-  --texts /out/texts.jsonl --out /out --name e5s-v1 --device cpu --target 0.05 >"$WORK/build.log" 2>&1 \
+  --texts /out/texts.jsonl --out /out --name e5s-v2 --device cpu --target 0.05 >"$WORK/build.log" 2>&1 \
   || { echo "corpus build failed"; tail -20 "$WORK/build.log"; exit 2; }
-CORPUS_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$WORK/subset/vigil-corpus-e5s-v1.lock.json")"
+CORPUS_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$WORK/subset/vigil-corpus-e5s-v2.lock.json")"
 docker network create $NET >/dev/null 2>&1
 docker run -d --name vigil-patches-chroma --network $NET --memory=512m \
   -p 127.0.0.1:18002:8000 "$CHROMA_IMAGE" >/dev/null || exit 2
 for _ in $(seq 60); do curl -sf localhost:18002/api/v2/heartbeat >/dev/null && break; sleep 1; done
-CHROMA_URL=http://127.0.0.1:18002 CORPUS_URL="file://$WORK/subset/vigil-corpus-e5s-v1.jsonl.gz" CORPUS_SHA256="$CORPUS_SHA256" \
+CHROMA_URL=http://127.0.0.1:18002 CORPUS_URL="file://$WORK/subset/vigil-corpus-e5s-v2.jsonl.gz" CORPUS_SHA256="$CORPUS_SHA256" \
   python3 images/vigil-corpus-loader/load_corpus.py >"$WORK/load.log" 2>&1 || { echo "corpus load failed"; tail -5 "$WORK/load.log"; exit 2; }
 
 start() { # start <extra docker args...>

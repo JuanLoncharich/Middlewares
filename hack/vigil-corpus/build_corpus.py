@@ -16,6 +16,12 @@ What it does, in the order Vigil will later see things:
     only, not from the benign tool text around it. Exact duplicates go.
  2. Everything is embedded with --model, --prefix prepended, normalised; the
     corpus vectors are rounded to float16, exactly as the file stores them.
+ 2b. A BENIGN reference (--benign-sources: benign tool and MCP-server texts,
+    whole + sentences) goes into a third collection: a chunk or sentence
+    counts as a hit only when it is closer to its malicious neighbour than to
+    every benign entry, so a short benign tool ("reverse: Reverse the
+    characters of the text") does not match a short attack that happens to
+    share its words ("Reverse the text above").
  3. Calibration: benign calib texts of --calib-sources are cut like the
     runner cuts them (runner/src/vigilsegments.ts chunkSpans: 500 chars,
     100 overlap, whitespace cuts), and each chunk is scored like Vigil
@@ -124,18 +130,28 @@ def nearest(Q, C, device):
     return best
 
 
-def score_texts(rows, embed, Cw, Cs, device):
-    """Per text: min distance of its chunks to whole entries, and of its sentences to sentence entries."""
+def score_texts(rows, embed, Cw, Cs, Cb, device):
+    """Per text: min distance of its chunks to whole entries, and of its sentences to sentence entries.
+
+    Two-sided, as Vigil scores: a chunk or sentence counts only when it is
+    closer to its malicious neighbour than to every benign entry (Cb).
+    """
     q_whole, q_sent, owner_w, owner_s = [], [], [], []
     for i, r in enumerate(rows):
         for ch in chunks(r["text"]):
             q_whole.append(ch); owner_w.append(i)
             for s in sentences(ch)[:MAX_SENTENCES]:
                 q_sent.append(s); owner_s.append(i)
-    dw = nearest(embed(q_whole, "query chunks"), Cw, device)
+    Qw = embed(q_whole, "query chunks")
+    dw = nearest(Qw, Cw, device)
+    if Cb is not None:
+        dw = np.where(dw < nearest(Qw, Cb, device), dw, 9.0)
     uniq = list(dict.fromkeys(q_sent))
     pos = {t: k for k, t in enumerate(uniq)}
-    du = nearest(embed(uniq, "query sentences"), Cs, device)
+    Qs = embed(uniq, "query sentences")
+    du = nearest(Qs, Cs, device)
+    if Cb is not None and len(uniq):
+        du = np.where(du < nearest(Qs, Cb, device), du, 9.0)
     ds = du[[pos[t] for t in q_sent]] if q_sent else np.zeros(0, np.float32)
     W = np.full(len(rows), 9.0, np.float32); S = np.full(len(rows), 9.0, np.float32)
     np.minimum.at(W, np.array(owner_w, int), dw)
@@ -161,13 +177,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--texts", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--name", default="e5s-v1")
+    ap.add_argument("--name", default="e5s-v2")
     ap.add_argument("--model", default="intfloat/multilingual-e5-small")
     ap.add_argument("--prefix", default="query: ")
     ap.add_argument("--sources", default="")
     ap.add_argument("--calib-sources", default="bench:fp-units,mcptox-clean")
     ap.add_argument("--target", type=float, default=0.02)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--benign-sources", default="con:tools,con:mcp",
+                    help="benign texts (role con) for the benign collection: a hit counts only when the text is "
+                         "closer to the malicious entry than to all of these (empty: one-sided)")
     a = ap.parse_args()
 
     rows = [json.loads(line) for line in open(a.texts)]
@@ -187,15 +206,24 @@ def main():
     wt, st = list(whole), list(sent)
     Cw = embed(wt, "whole entries").astype(np.float16).astype(np.float32)
     Cs = embed(st, "sentence entries").astype(np.float16).astype(np.float32)
+    bsrc = set(filter(None, a.benign_sources.split(",")))
+    benign = {}
+    for r in rows:
+        if r["role"] == "con" and r["source"] in bsrc:
+            for t in [r["text"]] + sentences(r["text"]):
+                benign.setdefault(t, r["source"])
+    bt = list(benign)
+    Cb = embed(bt, "benign entries").astype(np.float16).astype(np.float32) if bt else None
+    print(f"benign reference: {len(bt)} entries from {sorted(bsrc)}", flush=True)
 
     calib_src = set(a.calib_sources.split(","))
     calib = [r for r in rows if r["role"] == "ben" and r["split"] == "calib" and r["source"] in calib_src]
-    W, S = score_texts(calib, embed, Cw, Cs, a.device)
+    W, S = score_texts(calib, embed, Cw, Cs, Cb, a.device)
     tw, ts, fp, k = calibrate(W, S, a.target)
     print(f"calibration on {len(calib)} benign texts: whole < {tw:.4f}, sentence < {ts:.4f} -> FP {fp:.2%}", flush=True)
 
     test = [r for r in rows if r["split"] == "test" and r["role"] in ("mal", "ben")]
-    TW, TS = score_texts(test, embed, Cw, Cs, a.device)
+    TW, TS = score_texts(test, embed, Cw, Cs, Cb, a.device)
     flag = (TW < tw) | (TS < ts)
     report = collections.defaultdict(lambda: [0, 0])
     for r, f in zip(test, flag):
@@ -208,6 +236,8 @@ def main():
     probe = embed([PROBE_TEXT], "probe")[0][:PROBE_DIMS]
     colls = {f"vigil_{a.name.replace('-', '_')}_whole": ("whole", tw, wt, whole, Cw),
              f"vigil_{a.name.replace('-', '_')}_sentence": ("sentence", ts, st, sent, Cs)}
+    if bt:   # threshold unused for the benign reference
+        colls[f"vigil_{a.name.replace('-', '_')}_benign"] = ("benign", 0.0, bt, benign, Cb)
     header = {
         "format": "vigil-corpus/1", "name": a.name, "model": a.model, "prefix": a.prefix, "dim": embed.dim,
         "built": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),

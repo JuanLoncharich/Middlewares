@@ -16,7 +16,7 @@ sha256 checked BEFORE anything is written, and each collection gets the
 header's model, prefix, kind, threshold and embedding probe as metadata —
 the remote Vigil client reads its thresholds from there and refuses a corpus
 its embedder does not reproduce. Collection names carry the corpus name
-(e.g. vigil_e5s_v1_whole), so a new corpus never mixes with an old one.
+(e.g. vigil_e5s_v2_whole), so a new corpus never mixes with an old one.
 
 Without CORPUS_URL, the legacy deadbits corpora:
 

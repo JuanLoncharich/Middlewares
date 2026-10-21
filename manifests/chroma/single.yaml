@@ -54,8 +54,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           resources:
-            # Measured with the calibrated corpus (vigil-corpus e5s-v1, 205k
-            # vectors x 384): ~520 MiB resident after load and queries.
+            # Measured with the calibrated corpus (vigil-corpus e5s-v2, 240k
+            # vectors x 384): ~570 MiB resident after load and queries.
             requests:
               cpu: 50m
               memory: 640Mi

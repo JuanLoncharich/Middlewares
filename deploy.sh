@@ -106,7 +106,7 @@
 #                                Docker Hub org; keep in vintage with the vendored chart).
 #   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
 #   VIGIL_CORPUS_LOCK            lock of Vigil's calibrated corpus (default
-#                                hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json: file name, sha256,
+#                                hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json: file name, sha256,
 #                                thresholds, test report). Vigil's server.conf names its collections.
 #   VIGIL_CORPUS_FILE            that corpus file (default hack/vigil-corpus/dist/<file from the lock>;
 #                                build it with hack/vigil-corpus/build_corpus.py). Checked against the
@@ -130,7 +130,7 @@ DEPLOY_NETBIRD_CP="${DEPLOY_NETBIRD_CP:-0}"
 DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
-VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v1.lock.json}"
+VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v2.lock.json}"
 if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
   [ -f "$VIGIL_CORPUS_LOCK" ] || { echo "ERROR: corpus lock $VIGIL_CORPUS_LOCK missing" >&2; exit 1; }
   read -r VIGIL_CORPUS_NAME VIGIL_CORPUS_BASENAME VIGIL_CORPUS_SHA256 < <(python3 -c \

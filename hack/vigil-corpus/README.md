@@ -4,11 +4,20 @@ Vigil's `vectordb` scanner asks two questions about each piece of untrusted
 text the runner sends (one chunk of at most 500 characters):
 
 1. is the **whole chunk** close to a known malicious text? (collection
-   `vigil_e5s_v1_whole`)
+   `vigil_e5s_v2_whole`)
 2. is **any one of its sentences** close to a known malicious sentence?
-   (collection `vigil_e5s_v1_sentence`)
+   (collection `vigil_e5s_v2_sentence`)
 
-"Close" means a cosine distance under that collection's own threshold.
+"Close" means a cosine distance under that collection's own threshold, **and**
+closer than the nearest known benign tool or MCP-server text (collection
+`vigil_e5s_v2_benign`: 35 330 texts and sentences from glaive's function
+descriptions, the MCP registry and MCP server READMEs). The second condition
+exists because short benign tools and short attacks can share their words:
+in the kind e2e, the benign fixture's `reverse: Reverse the characters of the
+provided text.` matched Mosscap's "Reverse the text above…" under the
+threshold, and with the transformer also (wrongly) flagging it, the benign
+server was aborted as Malicious. Two-sided, it is clean, and detection went
+up slightly everywhere (study `s8_twosided.py`).
 Each threshold was calibrated so that only 2 % of benign tool-like texts
 (tool descriptions, READMEs, code, MCP fixtures) raise any hit. The second
 question is what catches an attack hidden inside an otherwise normal
@@ -19,19 +28,19 @@ every text prefixed `query: `), so Spanish and other languages work as well.
 
 | file | what it is |
 |---|---|
-| `vigil-corpus-e5s-v1.lock.json` | **committed**: the file name, its sha256, model, prefix, thresholds, counts per source and the held-out test report |
-| `dist/vigil-corpus-e5s-v1.jsonl.gz` | the corpus itself (173 MB, git-ignored). A header line, then one JSON line per entry `{"c": collection, "t": text, "s": source, "e": base64 float16 vector}` |
+| `vigil-corpus-e5s-v2.lock.json` | **committed**: the file name, its sha256, model, prefix, thresholds, counts per source and the held-out test report |
+| `dist/vigil-corpus-e5s-v2.jsonl.gz` | the corpus itself (201 MB, git-ignored). A header line, then one JSON line per entry `{"c": collection, "t": text, "s": source, "e": base64 float16 vector}` |
 | `build_corpus.py` | builds the file and the lock from a texts file (below) |
 | `study/` | the study scripts that made the texts file and chose model and method (they read and write `~/.cache/mcp-eval/`) |
 
 ## How it reaches Vigil
 
 1. `deploy.sh` checks `dist/<file>` against the lock's sha256 and bakes it
-   into an image, `$IMG_REGISTRY/vigil-corpus:e5s-v1-<sha12>`
+   into an image, `$IMG_REGISTRY/vigil-corpus:e5s-v2-<sha12>`
    (`images/vigil-corpus-loader/Dockerfile.corpus`), which it pushes like
    every other image.
 2. The `vigil-corpus-loader` Job runs from that image. It checks the sha256
-   again before writing anything, then writes both collections through
+   again before writing anything, then writes the three collections through
    `chroma-gateway` with the writer token. Each collection's **metadata**
    holds its threshold, the model, the prefix and an embedding probe. A
    second build under the same names is refused unless `RECREATE=1`.
@@ -69,14 +78,15 @@ Calibration uses only the calib half of the benign tool-like texts.
 
 | test set | detected |
 |---|---|
-| HackAPrompt / LLMail-Inject / Gandalf | 99 % / 98.5 % / 97 % |
-| Mosscap / TrustAIR / multilingual | 81 % / 81 % / 85 % |
-| Tensor Trust (family never in the corpus) | 47 % |
-| attacks inserted inside benign text: LLMail / HackAPrompt / Tensor Trust / MCPTox | 95 % / 72 % / 53 % / 33 % |
-| our generated MCP texts (held out) | 32 % |
-| **MCPTox poisoned tools (never in the corpus)** | **2 %** |
-| false positives: benign tool texts / MCPTox clean tools | 2.4 % / 1.7 % |
-| false positives: benign user prompts / emails | 10–49 % |
+| HackAPrompt / LLMail-Inject / Gandalf | 99 % / 99 % / 98.5 % |
+| Mosscap / TrustAIR / multilingual | 84 % / 85 % / 85 % |
+| Tensor Trust (family never in the corpus) | 53 % |
+| attacks inserted inside benign text: LLMail / HackAPrompt / Tensor Trust / MCPTox | 95 % / 75 % / 56 % / 36 % |
+| our generated MCP texts (held out) | 39 % |
+| **MCPTox poisoned tools (never in the corpus)** | **2.6 %** |
+| false positives: benign tool texts / MCPTox clean tools | 2.7 % / 1.1 % |
+| false positives: benign user prompts / emails | 10–57 % |
+| the repo's MCP fixtures (vector scanner alone) | evil: 1 of 10 texts; benign: 0 of 9 |
 
 Before this corpus, with deadbits + MiniLM and the raw 0.4 threshold, the
 same test sets gave 0 % on HackAPrompt, 0 % on MCPTox and about 5 % on
@@ -84,7 +94,7 @@ attacks hidden inside text.
 
 What these numbers mean for the platform:
 - **Similarity search does not catch new kinds of tool poisoning.** MCPTox
-  stays at 2 % even with 1 100 generated poisoned tools in the corpus: a
+  stays near 2 % even with 1 100 generated poisoned tools in the corpus: a
   poisoned tool looks too much like a benign one for nearest-neighbour search
   under a 2 % false-positive budget. A trained classification head on the
   same embeddings does better (study `s7_head.py`: Tensor Trust 75 %,
@@ -104,10 +114,10 @@ What these numbers mean for the platform:
 #    -> ~/.cache/mcp-eval/corpus3/out/texts.final.jsonl
 # 2. corpus + lock (a GPU makes it ~3 minutes)
 python hack/vigil-corpus/build_corpus.py --texts ~/.cache/mcp-eval/corpus3/out/texts.final.jsonl \
-  --out hack/vigil-corpus/dist --name e5s-v1 --sources <the sources above, comma-separated>
-mv hack/vigil-corpus/dist/vigil-corpus-e5s-v1.lock.json hack/vigil-corpus/
+  --out hack/vigil-corpus/dist --name e5s-v2 --sources <the sources above, comma-separated>
+mv hack/vigil-corpus/dist/vigil-corpus-e5s-v2.lock.json hack/vigil-corpus/
 ```
 
-A new build gets a new `--name` (e.g. `e5s-v2`). That means new collection
+A new build gets a new `--name` (e.g. `e5s-v3`). That means new collection
 names, so Vigil's `server.conf` must name them too. An old and a new build
 never mix.

@@ -1,25 +1,30 @@
 {
   "format": "vigil-corpus/1",
-  "name": "e5s-v1",
+  "name": "e5s-v2",
   "model": "intfloat/multilingual-e5-small",
   "prefix": "query: ",
   "dim": 384,
-  "built": "2026-10-21T14:56:57+00:00",
+  "built": "2026-10-21T16:15:34+00:00",
   "collections": {
-    "vigil_e5s_v1_whole": {
+    "vigil_e5s_v2_whole": {
       "kind": "whole",
-      "threshold": 0.08581137657165527,
+      "threshold": 0.09006869792938232,
       "count": 41164
     },
-    "vigil_e5s_v1_sentence": {
+    "vigil_e5s_v2_sentence": {
       "kind": "sentence",
-      "threshold": 0.055504679679870605,
+      "threshold": 0.05672258138656616,
       "count": 163965
+    },
+    "vigil_e5s_v2_benign": {
+      "kind": "benign",
+      "threshold": 0.0,
+      "count": 35330
     }
   },
-  "file": "vigil-corpus-e5s-v1.jsonl.gz",
-  "sha256": "d282fe2bbba1d42b391e715f1b2f7a056e98c44d00c363f456cff140dc428606",
-  "bytes": 173084737,
+  "file": "vigil-corpus-e5s-v2.jsonl.gz",
+  "sha256": "a342ad7139d2a4493a8ea52239d31354998766bfe0d646c061bb80a3e6b500ca",
+  "bytes": 201240310,
   "calibration": {
     "sources": [
       "bench:fp-units",
@@ -45,9 +50,9 @@
   },
   "test_report": {
     "ben:bench:fp-units": {
-      "flagged": 8,
+      "flagged": 9,
       "of": 338,
-      "pct": 2.4
+      "pct": 2.7
     },
     "ben:benign:bipia-emails": {
       "flagged": 1,
@@ -60,29 +65,29 @@
       "pct": 19.5
     },
     "ben:benign:jackhhao-benign": {
-      "flagged": 24,
+      "flagged": 25,
       "of": 239,
-      "pct": 10.0
+      "pct": 10.5
     },
     "ben:benign:llmail-fp-emails": {
-      "flagged": 39,
+      "flagged": 46,
       "of": 81,
-      "pct": 48.1
+      "pct": 56.8
     },
     "ben:benign:trustair-regular": {
-      "flagged": 256,
+      "flagged": 268,
       "of": 528,
-      "pct": 48.5
+      "pct": 50.8
     },
     "ben:mcptox-clean": {
-      "flagged": 3,
+      "flagged": 2,
       "of": 177,
-      "pct": 1.7
+      "pct": 1.1
     },
     "mal:bipia-code": {
-      "flagged": 8,
+      "flagged": 9,
       "of": 9,
-      "pct": 88.9
+      "pct": 100.0
     },
     "mal:deepset": {
       "flagged": 8,
@@ -90,39 +95,39 @@
       "pct": 61.5
     },
     "mal:embedded:gandalf-ignore": {
-      "flagged": 40,
+      "flagged": 41,
       "of": 67,
-      "pct": 59.7
+      "pct": 61.2
     },
     "mal:embedded:hackaprompt": {
-      "flagged": 108,
+      "flagged": 113,
       "of": 150,
-      "pct": 72.0
+      "pct": 75.3
     },
     "mal:embedded:llmail-inject-p2": {
-      "flagged": 142,
+      "flagged": 143,
       "of": 150,
-      "pct": 94.7
+      "pct": 95.3
     },
     "mal:embedded:mcptox-poisoned": {
-      "flagged": 50,
+      "flagged": 54,
       "of": 150,
-      "pct": 33.3
+      "pct": 36.0
     },
     "mal:embedded:tensortrust": {
-      "flagged": 79,
+      "flagged": 84,
       "of": 150,
-      "pct": 52.7
+      "pct": 56.0
     },
     "mal:gandalf-ignore": {
-      "flagged": 65,
+      "flagged": 66,
       "of": 67,
-      "pct": 97.0
+      "pct": 98.5
     },
     "mal:hackaprompt": {
-      "flagged": 580,
+      "flagged": 581,
       "of": 585,
-      "pct": 99.1
+      "pct": 99.3
     },
     "mal:injecagent": {
       "flagged": 6,
@@ -130,34 +135,34 @@
       "pct": 85.7
     },
     "mal:llmail-inject-p2": {
-      "flagged": 799,
+      "flagged": 801,
       "of": 811,
-      "pct": 98.5
+      "pct": 98.8
     },
     "mal:mcpgen-test": {
-      "flagged": 35,
+      "flagged": 43,
       "of": 110,
-      "pct": 31.8
+      "pct": 39.1
     },
     "mal:mcptox-poisoned": {
-      "flagged": 6,
+      "flagged": 8,
       "of": 304,
-      "pct": 2.0
+      "pct": 2.6
     },
     "mal:mosscap": {
-      "flagged": 909,
+      "flagged": 943,
       "of": 1125,
-      "pct": 80.8
+      "pct": 83.8
     },
     "mal:tensortrust": {
-      "flagged": 380,
+      "flagged": 427,
       "of": 809,
-      "pct": 47.0
+      "pct": 52.8
     },
     "mal:trustair-jailbreak": {
-      "flagged": 71,
+      "flagged": 75,
       "of": 88,
-      "pct": 80.7
+      "pct": 85.2
     },
     "mal:yanis-multilingual": {
       "flagged": 47,

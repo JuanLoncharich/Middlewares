@@ -17,9 +17,12 @@ text to a fixed false-positive rate. A query is "hybrid":
   - each of its sentences (sentences() below, the same split the corpus and
     its calibration used) is compared with the sentence collections
     ([vectordb] sentence_collections);
-  - a hit is a neighbour closer than ITS collection's threshold. Only hits
-    are returned, so [scanner:vectordb] threshold must not filter again
-    (server.conf sets it to 2.0, above any cosine distance).
+  - a hit is a neighbour closer than ITS collection's threshold and, when
+    [vectordb] benign_collections is set, closer than the nearest BENIGN
+    entry (benign tool and MCP-server texts) to that same chunk or sentence:
+    a short benign tool that shares words with a short attack does not
+    count. Only hits are returned, so [scanner:vectordb] threshold must not
+    filter again (server.conf sets it to 2.0, above any cosine distance).
   Before the first query the client checks that its embedder reproduces the
   corpus: model name equal, and the embedding of the corpus's probe text
   within 0.01 of the recorded one (a different model revision, library
@@ -119,6 +122,7 @@ class RemoteVectorDB:
         chroma_url: str,
         collections: str = "vigil_instruction_bypass,vigil_jailbreak",
         sentence_collections: str = "",
+        benign_collections: str = "",
         tenant: str = "default_tenant",
         database: str = "default_database",
         n_results: str = "5",
@@ -135,6 +139,7 @@ class RemoteVectorDB:
         split = lambda s: [c.strip() for c in s.split(",") if c.strip()]  # noqa: E731
         self.collections = split(collections)
         self.sentence_collections = split(sentence_collections)
+        self.benign_collections = split(benign_collections)
         if not self.collections:
             raise ValueError("[vectordb] collections is empty")
         self.n_results = int(n_results)
@@ -153,7 +158,7 @@ class RemoteVectorDB:
         # while Chroma is down; collections are resolved and checked on first use.
         logger.success(
             f"Remote vector db: {self.base} tenant={tenant} database={database} collections={self.collections}"
-            f" sentence_collections={self.sentence_collections}"
+            f" sentence_collections={self.sentence_collections} benign_collections={self.benign_collections}"
             f" auth={'bearer from $' + token_env if token else 'none'}"
         )
 
@@ -186,19 +191,26 @@ class RemoteVectorDB:
         prefix = self._prefix
         sents = sentences(text)[:MAX_SENTENCES] if self.sentence_collections else []
         vectors = self.embed([prefix + text] + [prefix + s for s in sents])
+        # Nearest benign entry per vector (whole text first, then each sentence).
+        benign = [9.0] * len(vectors)
+        for name in self.benign_collections:
+            for i, row in enumerate(self._nearest(name, vectors, 1)):
+                if row:
+                    benign[i] = min(benign[i], row[0][2])
         hits = []
         for name in self.collections:
             thr = self._meta[name]["vigil_threshold"]
             for doc, meta, dist in self._nearest(name, vectors[:1], self.n_results)[0]:
-                if dist < thr:
-                    hits.append((dist, doc, {**meta, "threshold": thr, "kind": "whole"}))
+                if dist < thr and dist < benign[0]:
+                    hits.append((dist, doc, {**meta, "threshold": thr, "kind": "whole", "benign_distance": benign[0]}))
         if sents:
             for name in self.sentence_collections:
                 thr = self._meta[name]["vigil_threshold"]
-                for sent, row in zip(sents, self._nearest(name, vectors[1:], 1)):
+                for i, (sent, row) in enumerate(zip(sents, self._nearest(name, vectors[1:], 1)), start=1):
                     for doc, meta, dist in row:
-                        if dist < thr:
-                            hits.append((dist, doc, {**meta, "threshold": thr, "kind": "sentence", "input_sentence": sent}))
+                        if dist < thr and dist < benign[i]:
+                            hits.append((dist, doc, {**meta, "threshold": thr, "kind": "sentence",
+                                                     "input_sentence": sent, "benign_distance": benign[i]}))
         # Closest relative to its own threshold first; one hit per corpus text.
         hits.sort(key=lambda h: h[0] / h[2]["threshold"])
         seen, out = set(), []
@@ -216,12 +228,12 @@ class RemoteVectorDB:
         with self._lock:
             if self._mode is not None:
                 return
-            names = self.collections + self.sentence_collections
+            names = self.collections + self.sentence_collections + self.benign_collections
             for name in names:
                 self._collection_id(name)
             calibrated = [n for n in names if "vigil_threshold" in self._meta[n]]
             if not calibrated:
-                if self.sentence_collections:
+                if self.sentence_collections or self.benign_collections:
                     raise RemoteVectorDBError("sentence_collections need calibrated collections (vigil_threshold metadata)")
                 self._mode = "legacy"
                 logger.success("Remote vector db: legacy mode (no calibration metadata), scanner threshold applies")
@@ -233,7 +245,8 @@ class RemoteVectorDB:
                 if m.get("vigil_embedding_model") != self.model:
                     raise RemoteVectorDBError(
                         f"collection {name!r} was embedded with {m.get('vigil_embedding_model')!r}, Vigil embeds with {self.model!r}")
-                want = "sentence" if name in self.sentence_collections else "whole"
+                want = ("sentence" if name in self.sentence_collections
+                        else "benign" if name in self.benign_collections else "whole")
                 if m.get("vigil_kind") != want:
                     raise RemoteVectorDBError(f"collection {name!r} holds {m.get('vigil_kind')!r} texts, configured as {want}")
             prefixes = {self._meta[n].get("vigil_text_prefix", "") for n in names}
@@ -244,7 +257,8 @@ class RemoteVectorDB:
             self._mode = "calibrated"
             logger.success(
                 "Remote vector db: calibrated hybrid mode, thresholds "
-                + ", ".join(f"{n}={self._meta[n]['vigil_threshold']:.4f}" for n in names))
+                + ", ".join(f"{n}={self._meta[n]['vigil_threshold']:.4f}" for n in self.collections + self.sentence_collections)
+                + (f"; two-sided against {self.benign_collections}" if self.benign_collections else "; one-sided"))
 
     def _check_probe(self, names: List[str]) -> None:
         m = self._meta[names[0]]
