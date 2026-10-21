@@ -40,7 +40,8 @@ kubectl -n "$NAMESPACE" create secret generic git-test-tls \
   --from-file=tls.crt="$WORK/tls.crt" --from-file=tls.key="$WORK/tls.key" \
   --dry-run=client -o yaml | kubectl apply -f -
 # credentialsSecretRef for the fixture MCPServers: the operator forwards the
-# ca.crt key to the cloner as GIT_SSL_CAINFO (git reads it natively).
+# ca.crt key to the cloner as GIT_CA_PEM; the cloner writes it to a file
+# and points git at it with GIT_SSL_CAINFO.
 kubectl -n "$NAMESPACE" create secret generic mcp-git-test-ca \
   --from-literal=ca.crt="$(cat "$WORK/ca.crt")" \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -53,7 +54,16 @@ docker push "$GIT_IMAGE"
 # ---- 3. deploy the git server + fixture NetworkPolicies
 log "Deploying git-test into $NAMESPACE"
 sed "s|localhost:5001/git-test-server:local|$GIT_IMAGE|" test/git-server.yaml | kubectl apply -f -
+# The tag never changes (":local"), so a re-run must restart the pod to pick
+# up a rebuilt image.
+kubectl -n "$NAMESPACE" rollout restart deploy/git-test
 kubectl -n "$NAMESPACE" rollout status deploy/git-test --timeout=120s
+# rollout status returns while the old pod is still terminating; wait until
+# only the new one is left so the checks below don't exec into the old one.
+for _ in $(seq 60); do
+  [ "$(kubectl -n "$NAMESPACE" get pods -l app=git-test --no-headers 2>/dev/null | wc -l)" = 1 ] && break
+  sleep 2
+done
 
 log "Verifying the fixture repos are served"
 GIT_POD="$(kubectl -n "$NAMESPACE" get pod -l app=git-test -o jsonpath='{.items[0].metadata.name}')"

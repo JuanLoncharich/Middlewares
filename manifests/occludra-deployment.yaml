@@ -125,6 +125,8 @@ data:
         - ".*-free"
         - "^o[1345]"
         - "^gpt"
+        # NVIDIA NIM ids carry the publisher prefix (z-ai/glm-5.3, ...).
+        - "^(z-ai|moonshotai|deepseek-ai|nvidia|meta|mistralai|qwen|openai|google)/"
     logging:
       # Never persist prompt content in gateway logs; count and classify only.
       log_prompts: false
@@ -217,6 +219,11 @@ spec:
               value: "0.0.0.0:8080"
             - name: OCCLUDRA_POLICY_FILE
               value: /conf/policy.yaml
+            # Upstream LLM provider (OpenAI-compatible). Empty = policy
+            # upstream.base_url, else Occludra's built-in OpenCode Zen.
+            # deploy.sh sets it for LLM_PROVIDER=nvidia.
+            - name: OCCLUDRA_UPSTREAM_BASE_URL
+              value: ""
             # Backpressure: requests beyond this in-flight count get 503 +
             # Retry-After (clients back off) instead of unbounded memory
             # growth per replica. The HPA adds replicas before saturation.
@@ -232,6 +239,14 @@ spec:
               # Falls back to ANTHROPIC_API_KEY above when empty.
               value: ""
             # Upstream provider keys — injected into sanitized upstream calls.
+            # UPSTREAM_API_KEY (written by deploy.sh for providers other than
+            # Zen, e.g. NVIDIA) wins over the two provider-named keys below.
+            - name: OCCLUDRA_UPSTREAM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-provider-credentials
+                  key: UPSTREAM_API_KEY
+                  optional: true
             - name: OPENCODE_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -545,20 +560,19 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-    # Distributed Chroma frontend (manifests/chroma/) — Vigil's vector
-    # scanner queries the corpora there. Only the single client-facing port
-    # of the frontend is reachable; sysdb/log/minio/postgres stay
-    # unreachable from the gateways.
+    # Chroma (manifests/chroma/) — Vigil's vector scanner queries the
+    # corpora there. Only chroma-gateway (token check) is reachable; the
+    # frontend, sysdb/log/minio/postgres stay unreachable from the gateways.
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: chroma
           podSelector:
             matchLabels:
-              app: rust-frontend-service
+              app.kubernetes.io/name: chroma-gateway
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8080
 ---
 apiVersion: v1
 kind: ServiceAccount

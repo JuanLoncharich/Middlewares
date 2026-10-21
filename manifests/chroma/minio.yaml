@@ -77,8 +77,11 @@ spec:
             claimName: minio-data
       containers:
         - name: minio
-          # Same release chroma pins in k8s/test/minio.yaml, by digest.
-          image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          # MinIO RELEASE.2025-09-07T16-13-09Z, by digest, from chroma's own
+          # mirror (the one chroma pins in k8s/test/minio.yaml): MinIO stopped
+          # publishing community images, and quay.io/minio/minio now answers
+          # 401. Same multi-platform digest, so the same bytes.
+          image: ghcr.io/chroma-core/ci-minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
           imagePullPolicy: IfNotPresent
           args:
             - server
@@ -106,7 +109,7 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 256Mi
+              memory: 640Mi   # measured ~650Mi holding the corpus
             limits:
               cpu: "1"
               memory: 1Gi

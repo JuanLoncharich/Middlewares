@@ -117,7 +117,8 @@ type MCPServerStatus struct {
 	// +optional
 	LastRunRef string `json:"lastRunRef,omitempty"`
 
-	// LastFinalScore is the final score of the last completed run.
+	// LastFinalScore is the final score of the latest verdict: the last
+	// Completed run, or a Failed run the evaluator marked Malicious (score 0).
 	// +optional
 	LastFinalScore int32 `json:"lastFinalScore,omitempty"`
 

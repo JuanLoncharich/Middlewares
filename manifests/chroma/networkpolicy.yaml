@@ -5,9 +5,11 @@
 # Baseline: default-deny both directions, then:
 #   - full intra-namespace traffic (the chroma planes are chatty: frontend →
 #     sysdb/log, workers → MinIO/Postgres/sysdb, memberlist gRPC mesh, etc.);
-#   - ingress to the Rust frontend (REST :8000) only from the Vigil scanner
-#     pods in security-gateways (their vector scanner queries the corpus) —
-#     evaluation pods in mcp-evals have no direct path here by design;
+#   - ingress from outside the namespace ONLY to chroma-gateway (:8080, the
+#     token-checking proxy in gateway.yaml) and only from the Vigil scanner
+#     pods in security-gateways — evaluation pods in mcp-evals have no
+#     direct path here by design, and nothing outside reaches the frontend,
+#     MinIO, Postgres or sysdb directly;
 #   - DNS egress;
 #   - HTTPS egress ONLY for the corpus-loader Job (it downloads the Vigil
 #     embedding datasets from HuggingFace). Everything else in the namespace
@@ -48,16 +50,16 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-vigil-to-frontend
+  name: allow-vigil-to-gateway
   namespace: chroma
   labels:
     app.kubernetes.io/part-of: chroma-distributed
 spec:
-  # Only the frontend serves clients; sysdb/log/minio/postgres stay
-  # namespace-internal.
+  # Only chroma-gateway serves clients (and checks their token); the
+  # frontend, sysdb/log/minio/postgres stay namespace-internal.
   podSelector:
     matchLabels:
-      app: rust-frontend-service
+      app.kubernetes.io/name: chroma-gateway
   policyTypes:
     - Ingress
   ingress:
@@ -65,12 +67,14 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: security-gateways
+          # CPU Vigil and the GPU Vigil (hack/gpu-node). Egress side:
+          # NetworkPolicy vigil-to-chroma in manifests/vigil-deployment.yaml.
           podSelector:
-            matchLabels:
-              app.kubernetes.io/name: vigil-llm
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [vigil-llm, vigil-llm-gpu]}
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8080
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -149,11 +153,11 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Push into the Chroma frontend.
+    # Push into Chroma through the gateway (writer token).
     - to:
         - podSelector:
             matchLabels:
-              app: rust-frontend-service
+              app.kubernetes.io/name: chroma-gateway
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8080

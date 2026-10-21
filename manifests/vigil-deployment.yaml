@@ -26,8 +26,8 @@
 #
 # Input scanners enabled on the pinned commit's scan endpoint
 # /analyze/prompt: transformer (prompt-injection classifier
-# laiyer/deberta-v3-base-prompt-injection), yara (rules baked into the image
-# at /app/data/yara) and vectordb (embedding similarity, cosine distance
+# laiyer/deberta-v3-base-prompt-injection), yara (our rules from
+# manifests/vigil-yara/, mounted at /app/yara-rules) and vectordb (embedding similarity, cosine distance
 # threshold). The pinned commit has no `heuristics`/`canonical` scanners.
 # output_scanners keep upstream's defaults; they only run on
 # /analyze/response, which the evaluation path never calls.
@@ -39,19 +39,15 @@
 # "matches"); pass a custom VIGIL_URL only to override the host, keeping the
 # /analyze/prompt suffix.
 #
-# EMBEDDING: model=all-MiniLM-L6-v2 — a local SentenceTransformer, so no
+# EMBEDDING: model=intfloat/multilingual-e5-small — a local SentenceTransformer, so no
 # OpenAI key is needed (upstream's `openai` profile requires one). Models
 # download from HuggingFace at boot; the tmp emptyDir doubles as that cache.
-# CAVEAT: upstream's entrypoint also pre-loads its ada-002 (1536-dim)
-# corpora into the on-disk ChromaDB; against the 384-dim MiniLM embedder
-# those vectors mismatch and vectordb queries degrade to no-matches
-# (upstream's fail-soft scanner semantics). The platform's REAL vector plane
-# is the distributed Chroma cluster (manifests/chroma/ — coordinator, log
-# service, compactors, query nodes over MinIO): the vigil-corpus-loader Job
-# loads the Vigil embedding corpora there (collections
-# vigil_instruction_bypass / vigil_jailbreak). If a later vigil pin gains a
-# remote-Chroma config knob, point the vectordb scanner at
-# rust-frontend-service.chroma:8000.
+# VECTOR DB: the vectordb scanner queries the distributed Chroma cluster
+# (manifests/chroma/ — coordinator, log service, compactors, query nodes over
+# MinIO) through the image's REST v2 client (images/vigil-llm/
+# remote_vectordb.py), collections vigil_e5s_v3_whole / _sentence / _benign
+# (our calibrated corpus, hack/vigil-corpus/) loaded by the vigil-corpus-loader Job. Upstream's local on-disk ChromaDB is
+# not used. NetworkPolicy vigil-to-chroma (below) opens that one path.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -70,17 +66,37 @@ data:
     cache_max = 500
 
     [embedding]
-    # Local SentenceTransformer embedder: the platform ships no OpenAI key,
-    # and this matches the MiniLM family of the corpora loaded into the
-    # distributed Chroma cluster. Downloaded from HuggingFace at boot.
-    model = all-MiniLM-L6-v2
+    # Local SentenceTransformer embedder, downloaded from HuggingFace at boot.
+    # It must be the model the corpus was built with: the vector client
+    # checks the collections' metadata and an embedding probe, and fails
+    # closed on a mismatch (hack/vigil-corpus/, decision 2026-10-21).
+    model = intfloat/multilingual-e5-small
 
     [vectordb]
+    # The corpus lives in the distributed Chroma (manifests/chroma/, loaded by
+    # the vigil-corpus-loader Job) and is queried over REST v2
+    # (images/vigil-llm/remote_vectordb.py). Required: if Chroma does not
+    # answer, the scan answers 500 and the evaluation fails closed.
+    # chroma-gateway checks a bearer token: the reader token reaches the
+    # pod as env CHROMA_TOKEN (Secret chroma-reader, hack/chroma/deploy.sh).
+    chroma_url = http://chroma-gateway.chroma.svc.cluster.local:8080
+    token_env = CHROMA_TOKEN
+    tenant = default_tenant
+    database = default_database
+    # Calibrated corpus (hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json):
+    # whole texts vs the whole chunk, single sentences vs each sentence of
+    # it, each collection with its own calibrated threshold (metadata); a hit
+    # must also be closer than the nearest benign tool/MCP-server text.
+    collections = vigil_e5s_v3_whole
+    sentence_collections = vigil_e5s_v3_sentence
+    benign_collections = vigil_e5s_v3_benign
+    timeout_s = 5
+    n_results = 5
+    # Upstream's local-database keys; unused while chroma_url is set.
     collection = vigil-local
     # Writable path: the container root filesystem is read-only; /tmp is an
     # emptyDir.
     db_dir = /tmp/vigil-vdb
-    n_results = 5
 
     [auto_update]
     # Do not mutate the corpus from scan traffic — deterministic scans.
@@ -92,10 +108,16 @@ data:
     output_scanners = similarity,sentiment
 
     [scanner:yara]
-    rules_dir = /app/data/yara
+    # Our rules (manifests/vigil-yara/, ConfigMap vigil-yara-rules created by
+    # deploy.sh), not upstream's baked /app/data/yara. A YARA match is a
+    # second opinion: the evaluator aborts only when the transformer agrees.
+    rules_dir = /app/yara-rules
 
     [scanner:vectordb]
-    threshold = 0.4
+    # The vector client returns only neighbours already under their
+    # collection's calibrated threshold; 2.0 (above any cosine distance)
+    # keeps upstream's scanner from filtering a second time.
+    threshold = 2.0
 
     [scanner:transformer]
     model = laiyer/deberta-v3-base-prompt-injection
@@ -166,10 +188,13 @@ spec:
         - name: config
           configMap:
             name: vigil-server-conf
+        - name: yara-rules
+          configMap:
+            name: vigil-yara-rules
         - name: tmp
           emptyDir:
             # Doubles as the writable HOME: the HuggingFace model cache
-            # (deberta-v3-base classifier + MiniLM embedder + nltk data) and
+            # (deberta-v3-base classifier + e5-small embedder + nltk data) and
             # the on-disk ChromaDB all land here at boot.
             sizeLimit: 2Gi
         - name: logs
@@ -190,19 +215,39 @@ spec:
           # vigil-llm image.
           image: ghcr.io/security-eval/vigil-llm:20260930
           imagePullPolicy: Always
+          # Start the server directly (skip upstream's entrypoint dataset
+          # loader): its 1536-dim ada-002 vectors never match the 384-dim
+          # MiniLM embedder — the CAVEAT above — and re-streaming them took
+          # ~6 min per start. Same verdicts, starts in seconds once cached.
+          command: ["python", "vigil-server.py", "-c", "conf/server.conf"]
           ports:
             - name: http
               containerPort: 5000
               protocol: TCP
           env:
+            # Reader token for chroma-gateway ([vectordb] token_env). No
+            # optional: without the Secret the pod does not start, instead of
+            # starting and failing every scan with 401.
+            - name: CHROMA_TOKEN
+              valueFrom:
+                secretKeyRef: {name: chroma-reader, key: token}
             # No VIGIL_CONF knob exists upstream: the image's baked entrypoint
             # runs `python vigil-server.py -c conf/server.conf` (WORKDIR /app)
             # and its dataset loader hardcodes /app/conf/server.conf — hence
             # the /app/conf mount below.
             - name: HOME
               value: /tmp
-              # HOME under /tmp gives the HuggingFace model caches a writable
-              # directory (the root filesystem is read-only).
+            # sentence-transformers 2.2.2's own model cache; on the tmp
+            # emptyDir it survives container restarts within the pod.
+            - name: SENTENCE_TRANSFORMERS_HOME
+              value: /tmp/st-cache
+            # The HuggingFace cache must be set explicitly: the image's ENV
+            # points HF_HOME at /cache/hf (the GPU node's hostPath), which
+            # does not exist on this read-only root filesystem. Without a
+            # writable cache the transformer scanner fails to load and
+            # vigil-llm keeps serving with it silently disabled.
+            - name: HF_HOME
+              value: /tmp/hf
           volumeMounts:
             # Upstream reads /app/conf/server.conf (baked entrypoint
             # argument); the mount shadows the image's own conf/ siblings,
@@ -217,6 +262,9 @@ spec:
             # readOnlyRootFilesystem.
             - name: logs
               mountPath: /app/logs
+            - name: yara-rules
+              mountPath: /app/yara-rules
+              readOnly: true
           securityContext:
             runAsNonRoot: true
             runAsUser: 10004
@@ -231,7 +279,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           resources:
-            # Classifier workloads (transformer classifier + MiniLM embedder,
+            # Classifier workloads (transformer classifier + e5-small embedder,
             # downloaded at boot) are CPU- and memory-hungry per replica; size
             # for the pinned image's model footprint and let the HPA
             # (CPU 70 %) add replicas.
@@ -382,3 +430,40 @@ spec:
       # Evaluation traffic arrives in waves (runs start/end together); hold
       # capacity for a while before shedding replicas.
       stabilizationWindowSeconds: 300
+---
+# Vigil -> Chroma, the vectordb scanner's only path to its corpus.
+# gateway-egress (occludra-deployment.yaml) lets security-gateways pods reach
+# private addresses only on NetBird ports; this adds exactly chroma-gateway's
+# port, for Vigil pods only (CPU and GPU variants). The matching ingress rule
+# is allow-vigil-to-gateway in manifests/chroma/networkpolicy.yaml.
+#
+# LIQO NOTE (not solved here): when the GPU Vigil runs on the PC as a pod
+# offloaded through Liqo, it executes in the PC's cluster. Neither this
+# policy nor the chroma-side one applies to it there (they select pods of
+# this cluster), and from the PC chroma_url must still resolve and route to
+# chroma-gateway.chroma (Liqo service reflection/remapped CIDRs, or a
+# reachable address over the tunnel), with the Chroma frontend accepting the
+# remapped source address. That path needs its own rule on both sides.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vigil-to-chroma
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [vigil-llm, vigil-llm-gpu]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chroma
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: chroma-gateway
+      ports:
+        - protocol: TCP
+          port: 8080

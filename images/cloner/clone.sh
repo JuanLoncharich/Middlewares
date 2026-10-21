@@ -4,6 +4,7 @@
 # Inputs (env):  REPO_URL (https:// only), REPO_REF (branch/tag/SHA, default main),
 #                REPO_PATH (optional subdirectory), TRANSPORT (stdio|sse),
 #                TARGET_PORT (default 8080), GIT_USERNAME / GIT_TOKEN (optional),
+#                GIT_CA_PEM (optional PEM CA bundle for self-hosted git servers),
 #                LAUNCH_CMD (optional explicit override, e.g. "node dist/index.js").
 # Outputs:       /workspace/<clone>, /workspace/.mcp-launch.json,
 #                FIFOs /ipc/stdin and /ipc/stdout.
@@ -36,10 +37,13 @@ bounded() {
   label="$1"; shift
   attempt=1
   while :; do
+    # rc must be read in the else branch: after an `if` whose branch did
+    # not run, $? is 0, which made every failed operation look successful.
     if timeout "$OP_TIMEOUT" "$@"; then
       return 0
+    else
+      rc=$?
     fi
-    rc=$?
     if [ "$attempt" -ge "$OP_RETRIES" ]; then
       log "$label failed after $attempt attempts (last rc=$rc, timeout=${OP_TIMEOUT}s)"
       return "$rc"
@@ -85,6 +89,15 @@ if [ -n "${GIT_TOKEN:-}" ]; then
   export GIT_CONFIG_VALUE_0=""
   export GIT_CONFIG_KEY_1=credential.helper
   export GIT_CONFIG_VALUE_1='!f() { echo "username=$GIT_USERNAME"; echo "password=$GIT_TOKEN"; }; f'
+fi
+
+# Custom CA (operator: key ca.crt of credentialsSecretRef -> GIT_CA_PEM). git
+# wants a file path in GIT_SSL_CAINFO, not the certificate itself.
+if [ -n "${GIT_CA_PEM:-}" ]; then
+  GIT_CA_FILE="$(mktemp /tmp/git-ca.XXXXXX)"
+  printf '%s\n' "$GIT_CA_PEM" > "$GIT_CA_FILE"
+  export GIT_SSL_CAINFO="$GIT_CA_FILE"
+  unset GIT_CA_PEM
 fi
 
 # Kill transfers that stall below 1 KiB/s for 30s instead of hanging forever

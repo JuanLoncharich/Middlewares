@@ -1,19 +1,31 @@
 # ---------------------------------------------------------------------------
-# Corpus loader Job — downloads Vigil's embedding corpora from HuggingFace
-# (deadbits org) and pushes them into the distributed Chroma collections via
-# the frontend REST API.
+# Corpus loader Job — loads Vigil's calibrated corpus (vigil-corpus/1, built
+# by hack/vigil-corpus/build_corpus.py, pinned by the sha256 in its lock file
+# hack/vigil-corpus/*.lock.json) into Chroma through chroma-gateway.
 #
-# deploy.sh builds/pushes the image and applies this manifest with
-# __LOADER_IMG__ substituted. Idempotent: collections holding vectors are
-# skipped (FORCE_LOAD=1 to reload); re-applying after a completed Job
-# re-runs it only when the spec changes (deploy.sh deletes+recreates it).
+# The script is load_corpus.py (stdlib only) from the ConfigMap
+# vigil-corpus-loader, which hack/chroma/deploy.sh creates from
+# images/vigil-corpus-loader/. The image is ours only to carry the data:
+# images/vigil-corpus-loader/Dockerfile.corpus = the pinned python:alpine
+# plus the corpus file at /corpus/ (deploy.sh builds and pushes it as
+# $IMG_REGISTRY/vigil-corpus:<name>-<sha12>; __VIGIL_CORPUS_IMG__,
+# __CORPUS_FILE__ and __CORPUS_SHA256__ are filled in by hack/chroma/deploy.sh).
+# The loader checks the file's sha256 before writing anything. It writes with
+# the writer token (Secret chroma-auth). Idempotent: collections already
+# holding this build are skipped (FORCE_LOAD=1 to reload; another build under
+# the same name is refused unless RECREATE=1).
 #
-# Corpus -> collection mapping (all-MiniLM-L6-v2, 384-dim):
-#   deadbits/vigil-instruction-bypass-all-MiniLM-L6-v2 -> vigil_instruction_bypass
-#   deadbits/vigil-jailbreak-all-MiniLM-L6-v2          -> vigil_jailbreak
+# Collections (multilingual-e5-small, 384-dim, cosine), with their calibrated
+# thresholds in the collection metadata:
+#   vigil_<name>_whole     whole malicious texts (+ the trained head, e5s-v3 on)
+#   vigil_<name>_sentence  their single sentences
+#   vigil_<name>_benign    the benign reference
+# PRUNE_OTHER=1: once this build is complete, other vigil_* collections (older
+# builds, the legacy corpora) are deleted, so Chroma holds one corpus.
 #
 # NetworkPolicy: the only pod in `chroma` allowed HTTPS egress is this Job
-# (see networkpolicy.yaml).
+# (see networkpolicy.yaml) — not needed for the calibrated corpus, which is
+# in the image; kept for the legacy deadbits download (no CORPUS_URL).
 # ---------------------------------------------------------------------------
 apiVersion: batch/v1
 kind: Job
@@ -40,11 +52,27 @@ spec:
           type: RuntimeDefault
       containers:
         - name: loader
-          image: __LOADER_IMG__
+          image: __VIGIL_CORPUS_IMG__
           imagePullPolicy: IfNotPresent
+          command: ["python", "/app/load_corpus.py"]
           env:
             - name: CHROMA_URL
-              value: http://rust-frontend-service.chroma.svc.cluster.local:8000
+              value: http://chroma-gateway.chroma.svc.cluster.local:8080
+            - name: CHROMA_TOKEN
+              valueFrom:
+                secretKeyRef: {name: chroma-auth, key: writer-token}
+            - name: CORPUS_URL
+              value: file:///corpus/__CORPUS_FILE__
+            - name: CORPUS_SHA256
+              value: "__CORPUS_SHA256__"
+            - name: PRUNE_OTHER
+              value: "1"
+            # Chroma answers 429 ("log needs compaction") while the compactor
+            # catches up: smaller batches, and up to ~20 min of backoff.
+            - name: BATCH_SIZE
+              value: "250"
+            - name: RETRIES
+              value: "40"
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -55,11 +83,17 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            - {name: script, mountPath: /app, readOnly: true}
           resources:
             requests:
               cpu: 100m
               memory: 128Mi
-            # 8800+ entries x 384 floats parsed in memory, plus batch state.
+            # The compressed file (~150 MB) in memory, streamed line by line, plus batch state.
             limits:
               cpu: "1"
               memory: 1Gi
+      volumes:
+        - name: script
+          configMap:
+            name: vigil-corpus-loader

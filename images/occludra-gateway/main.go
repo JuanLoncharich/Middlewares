@@ -6,7 +6,9 @@
 // string value is matched against the configured detectors; matches are
 // replaced with the redaction token (or the request is rejected for
 // action=block detectors). Model names are checked against an allowlist.
-// Responses (including SSE streams) are piped back unmodified.
+// Responses (including SSE streams) are piped back unmodified, with an
+// X-Occludra-Proxy: true header on inference answers; the optional
+// " (proxy)" text marker (OCCLUDRA_RESPONSE_MARKER=1) is the one exception.
 //
 // Configuration:
 //
@@ -16,6 +18,8 @@
 //	                            (default https://opencode.ai/zen/v1)
 //	OCCLUDRA_UPSTREAM_API_KEY   upstream key (falls back to OPENCODE_API_KEY,
 //	                            then ANTHROPIC_API_KEY)
+//	OCCLUDRA_RESPONSE_MARKER    1 appends " (proxy)" to the model's answer
+//	                            (default off: answers reach the agent as sent)
 //
 // Logging counts and classifies redactions only — prompt content is never
 // written to the gateway log.
@@ -602,7 +606,7 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			w.Header().Add(name, v)
 		}
 	}
-	if responseMarkerEnabled() && isInference {
+	if isInference {
 		w.Header().Set("X-Occludra-Proxy", "true")
 	}
 	w.WriteHeader(resp.StatusCode)
@@ -641,15 +645,19 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 	}
 }
 
-// responseMarker is the append-detection feature: every response that comes
-// back THROUGH the gateway gets " (proxy)" appended to the last message, so
-// clients can visually verify their LLM traffic never went direct to the
-// provider. Controlled by OCCLUDRA_RESPONSE_MARKER (default on).
+// responseMarker is the append-detection feature: with
+// OCCLUDRA_RESPONSE_MARKER=1 every response that comes back THROUGH the
+// gateway gets " (proxy)" appended to the last message, so a person at the
+// workstation can see their LLM traffic never went direct to the provider
+// (TESTING.md §4). Off by default: it rewrites the model's answer, which the
+// evaluation agents then read back as their own history, and a security
+// gateway should not change what the model said. The X-Occludra-Proxy
+// header marks the path without touching the content.
 const responseMarkerText = " (proxy)"
 
 func responseMarkerEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("OCCLUDRA_RESPONSE_MARKER"))
-	return raw == "" || !(raw == "0" || raw == "false" || raw == "no" || raw == "off")
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("OCCLUDRA_RESPONSE_MARKER")))
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 }
 
 // markerApplies reports whether the request path is one whose responses

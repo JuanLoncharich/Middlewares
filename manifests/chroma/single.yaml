@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# chroma-single — a one-pod Chroma for local test clusters (kind), selected by
+# VECTOR_DB_MODE=single in hack/chroma/deploy.sh.
+#
+# Same REST API v2 as the distributed frontend, so Vigil, the loader and
+# chroma-gateway (which fronts it exactly like the distributed one) do not
+# know the difference. Data lives in an emptyDir: a pod restart empties it
+# and the loader Job must run again. Not for the real cluster.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chroma-single
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: chroma-single
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chroma-single
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chroma-single
+        app.kubernetes.io/part-of: chroma-distributed
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: chroma
+          image: chromadb/chroma:1.5.10.dev296@sha256:f2faca1ab017d3a8afddf62f5b00251252c4a6ecc91c3e30a1f4c98fea58a0e9
+          args: ["run", "--path", "/data", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - {name: ANONYMIZED_TELEMETRY, value: "False"}
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /api/v2/heartbeat, port: http}
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            # Measured with the calibrated corpus (vigil-corpus e5s-v2, 240k
+            # vectors x 384): ~570 MiB resident after load and queries.
+            requests:
+              cpu: 50m
+              memory: 640Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chroma-single
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: chroma-single
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  selector:
+    app.kubernetes.io/name: chroma-single
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

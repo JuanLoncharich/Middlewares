@@ -1,0 +1,35 @@
+# Flux on the university k0s cluster: watch this repository and apply
+# deploy/k0s. Installed once with `kubectl apply -k deploy/flux` (see
+# deploy/README.md); from then on a push to main is a deploy.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: middlewares
+  namespace: flux-system
+spec:
+  interval: 2m
+  url: https://github.com/JuanLoncharich/Middlewares
+  ref:
+    branch: main
+  # Only what Flux needs to read.
+  ignore: |
+    /*
+    !/deploy/
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 10m
+  sourceRef:
+    kind: GitRepository
+    name: middlewares
+  path: ./deploy/k0s
+  prune: true
+  # Not waiting for health: Vigil stays Pending while the GPU PC is detached,
+  # and that must not block the rest of the platform from updating.
+  wait: false

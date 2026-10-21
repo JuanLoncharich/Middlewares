@@ -3,7 +3,7 @@ import { startTelemetry, stopTelemetry, evaluationTrace, inSpan, requestTraceHea
  * Evaluator container entrypoint.
  *
  * Orchestrates the four-pass OpenCode evaluation of an MCP server:
- *   1. static   – SAST over /workspace (agent gets read-only file tools)
+ *   1. static   – SAST over /workspace (evidence pre-collected with file:line context; no tools)
  *   2. dynamic  – live JSON-RPC enumeration + schema/protocol fuzzing
  *   3. adversarial – rogue-behaviour / prompt-injection / SSRF probes
  *   4. synthesis – aggregate scoring, risk category, remediation plan
@@ -50,7 +50,18 @@ import { runFuzz, renderFuzzMarkdown } from "./fuzz.js";
 import { runProbes, renderProbeMarkdown } from "./probes.js";
 import { collectStaticEvidence, renderStaticMarkdown } from "./static.js";
 import { createMeshFetch, startMeshProxyBridge, waitForSocks5Proxy, type MeshBridge, type MeshFetch } from "./meshhttp.js";
-import { excerptOf, VigilClient, type VigilVerdict } from "./vigil.js";
+import { customModelLimit } from "./providers.js";
+import { DEFAULT_TRANSFORMER_THRESHOLD, excerptOf, VigilClient, type VigilScannerHit, type VigilVerdict } from "./vigil.js";
+import {
+  fuzzSegments,
+  MAX_NOTED_WARNINGS,
+  probeSegments,
+  scanGate,
+  scanUnits,
+  surfaceSegments,
+  vigilWarningsNote,
+  type ScanSegment,
+} from "./vigilsegments.js";
 import {
   AgentPromptError,
   AgentTimeoutError,
@@ -145,6 +156,17 @@ function readEnv(): RunnerEnv {
   if (agentNames.length === 0) {
     throw new ConfigurationError("AGENT_NAMES must list at least one OpenCodeAgent");
   }
+  const optionalFraction = (key: string, fallback: number): number => {
+    const raw = env[key];
+    if (!isNonEmptyString(raw)) {
+      return fallback;
+    }
+    const parsed = Number(raw.trim());
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+      throw new ConfigurationError(`environment variable ${key} must be a number in (0, 1], got "${raw}"`);
+    }
+    return parsed;
+  };
   const flag = (key: string, fallback: boolean): boolean => {
     const raw = env[key];
     if (!isNonEmptyString(raw)) {
@@ -175,11 +197,13 @@ function readEnv(): RunnerEnv {
     dryRun,
     // --- Vigil-LLM (inbound scanner) ---
     vigilUrl: env["VIGIL_URL"] ?? "http://vigil-service.security-gateways.svc.cluster.local:5000/analyze/prompt",
+    vigilGpuUrl: env["VIGIL_GPU_URL"]?.trim() || undefined,
     // Disabled by default in DRY_RUN (no gateways reachable) unless forced on.
     vigilEnabled: flag("VIGIL_ENABLED", !dryRun),
     vigilEnforce: rawEnforce === "strict",
     vigilTimeoutMs: optionalInt("VIGIL_TIMEOUT_MS", 10_000),
     vigilMaxPayloadBytes: optionalInt("VIGIL_MAX_PAYLOAD_BYTES", 65_536),
+    vigilTransformerThreshold: optionalFraction("VIGIL_TRANSFORMER_THRESHOLD", DEFAULT_TRANSFORMER_THRESHOLD),
     // --- Occludra (LLM gateway) ---
     occludraBaseUrl: env["OCCLUDRA_BASE_URL"] ?? "http://occludra-service.security-gateways.svc.cluster.local:8080/v1",
     occludraEnabled: flag("OCCLUDRA_ENABLED", true),
@@ -218,10 +242,16 @@ interface OpencodeHandle {
   close: () => void;
 }
 
+/** Providers OpenCode already knows (catalog entries); everything else is a custom OpenAI-compatible endpoint. */
+const CATALOG_PROVIDERS = new Set(["opencode", "anthropic"]);
+function isCustomProvider(providerID: string): boolean {
+  return !CATALOG_PROVIDERS.has(providerID);
+}
+
 async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEnv, signal: AbortSignal): Promise<OpencodeHandle> {
   const modelRef = `${agent.spec.model.providerID}/${agent.spec.model.modelID}`;
-  // Agents must never mutate /workspace or reach the network via tools: the
-  // static auditor gets read-only file tools, every other persona gets none.
+  // Agents must never mutate /workspace or reach the network via tools:
+  // every persona runs with every tool denied (toolsForKind below).
   const permission: NonNullable<Config["permission"]> = "deny";
   const config: Config = {
     model: modelRef,
@@ -235,10 +265,26 @@ async function bootOpencode(agent: OpenCodeAgent, kind: AgentKind, env: RunnerEn
   // the cluster. The call itself is carried by the NetBird mesh through the
   // HTTP_PROXY bridge exported by main() (see the mesh bootstrap there).
   if (env.occludraEnabled) {
+    const providerID = agent.spec.model.providerID;
     config.provider = {
-      [agent.spec.model.providerID]: {
-        options: { baseURL: env.occludraBaseUrl, headers: requestTraceHeaders() },
-      },
+      [providerID]: isCustomProvider(providerID)
+        ? {
+            // Not in OpenCode's catalog (e.g. NVIDIA NIM): declare it as an
+            // OpenAI-compatible endpoint that lives BEHIND Occludra. The API
+            // key here is a placeholder — Occludra replaces Authorization
+            // with the real upstream key, which never enters this pod.
+            npm: "@ai-sdk/openai-compatible",
+            name: providerID,
+            options: { baseURL: env.occludraBaseUrl, apiKey: "egress-via-occludra", headers: requestTraceHeaders() },
+            models: {
+              [agent.spec.model.modelID]: {
+                name: agent.spec.model.modelID,
+                tool_call: false,
+                limit: customModelLimit(agent.spec.model.contextTokens),
+              },
+            },
+          }
+        : { options: { baseURL: env.occludraBaseUrl, headers: requestTraceHeaders() } },
     };
   } else {
     log.warn("Occludra disabled — LLM traffic bypasses the security gateway", { agent: agent.metadata.name });
@@ -319,19 +365,19 @@ function extractJsonFromTextParts(parts: Array<{ type: string; text?: string }>)
 // a `tool_choice` that several providers (incl. OpenCode Zen free tier) reject
 // with 400 the moment OTHER tools are also advertised, and the evaluation
 // evidence is pre-collected with file:line context anyway. See README.
-function toolsForKind(kind: AgentKind): Record<string, boolean> {
+function toolsForKind(freeTierGate: boolean): Record<string, boolean> {
   // OpenCode Zen's free-tier gate rejects /responses bodies that carry no
   // tool definitions named bash+read ("free tier can only be used from
   // within OpenCode"). Advertising the minimum pair satisfies the gate
   // while the boot config's permission:"deny" keeps every execution
   // refused (verified against opencode 1.18.31 — see
   // dlp-test-results/forensics/).
-  const freeTierGate = { bash: true, read: true };
-  if (kind === "static") {
-    return { ...freeTierGate, edit: false, write: false, patch: false, glob: false, grep: false, list: false, webfetch: false, websearch: false, task: false, todowrite: false, skill: false };
-  }
+  // Only the Zen provider has that gate. Other providers (custom, e.g. NVIDIA
+  // NIM) get NO tools: models there otherwise loop calling the denied tools
+  // and the prompt never returns (measured with z-ai/glm-5.3).
+  const gate = freeTierGate ? { bash: true, read: true } : { bash: false, read: false };
   return {
-    ...freeTierGate,
+    ...gate,
     edit: false,
     write: false,
     patch: false,
@@ -407,7 +453,7 @@ async function runAgentPrompt(
       directory,
       model: { providerID: agent.spec.model.providerID, modelID: agent.spec.model.modelID },
       system: agent.spec.systemPrompt,
-      tools: toolsForKind(kind),
+      tools: toolsForKind(!isCustomProvider(agent.spec.model.providerID)),
       format: { type: "json_schema", schema: agent.spec.outputFormat.schema, retryCount },
       parts: [{ type: "text", text: contractedMessage }],
     });
@@ -423,21 +469,41 @@ async function runAgentPrompt(
     // a server-side StructuredOutputError while the text parts still carry a
     // JSON answer — recover it before failing.
     let structured = extractStructuredOutput(info);
+    let parts = result.data.parts;
     if (structured === undefined) {
-      structured = extractJsonFromTextParts(result.data.parts);
+      structured = extractJsonFromTextParts(parts);
       if (structured !== undefined) {
         log.warn("structured output missing; recovered JSON from text parts", { agent: name });
       }
     }
+    // Custom providers run without tool calling, so OpenCode cannot enforce
+    // the schema and its retries never happen: when the answer carries no
+    // JSON at all, ask again in the same session, up to retryCount (max 2).
+    for (let attempt = 1; structured === undefined && isCustomProvider(agent.spec.model.providerID) && attempt <= Math.min(retryCount, 2); attempt++) {
+      log.warn("no JSON in the answer; asking again for the JSON object only", { agent: name, attempt });
+      const again = await handle.client.session.prompt({
+        sessionID: session.data.id,
+        directory,
+        model: { providerID: agent.spec.model.providerID, modelID: agent.spec.model.modelID },
+        system: agent.spec.systemPrompt,
+        tools: toolsForKind(false),
+        parts: [{ type: "text", text: "Your previous answer contained no JSON object. You have NO tools in this session: do not call any tool or write a tool call. Everything you can use is in the first message. Reply now with ONLY the JSON object that follows the required schema — no prose, no code fence." }],
+      });
+      if (again.error !== undefined || again.data === undefined) break;
+      parts = again.data.parts;
+      structured = extractJsonFromTextParts(parts);
+    }
     if (structured === undefined) {
-      if (info.error !== undefined && info.error.name === "StructuredOutputError") {
-        throw new StructuredOutputExhaustedError(name, info.error.data.retries, info.error.data.message);
-      }
-      const text = result.data.parts
+      // What the model said instead (redacted by the logger like any field), to tell
+      // a refusal, an empty answer and prose apart.
+      const text = parts
         .map((p) => (p.type === "text" ? p.text : ""))
         .join("")
         .slice(0, 300);
-      throw new StructuredOutputExhaustedError(name, retryCount, `no structured output on assistant message (text: ${text})`);
+      if (info.error !== undefined && info.error.name === "StructuredOutputError") {
+        throw new StructuredOutputExhaustedError(name, info.error.data.retries, `${info.error.data.message} (text: ${JSON.stringify(text)})`);
+      }
+      throw new StructuredOutputExhaustedError(name, retryCount, `no structured output on assistant message (text: ${JSON.stringify(text)})`);
     }
     return { structured, durationMs: Date.now() - started };
   };
@@ -475,7 +541,7 @@ function buildStaticMessage(server: MCPServer, evidence: StaticEvidence, env: Ru
     ``,
     renderStaticMarkdown(evidence, env.workspaceDir),
     ``,
-    `Use your read-only file tools on ${env.workspaceDir} to confirm every hit before reporting it.`,
+    `You have no tools: judge every hit from the excerpts above, and report only what they show.`,
     `Produce the JSON report now.`,
   ].join("\n");
 }
@@ -622,7 +688,8 @@ function parseSynthesis(raw: unknown, agentName: string): SynthesisOutput {
   const safetyScore = clampScore(raw["safetyScore"] ?? raw["safety_score"] ?? raw["score"]);
   const reliabilityScore = clampScore(raw["reliabilityScore"] ?? raw["reliability_score"] ?? safetyScore);
   if (safetyScore === null && reliabilityScore === null) {
-    throw new StructuredOutputExhaustedError(agentName, 0, "synthesis output lacks safetyScore and reliabilityScore");
+    throw new StructuredOutputExhaustedError(agentName, 0,
+      `synthesis output lacks safetyScore and reliabilityScore (keys: ${JSON.stringify(Object.keys(raw).slice(0, 20))})`);
   }
   const riskCategory: RiskCategory = isRiskCategory(raw["riskCategory"]) ? raw["riskCategory"] : "Unknown";
   const summary = typeof raw["summary"] === "string" ? raw["summary"] : "";
@@ -771,66 +838,104 @@ interface RunState {
 // Vigil gate: untrusted MCP payloads never enter a prompt unscanned
 // ---------------------------------------------------------------------------
 
-function buildSurfacePayload(ev: DynamicEvidence): string {
-  return JSON.stringify(
-    {
-      instructions: ev.init?.instructions ?? null,
-      tools: ev.tools,
-      prompts: ev.prompts,
-      resources: ev.resources,
-    },
-    null,
-    1,
-  );
-}
-
-function buildFuzzPayload(fuzz: FuzzReport): string {
-  return JSON.stringify(
-    {
-      notableResponses: fuzz.notableResponses,
-      anomalousCases: fuzz.cases.filter((c) => c.errorClass !== "ok"),
-    },
-    null,
-    1,
-  );
-}
-
-function buildProbePayload(probes: ProbeReport): string {
-  return JSON.stringify(
-    {
-      serverInstructionsHits: probes.serverInstructionsHits,
-      toolDescriptionHits: probes.toolDescriptionHits,
-      benignCalls: probes.benignCalls.map((b) => ({ tool: b.tool, outputExcerpt: b.outputExcerpt, hits: b.hits })),
-      activeProbes: probes.activeProbes,
-    },
-    null,
-    1,
-  );
-}
-
 /**
- * Scan one untrusted payload with Vigil-LLM over the mesh.
+ * Scan one gate's untrusted texts with Vigil-LLM over the mesh: each text on
+ * its own, as plain text, chunked to the classifier's window
+ * (vigilsegments.ts says why). Each chunk's verdict is clean, warn or abort
+ * (vigil.ts combineScannerResults): a chunk aborts only when the transformer
+ * AND YARA or vectordb flag it; a single scanner only warns.
  *
- * strict (VIGIL_ENFORCE=strict, default): a detection scores the run 0 with
+ * Warnings are recorded in the report (securityGate.vigil.warnings), become
+ * one Medium finding per gate and are passed to the LLM auditor as a note.
+ *
+ * strict (VIGIL_ENFORCE=strict, default): an abort scores the run 0 with
  * riskCategory=Malicious, records a Critical finding and ABORTS the
  * evaluation; an unreachable scanner fails the run as well (fail-closed).
- * monitor: detections and outages are logged + recorded, evaluation continues.
+ * monitor: aborts and outages are logged + recorded, evaluation continues.
  */
-async function scanUntrusted(state: RunState, source: string, payload: string): Promise<void> {
+async function recordVigilWarnings(
+  state: RunState,
+  source: string,
+  warnings: { unit: ScanSegment; verdict: VigilVerdict }[],
+): Promise<void> {
+  if (warnings.length === 0) {
+    return;
+  }
+  const vrec = state.security.gate.vigil;
+  for (const { unit, verdict } of warnings) {
+    vrec.warnings.push({
+      source,
+      segment: unit.label,
+      scanners: verdict.hits.map((h) => h.scanner),
+      hits: verdict.hits,
+      excerpt: excerptOf(unit.text),
+    });
+  }
+  const listed = warnings
+    .slice(0, MAX_NOTED_WARNINGS)
+    .map(({ unit, verdict }) => `${unit.label} (${verdict.hits.map(describeHit).join(", ")})`)
+    .join("; ");
+  state.report.findings.push({
+    agent: "vigil-llm",
+    severity: "Medium",
+    title: `Possible prompt injection in untrusted ${source} (not corroborated)`,
+    description:
+      `Vigil-LLM flagged ${warnings.length} text(s) of the MCP server's ${source} with a single scanner, ` +
+      `which on its own does not stop the evaluation (one scanner alone has measurable false positives): ${listed}` +
+      (warnings.length > MAX_NOTED_WARNINGS ? `; and ${warnings.length - MAX_NOTED_WARNINGS} more in the report` : "") +
+      ".",
+    remediation: "Review the flagged texts (securityGate.vigil.warnings in the report) before integrating this server.",
+  });
+  log.warn("vigil warnings — single-scanner hits, evaluation continues", { source, warnings: warnings.length });
+  await state.status.patchStatus({ findings: state.report.findings });
+}
+
+function describeHit(h: VigilScannerHit): string {
+  const name = h.scanner.replace(/^scanner:/, "");
+  if (h.detail) return `${name}: ${h.detail}`;
+  return h.score !== undefined ? `${name} ${h.score.toFixed(3)}` : name;
+}
+
+/** The persona message plus, when Vigil warned, the note about it. */
+function withVigilNotes(state: RunState, message: string): string {
+  return message + vigilWarningsNote(state.security.gate.vigil.warnings.map((w) => {
+    const score = w.hits.find((h) => h.scanner === "scanner:transformer")?.score;
+    return {
+      source: w.source,
+      segment: w.segment,
+      scanners: w.scanners.map((s) => s.replace(/^scanner:/, "")),
+      ...(score !== undefined ? { score } : {}),
+    };
+  }));
+}
+
+async function scanUntrusted(state: RunState, source: string, segments: ScanSegment[]): Promise<void> {
   const vigil = state.security.vigil;
   if (vigil === null) {
     return;
   }
   const vrec = state.security.gate.vigil;
-  vrec.payloadsScanned += 1;
+  const units = scanUnits(segments);
 
   let verdict: VigilVerdict;
+  let offending: ScanSegment;
   try {
-    verdict = await inSpan("vigil.scan", { "mcp.scan.source": source }, async (span) => {
- const result = await vigil.analyze(payload, source);
- span.setAttribute("mcp.injection_detected", result.injectionDetected);
- return result;
- });
+    const result = await inSpan("vigil.scan", { "mcp.scan.source": source, "mcp.scan.units": units.length }, async (span) => {
+      const r = await scanGate(units, async (unit) => {
+        vrec.payloadsScanned += 1;
+        return vigil.analyze(unit.text, `${source}: ${unit.label}`);
+      });
+      span.setAttribute("mcp.injection_detected", r.abort !== undefined);
+      span.setAttribute("mcp.vigil.warnings", r.warnings.length);
+      return r;
+    });
+    await recordVigilWarnings(state, source, result.warnings);
+    if (result.abort === undefined) {
+      log.info("vigil scan without abort", { source, units: units.length, warnings: result.warnings.length, endpoint: vigil.endpoint });
+      return;
+    }
+    verdict = result.abort.verdict;
+    offending = result.abort.unit;
   } catch (err) {
     if (err instanceof VigilUnavailableError) {
       vrec.unavailableErrors += 1;
@@ -844,14 +949,10 @@ async function scanUntrusted(state: RunState, source: string, payload: string): 
     fail(state, `vigil scan (${source})`, err);
   }
 
-  if (!verdict.injectionDetected) {
-    log.info("vigil scan clean", { source, scannersFired: verdict.triggeredScanners.length });
-    return;
-  }
-
-  const excerpt = excerptOf(payload);
+  const excerpt = excerptOf(offending.text);
   vrec.detections.push({
     source,
+    segment: offending.label,
     confidence: verdict.confidence,
     scanners: verdict.triggeredScanners,
     excerpt,
@@ -862,7 +963,7 @@ async function scanUntrusted(state: RunState, source: string, payload: string): 
     severity: "Critical",
     title: `Indirect prompt injection detected in untrusted ${source}`,
     description:
-      `Vigil-LLM flagged the MCP server's ${source} content as a prompt injection / jailbreak attempt` +
+      `Vigil-LLM flagged the MCP server's ${source} content (${offending.label}) as a prompt injection / jailbreak attempt` +
       (verdict.confidence !== undefined ? ` (confidence ${verdict.confidence.toFixed(2)})` : "") +
       (verdict.triggeredScanners.length > 0 ? `; triggered scanners: ${verdict.triggeredScanners.join(", ")}` : "") +
       `. Excerpt: ${excerpt}`,
@@ -1055,7 +1156,7 @@ async function evaluate(state: RunState): Promise<void> {
       // before any of it reaches a prompt.
       if (state.dynamic.init && !state.security.surfaceScanned) {
         state.security.surfaceScanned = true;
-        await scanUntrusted(state, "advertised-surface", buildSurfacePayload(state.dynamic));
+        await scanUntrusted(state, "advertised-surface", surfaceSegments(state.dynamic));
       }
       const client = state.mcp;
       if (client && state.dynamic.init) {
@@ -1085,12 +1186,12 @@ async function evaluate(state: RunState): Promise<void> {
       }
       // Gate 2: anomalous fuzz responses may carry injected instructions.
       if (state.dynamic.fuzz) {
-        await scanUntrusted(state, "fuzz-responses", buildFuzzPayload(state.dynamic.fuzz));
+        await scanUntrusted(state, "fuzz-responses", fuzzSegments(state.dynamic.fuzz));
       }
       report.telemetry = state.dynamic.telemetry;
       try {
         await recordAgent(agent, kind, (signal) =>
-          runAgentPrompt(agent, kind, buildDynamicMessage(server, state.dynamic), env, signal),
+          runAgentPrompt(agent, kind, withVigilNotes(state, buildDynamicMessage(server, state.dynamic)), env, signal),
         );
       } catch (err) {
         log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
@@ -1102,7 +1203,7 @@ async function evaluate(state: RunState): Promise<void> {
       await ensureTarget();
       if (state.dynamic.init && !state.security.surfaceScanned) {
         state.security.surfaceScanned = true;
-        await scanUntrusted(state, "advertised-surface", buildSurfacePayload(state.dynamic));
+        await scanUntrusted(state, "advertised-surface", surfaceSegments(state.dynamic));
       }
       const client = state.mcp;
       if (client && state.dynamic.init) {
@@ -1130,12 +1231,12 @@ async function evaluate(state: RunState): Promise<void> {
       // Gate 3: probe outputs — the untrusted server's direct answers to our
       // adversarial inputs.
       if (state.probes) {
-        await scanUntrusted(state, "probe-responses", buildProbePayload(state.probes));
+        await scanUntrusted(state, "probe-responses", probeSegments(state.probes));
       }
       report.telemetry = state.dynamic.telemetry;
       try {
         await recordAgent(agent, kind, (signal) =>
-          runAgentPrompt(agent, kind, buildAdversarialMessage(server, state.dynamic, state.probes), env, signal),
+          runAgentPrompt(agent, kind, withVigilNotes(state, buildAdversarialMessage(server, state.dynamic, state.probes)), env, signal),
         );
       } catch (err) {
         log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
@@ -1151,7 +1252,7 @@ async function evaluate(state: RunState): Promise<void> {
       let structured: unknown;
       try {
         structured = await recordAgent(agent, kind, (signal) =>
-          runAgentPrompt(agent, kind, buildSynthesisMessage(server, report.agents, state.dynamic.telemetry), env, signal),
+          runAgentPrompt(agent, kind, withVigilNotes(state, buildSynthesisMessage(server, report.agents, state.dynamic.telemetry)), env, signal),
         );
       } catch (err) {
         log.warn("synthesis agent failed; falling back to conservative scoring", { agent: name, error: errorMessage(err) });
@@ -1188,7 +1289,7 @@ async function evaluate(state: RunState): Promise<void> {
     // generic persona
     try {
       await recordAgent(agent, kind, (signal) =>
-        runAgentPrompt(agent, kind, buildGenericMessage(server, report.agents, state.dynamic.telemetry), env, signal),
+        runAgentPrompt(agent, kind, withVigilNotes(state, buildGenericMessage(server, report.agents, state.dynamic.telemetry)), env, signal),
       );
     } catch (err) {
       log.warn("agent failed; continuing degraded", { agent: name, kind, error: errorMessage(err) });
@@ -1317,6 +1418,8 @@ async function main(): Promise<number> {
     ? new VigilClient(env.vigilUrl, meshFetchFn, {
         timeoutMs: env.vigilTimeoutMs,
         maxPayloadBytes: env.vigilMaxPayloadBytes,
+        transformerThreshold: env.vigilTransformerThreshold,
+        ...(env.vigilGpuUrl !== undefined ? { preferredUrl: env.vigilGpuUrl } : {}),
       })
     : null;
 
@@ -1339,8 +1442,10 @@ async function main(): Promise<number> {
         enabled: vigil !== null,
         enforced: env.vigilEnforce,
         url: env.vigilUrl,
+        transformerThreshold: env.vigilTransformerThreshold,
         payloadsScanned: 0,
         detections: [],
+        warnings: [],
         unavailableErrors: 0,
       },
       occludra: { enabled: env.occludraEnabled, baseUrl: env.occludraBaseUrl },

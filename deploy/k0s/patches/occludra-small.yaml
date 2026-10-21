@@ -1,0 +1,18 @@
+# The two 2-vCPU workers are fully booked by CPU requests: one Occludra
+# replica (it is a thin proxy), up to two under load.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: occludra
+  namespace: security-gateways
+spec:
+  replicas: 1
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: occludra
+  namespace: security-gateways
+spec:
+  minReplicas: 1
+  maxReplicas: 2

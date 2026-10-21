@@ -331,12 +331,19 @@ func findActiveRun(runs []securityv1alpha1.MCPEvaluationRun) *securityv1alpha1.M
 	return nil
 }
 
-// syncLatestRunResult copies the newest terminal run's score/risk into the server status.
+// syncLatestRunResult copies the newest verdict's score/risk into the server
+// status. A verdict is a Completed run, or a Failed run that still carries a
+// risk category: the evaluator aborts with Failed + Malicious when Vigil
+// detects an injection, and that must replace an older "Safe". Failed runs
+// without a verdict (infrastructure errors) leave the last verdict standing.
 func (r *MCPServerReconciler) syncLatestRunResult(server *securityv1alpha1.MCPServer, runs []securityv1alpha1.MCPEvaluationRun) {
 	var latest *securityv1alpha1.MCPEvaluationRun
 	for i := range runs {
 		run := &runs[i]
-		if run.Status.Phase != securityv1alpha1.PhaseCompleted {
+		verdict := run.Status.Phase == securityv1alpha1.PhaseCompleted ||
+			(run.Status.Phase == securityv1alpha1.PhaseFailed && run.Status.Scoring != nil &&
+				run.Status.Scoring.RiskCategory == securityv1alpha1.RiskMalicious)
+		if !verdict {
 			continue
 		}
 		if latest == nil || run.CreationTimestamp.After(latest.CreationTimestamp.Time) {

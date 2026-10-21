@@ -70,7 +70,9 @@ const (
 
 	volumeWorkspace   = "workspace"
 	volumeIPC         = "ipc"
-	volumeTmp         = "tmp"
+	volumeTmp         = "tmp"        // evaluator + NetBird sidecar: the evaluator's HOME (OpenCode config, sessions)
+	volumeClonerTmp   = "cloner-tmp" // the cloner's own /tmp: it runs repository build code
+	volumeTargetTmp   = "target-tmp" // the untrusted server's own /tmp
 	volumeOutput      = "output"
 	volumeSAToken     = "sa-token"
 	volumeNetBirdStat = "netbird-state"
@@ -130,7 +132,13 @@ type ImageConfig struct {
 	// per-run NetworkPolicy whose only egress is DNS, the API server and the
 	// NetBird control/data planes. MESH_ENFORCE=false restores the legacy
 	// direct-to-provider mode (no sidecar, no per-run policy).
-	MeshEnforce          bool
+	MeshEnforce bool
+	// EvalPublicEgress (legacy mode only, EVAL_PUBLIC_EGRESS, default false)
+	// opens TCP 443 to every public IP during the evaluate phase. The target
+	// shares the Pod's network, so it would also be the untrusted server's
+	// way out; by default the phase reaches only DNS, the API server and the
+	// gateways (every LLM call goes through Occludra).
+	EvalPublicEgress     bool
 	NetBirdImage         string
 	NetBirdManagementURL string
 	NetBirdSecretName    string
@@ -147,7 +155,12 @@ type ImageConfig struct {
 	// evaluator scans against and points its LLM providers at. When not set
 	// explicitly they are DERIVED from the mode: mesh peer DNS names under
 	// NetBirdDNSDomain in mesh mode, cluster-local service names otherwise.
-	VigilURL        string
+	VigilURL string
+	// VigilGPUURL is an optional GPU scanner the evaluator tries first (it
+	// scans the whole payload in windows; CPU scanners read only the first
+	// tokens) and falls back from to VigilURL. Empty = disabled. Only
+	// meaningful with MESH_ENFORCE=false: the GPU scanner has no mesh identity.
+	VigilGPUURL     string
 	OccludraBaseURL string
 	// NetBirdDNSDomain is the DNS domain the NetBird management server hands
 	// out for peer names (vigil / occludra — pinned via NETBIRD_HOSTNAME).
@@ -219,6 +232,7 @@ func ImageConfigFromEnv() ImageConfig {
 		ImagePullPolicy:      imagePullPolicyFromEnv(),
 
 		MeshEnforce:          meshEnforce,
+		EvalPublicEgress:     envFlag("EVAL_PUBLIC_EGRESS", false),
 		NetBirdImage:         envOr("NETBIRD_IMAGE", "netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f"),
 		NetBirdManagementURL: envOr("NETBIRD_MANAGEMENT_URL", "https://netbird.example.com:443"),
 		NetBirdSecretName:    envOr("NETBIRD_SECRET_NAME", "netbird-auth"),
@@ -227,6 +241,7 @@ func ImageConfigFromEnv() ImageConfig {
 		MeshProxyURL:         envOr("MESH_PROXY_URL", "socks5://127.0.0.1:1080"),
 		MeshBridgePort:       envInt32("MESH_BRIDGE_PORT", meshBridgePortDefault),
 		VigilURL:             vigilURL,
+		VigilGPUURL:          strings.TrimSpace(os.Getenv("VIGIL_GPU_URL")),
 		OccludraBaseURL:      occludraURL,
 		NetBirdDNSDomain:     dnsDomain,
 
@@ -1083,6 +1098,26 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 				},
 			},
 		},
+		// Untrusted code never shares the evaluator's HOME: the cloner runs
+		// repository build steps (npm run build, Python build backends) and
+		// the target is the server under test; either could otherwise plant
+		// files (e.g. ~/.config/opencode) that the evaluator reads later.
+		{
+			Name: volumeClonerTmp,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: ptr.To(resource.MustParse("1Gi")),
+				},
+			},
+		},
+		{
+			Name: volumeTargetTmp,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: ptr.To(resource.MustParse("512Mi")),
+				},
+			},
+		},
 		{
 			Name: volumeOutput,
 			VolumeSource: corev1.VolumeSource{
@@ -1154,7 +1189,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 	clonerMounts := []corev1.VolumeMount{
 		{Name: volumeWorkspace, MountPath: mountWorkspace},
 		{Name: volumeIPC, MountPath: mountIPC},
-		{Name: volumeTmp, MountPath: mountTmp},
+		{Name: volumeClonerTmp, MountPath: mountTmp},
 	}
 	if server.Spec.CredentialsSecretRef != "" {
 		clonerEnv = append(clonerEnv,
@@ -1180,10 +1215,11 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 			},
 			// Optional custom CA for self-hosted git servers (in-cluster
 			// test fixtures, corporate Gitea): key ca.crt in the same
-			// secret is handed to git as GIT_SSL_CAINFO, which git reads
-			// natively.
+			// secret. It is PEM text, while git's GIT_SSL_CAINFO must be a
+			// file path, so the cloner writes GIT_CA_PEM to a file and
+			// points GIT_SSL_CAINFO at it.
 			corev1.EnvVar{
-				Name: "GIT_SSL_CAINFO",
+				Name: "GIT_CA_PEM",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: server.Spec.CredentialsSecretRef},
@@ -1230,7 +1266,7 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: volumeWorkspace, MountPath: mountWorkspace, ReadOnly: true},
 			{Name: volumeIPC, MountPath: mountIPC},
-			{Name: volumeTmp, MountPath: mountTmp},
+			{Name: volumeTargetTmp, MountPath: mountTmp},
 		},
 		SecurityContext: lockedSecurityContext(targetUID),
 		Resources: corev1.ResourceRequirements{
@@ -1323,6 +1359,9 @@ func (r *MCPEvaluationRunReconciler) buildJob(run *securityv1alpha1.MCPEvaluatio
 				corev1.ResourceMemory: resource.MustParse("2Gi"),
 			},
 		},
+	}
+	if r.Images.VigilGPUURL != "" {
+		evaluator.Env = append(evaluator.Env, corev1.EnvVar{Name: "VIGIL_GPU_URL", Value: r.Images.VigilGPUURL})
 	}
 	// Optional gateway tuning knobs: injected only when the operator set them,
 	// so the evaluator's built-in defaults stay authoritative otherwise.
@@ -1647,7 +1686,10 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 			egress = append(egress, netbirdRule)
 		}
 	} else {
-		egress = append(egress, gatewaysRule, public443Rule)
+		egress = append(egress, gatewaysRule)
+		if images.EvalPublicEgress {
+			egress = append(egress, public443Rule)
+		}
 	}
 
 	return &networkingv1.NetworkPolicy{
@@ -1656,7 +1698,7 @@ func buildEvaluateNetworkPolicy(run *securityv1alpha1.MCPEvaluationRun, images I
 			Namespace: run.Namespace,
 			Labels:    labels,
 			Annotations: map[string]string{
-				"security.eval.io/invariant": "evaluate-phase egress: DNS + API server + NetBird overlay (mesh) or gateways + public 443 (legacy)",
+				"security.eval.io/invariant": "evaluate-phase egress: DNS + API server + NetBird overlay (mesh) or gateways (+ public 443 only with EVAL_PUBLIC_EGRESS=true) (legacy)",
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{

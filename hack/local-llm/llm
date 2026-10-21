@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Local LLM for LLM_PROVIDER=local: llama.cpp's OpenAI-compatible server in a
+# Docker container on this machine's GPU, attached to the kind network with a
+# fixed IP so Occludra (in kind) reaches it without opening the host firewall.
+#
+#   MODEL=~/AI/models/x/model.gguf hack/local-llm/llm up
+#   hack/local-llm/llm status | logs | smoke | down
+#
+# Then deploy with:
+#   LLM_PROVIDER=local LOCAL_LLM_URL=http://$LLM_IP:$PORT/v1 LLM_MODEL=$MODEL_ALIAS ./deploy.sh
+#
+# The container never restarts on its own (no --restart): it runs only while
+# you want it. The API key, if set, comes from LOCAL_LLM_API_KEY in your
+# environment and reaches the container as an env var, never on a command line.
+#
+# Settings (environment):
+#   MODEL         path to the .gguf (required for up)
+#   MODEL_ALIAS   model id the server reports and Occludra allowlists (default: file name without .gguf)
+#   CTX           context window in tokens (default 32768)
+#   N_CPU_MOE     keep the MoE experts of the first N layers in RAM instead of VRAM (default 0 = all on GPU)
+#   NGL           layers on the GPU (default 999 = all)
+#   REASONING     on | off | auto (default auto: thinking models think before answering)
+#   REASONING_BUDGET  max thinking tokens per answer (default 2048; -1 unlimited). Without a cap a
+#                 thinking model can spend the whole max_tokens thinking and return empty content.
+#   LLM_IP        fixed IP on the docker network (default 172.18.0.250)
+#   PORT          (default 8080)
+#   DOCKER_NET    (default kind)
+#   PUBLISH       host IPv4 address(es), comma-separated, to publish the port on instead of
+#                 joining DOCKER_NET, for a cluster that reaches this machine over an overlay
+#                 (k0s over ZeroTier: PUBLISH=<this PC's ZeroTier IP>). Only those addresses
+#                 listen; the first is the one status/smoke use. An entry ip:hostport publishes
+#                 on another host port (e.g. 10.147.19.21:8082 when 8080 is taken there).
+#                 Set LOCAL_LLM_API_KEY, since
+#                 every peer on those networks can reach it.
+#   WEBUI         1 = serve llama.cpp's chat page at http://$LLM_IP:$PORT/ (default 0; it asks
+#                 for the API key under Settings)
+#   IMAGE         llama.cpp server image (default: server-cuda build 11610, pinned by digest)
+set -euo pipefail
+
+NAME=mcp-local-llm
+IMAGE="${IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:b0baccbe2e00b5d74e63f85f9f023c93d61d0f329475269e1e7002e87eb875ea}"
+LLM_IP="${LLM_IP:-172.18.0.250}"
+PORT="${PORT:-8080}"
+DOCKER_NET="${DOCKER_NET:-kind}"
+PUBLISH="${PUBLISH:-}"
+if [ -n "$PUBLISH" ]; then first="${PUBLISH%%,*}"; LLM_IP="${first%%:*}"; fi
+CTX="${CTX:-32768}"
+NGL="${NGL:-999}"
+N_CPU_MOE="${N_CPU_MOE:-0}"
+REASONING="${REASONING:-auto}"
+REASONING_BUDGET="${REASONING_BUDGET:-2048}"
+WEBUI="${WEBUI:-0}"
+
+die() { echo "llm: $*" >&2; exit 1; }
+base_url() { echo "http://$LLM_IP:$PORT"; }
+auth() { [ -n "${LOCAL_LLM_API_KEY:-}" ] && printf 'Authorization: Bearer %s' "$LOCAL_LLM_API_KEY" || printf 'X-No-Auth: 1'; }
+
+up() {
+  [ -n "${MODEL:-}" ] || die "set MODEL=/path/to/model.gguf"
+  [ -f "$MODEL" ] || die "model not found: $MODEL"
+  local dir file alias
+  dir="$(cd "$(dirname "$MODEL")" && pwd)"; file="$(basename "$MODEL")"
+  alias="${MODEL_ALIAS:-${file%.gguf}}"
+  local net_args
+  if [ -n "$PUBLISH" ]; then
+    net_args=()
+    local addr
+    for addr in ${PUBLISH//,/ }; do
+      local host_port="$PORT"
+      [[ "$addr" != *:* ]] || { host_port="${addr#*:}"; addr="${addr%%:*}"; }
+      ip -4 -o addr | grep -q " $addr/" || die "PUBLISH: $addr is not an address of this machine"
+      net_args+=(-p "$addr:$host_port:$PORT")
+    done
+  else
+    docker network inspect "$DOCKER_NET" >/dev/null 2>&1 \
+      || die "docker network '$DOCKER_NET' not found (create the kind cluster first: test/kind/create-cluster.sh)"
+    net_args=(--network "$DOCKER_NET" --ip "$LLM_IP")
+  fi
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  local env_args=()
+  if [ -n "${LOCAL_LLM_API_KEY:-}" ]; then
+    env_args=(-e LLAMA_API_KEY)   # value taken from this environment
+  else
+    echo "llm: LOCAL_LLM_API_KEY not set — the server accepts any client that reaches $LLM_IP" >&2
+  fi
+  LLAMA_API_KEY="${LOCAL_LLM_API_KEY:-}" docker run -d --name "$NAME" \
+    --gpus all "${net_args[@]}" \
+    -v "$dir:/models:ro" "${env_args[@]}" \
+    "$IMAGE" \
+    -m "/models/$file" --alias "$alias" \
+    --host 0.0.0.0 --port "$PORT" \
+    -c "$CTX" -ngl "$NGL" --n-cpu-moe "$N_CPU_MOE" \
+    --reasoning "$REASONING" --reasoning-budget "$REASONING_BUDGET" \
+    --jinja $([ "$WEBUI" = 1 ] || echo --no-webui) >/dev/null
+  echo "llm: starting $alias at $(base_url)/v1 (CTX=$CTX N_CPU_MOE=$N_CPU_MOE REASONING=$REASONING budget=$REASONING_BUDGET)"
+  local i
+  for i in $(seq 1 180); do
+    if curl -sf "$(base_url)/health" >/dev/null 2>&1; then
+      echo "llm: ready after ${i}s"; status; return 0
+    fi
+    if ! docker ps -q -f "name=^${NAME}$" | grep -q .; then
+      docker logs --tail 30 "$NAME" >&2; die "server exited (logs above)"
+    fi
+    sleep 1
+  done
+  docker logs --tail 30 "$NAME" >&2; die "not healthy after 180s"
+}
+
+status() {
+  docker ps -a -f "name=^${NAME}$" --format '{{.Names}} {{.Status}}'
+  curl -s -H "$(auth)" "$(base_url)/v1/models" | head -c 400; echo
+  nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | sed 's/^/vram: /'
+  docker stats --no-stream --format 'ram: {{.MemUsage}}' "$NAME" 2>/dev/null || true
+}
+
+smoke() {
+  local model
+  model="$(curl -sf -H "$(auth)" "$(base_url)/v1/models" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')" \
+    || die "server not answering at $(base_url)"
+  local t0 t1
+  t0=$(date +%s.%N)
+  curl -sf -H "$(auth)" -H 'Content-Type: application/json' "$(base_url)/v1/chat/completions" -d "$(python3 -c '
+import json,sys
+print(json.dumps({"model": sys.argv[1], "max_tokens": 3000, "temperature": 0,
+  "messages": [{"role": "user", "content": "In two sentences: what is a prompt injection attack against an MCP server?"}]}))' "$model")" \
+    | python3 -c 'import sys,json; r=json.load(sys.stdin); print(r["choices"][0]["message"]["content"].strip()); u=r.get("usage",{}); t=r.get("timings",{}); print("--- tokens:", u.get("completion_tokens"), " gen tok/s:", round(t.get("predicted_per_second",0),1), " prompt tok/s:", round(t.get("prompt_per_second",0),1))'
+  t1=$(date +%s.%N)
+  echo "--- wall: $(python3 -c "print(round($t1-$t0,2))") s"
+}
+
+case "${1:-}" in
+  up) up ;;
+  down) docker rm -f "$NAME" >/dev/null 2>&1 && echo "llm: stopped" || echo "llm: not running" ;;
+  status) status ;;
+  logs) docker logs --tail "${TAIL:-50}" "$NAME" ;;
+  smoke) smoke ;;
+  *) sed -n '2,12p' "$0"; exit 2 ;;
+esac

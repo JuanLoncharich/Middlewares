@@ -31,6 +31,8 @@ export interface JsonSchema {
 export interface OpenCodeAgentModel {
   providerID: string;
   modelID: string;
+  /** Served context window for custom providers (spec.model.contextTokens). */
+  contextTokens?: number;
 }
 
 export interface OpenCodeAgentConfig {
@@ -141,6 +143,8 @@ export interface RunnerEnv {
   // --- security layer: Vigil-LLM (inbound prompt-injection scanner) ---
   /** Full URL of the Vigil /analyze endpoint (routed over the NetBird mesh). */
   vigilUrl: string;
+  /** Optional GPU Vigil tried first (same verdicts, faster); CPU `vigilUrl` is the fallback. */
+  vigilGpuUrl?: string;
   /** Hard gate (true) or observe-only (false). */
   vigilEnabled: boolean;
   /** strict: scanner failure or detection fails the run; monitor: log only. */
@@ -148,6 +152,8 @@ export interface RunnerEnv {
   /** Per-request timeout and payload truncation ceiling for scans. */
   vigilTimeoutMs: number;
   vigilMaxPayloadBytes: number;
+  /** Transformer score that counts as a hit when Vigil's answer has none (default 0.98). */
+  vigilTransformerThreshold: number;
 
   // --- security layer: Occludra (outgoing LLM gateway) ---
   /** OpenAI-compatible base URL the OpenCode providers are pointed at. */
@@ -333,8 +339,13 @@ export interface FuzzCaseResult {
   errorClass: FuzzErrorClass;
   latencyMs: number;
   errorCode?: number;
+  /** The server's error message (JSON-RPC error). */
   errorMessage?: string;
+  /** Our own client's note when there was no server answer ("timeout", "no response"); never scanned. */
+  transportError?: string;
   responseExcerpt?: string;
+  /** The answer only repeats our own input (fuzz.ts isEchoOfInput): not server text, not scanned. */
+  echoOfInput?: boolean;
 }
 
 export interface NotableResponse {
@@ -385,6 +396,8 @@ export interface ToolProbeResult {
   hang: boolean;
   crashed: boolean;
   outputExcerpt: string;
+  /** false when outputExcerpt is our client's transport note, not the server's answer. */
+  fromServer?: boolean;
   hits: DetectorHit[];
 }
 
@@ -397,6 +410,10 @@ export interface ActiveProbeResult {
   succeeded: boolean;
   latencyMs: number;
   evidence: string;
+  /** false when evidence is our client's transport note, not the server's answer. */
+  fromServer?: boolean;
+  /** The answer only repeats our own payload (fuzz.ts isEchoOfInput). */
+  echoOfInput?: boolean;
 }
 
 export interface ProbeReport {
@@ -479,10 +496,21 @@ export interface AgentRunRecord {
 
 export interface VigilDetectionRecord {
   source: string;
+  /** Which text of the gate was flagged (e.g. "tool weather: description"). */
+  segment?: string;
   confidence?: number;
   scanners: string[];
   excerpt: string;
   abortive: boolean;
+}
+
+/** A text one Vigil scanner flagged on its own: recorded, shown to the auditor, not fatal. */
+export interface VigilWarningRecord {
+  source: string;
+  segment: string;
+  scanners: string[];
+  hits: { scanner: string; score?: number; detail?: string }[];
+  excerpt: string;
 }
 
 export interface SecurityGateReport {
@@ -490,8 +518,14 @@ export interface SecurityGateReport {
     enabled: boolean;
     enforced: boolean;
     url: string;
+    /** Transformer score a match needs to count (when Vigil does not send its own). */
+    transformerThreshold: number;
+    /** Scan requests sent (one per text chunk). */
     payloadsScanned: number;
+    /** Abort-level verdicts: transformer AND (YARA or vectordb) on one text. */
     detections: VigilDetectionRecord[];
+    /** Warn-level verdicts: a single scanner on a text. */
+    warnings: VigilWarningRecord[];
     unavailableErrors: number;
   };
   occludra: {
@@ -720,6 +754,10 @@ export function assertOpenCodeAgent(obj: unknown): OpenCodeAgent {
   if (!isRecord(model) || !isNonEmptyString(model["providerID"]) || !isNonEmptyString(model["modelID"])) {
     throw new ConfigurationError(`OpenCodeAgent ${name}: spec.model.providerID and spec.model.modelID are required`);
   }
+  const contextTokens = model["contextTokens"];
+  if (contextTokens !== undefined && (!isFiniteNumber(contextTokens) || contextTokens < 1024)) {
+    throw new ConfigurationError(`OpenCodeAgent ${name}: spec.model.contextTokens must be a number >= 1024`);
+  }
   if (!isNonEmptyString(spec["systemPrompt"])) {
     throw new ConfigurationError(`OpenCodeAgent ${name}: spec.systemPrompt is required`);
   }
@@ -759,7 +797,11 @@ export function assertOpenCodeAgent(obj: unknown): OpenCodeAgent {
     },
     spec: {
       role: spec["role"],
-      model: { providerID: model["providerID"], modelID: model["modelID"] },
+      model: {
+        providerID: model["providerID"],
+        modelID: model["modelID"],
+        ...(contextTokens !== undefined ? { contextTokens: Math.floor(contextTokens) } : {}),
+      },
       config,
       systemPrompt: spec["systemPrompt"],
       outputFormat: { type: "json_schema", schema: outputFormat["schema"] },

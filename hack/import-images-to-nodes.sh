@@ -11,7 +11,7 @@
 # platform with IMAGE_PULL_POLICY=IfNotPresent (deploy.sh) so nothing tries
 # to reach a registry.
 #
-#   hack/import-images-to-nodes.sh [image ...]
+#   [NODES="nodo-g1-1 nodo-g1-3"] hack/import-images-to-nodes.sh [image ...]
 #
 # Requires: node internet for the first containerd apt install; docker and
 # kubectl (cluster-admin) locally.
@@ -34,7 +34,6 @@ if [ ${#IMAGES[@]} -eq 0 ]; then
     ghcr.io/security-eval/mcp-evaluator:20260930
     ghcr.io/security-eval/occludra-gateway:20260930
     ghcr.io/security-eval/vigil-llm:20260930
-    ghcr.io/security-eval/vigil-corpus-loader:20260930
     # Vector DB plane (see manifests/chroma/): keep CHROMA_IMG_TAG in sync
     # with deploy.sh / manifests/chroma/values-mcp-eval.yaml.
     chromadb/sysdb-service:dff1d8a
@@ -47,7 +46,10 @@ if [ ${#IMAGES[@]} -eq 0 ]; then
     chromadb/work-queue-service:dff1d8a
     chromadb/fn-consumer-service:dff1d8a
     chromadb/garbage-collector-service:dff1d8a
-    quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    ghcr.io/chroma-core/ci-minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # chroma-gateway and the corpus loader (stock images, pinned in the manifests)
+    nginxinc/nginx-unprivileged:1.29.1-alpine@sha256:27985295bdb22a1ef8f712863210bd5877c0f3006494a593e86b3fe0fa55467e
+    python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
     postgres:15
     otel/opentelemetry-collector:0.107.0
   )
@@ -94,29 +96,68 @@ spec:
 EOF
 kubectl -n "$DS_NS" rollout status "ds/$DS_NAME" --timeout=420s
 
-PODS=$(kubectl get pods -n "$DS_NS" -l app=image-importer -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}')
+# NODES="nodo-g1-1 nodo-g1-3" limits the import to those nodes (e.g. skip the
+# tainted control-plane node, which can never run these workloads).
+PODS=""
+while read -r pod node; do
+  [ -n "$pod" ] || continue
+  if [ -z "${NODES:-}" ] || [[ " $NODES " == *" $node "* ]]; then PODS="$PODS $pod"; fi
+done < <(kubectl get pods -n "$DS_NS" -l app=image-importer -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\n"}{end}')
+PODS="${PODS# }"
+[ -n "$PODS" ] || { echo "no importer pods matched NODES='${NODES:-}'" >&2; exit 1; }
 echo "importer pods: $PODS"
 
+# The importer image ships a containerd CLIENT that can be newer than the
+# node's containerd (ubuntu:24.04 -> 2.x vs k0s 1.7.x). A 2.x `ctr` imports via
+# the transfer service and reports success, but the node's CRI (kubelet) then
+# cannot see the image ("not present with pull policy Never"). So every pod
+# gets a `ctr` matching the node's server version, downloaded from the
+# containerd release.
+CTR_MATCHED=/usr/local/bin/ctr-matched
+setup_matched_ctr() {
+  local pod="$1"
+  kubectl exec -n "$DS_NS" "$pod" -- bash -c '
+    set -e
+    [ -x /usr/local/bin/ctr-matched ] && exit 0
+    apt-get install -y -qq curl ca-certificates >/dev/null 2>&1
+    SRV=$(ctr -a '"$CTR_SOCKET"' version 2>/dev/null | awk "/Server:/{s=1} s && /Version:/{print \$2; exit}")
+    V=${SRV#v}; [ -n "$V" ] || { echo "cannot detect containerd server version" >&2; exit 1; }
+    curl -fsSL -o /tmp/ctr.tgz https://github.com/containerd/containerd/releases/download/v$V/containerd-$V-linux-amd64.tar.gz
+    tar -xzf /tmp/ctr.tgz -C /tmp bin/ctr && install -m0755 /tmp/bin/ctr /usr/local/bin/ctr-matched && rm -rf /tmp/ctr.tgz /tmp/bin'
+}
+for pod in $PODS; do setup_matched_ctr "$pod" || { echo "matched ctr setup failed on $pod"; exit 1; }; done
+CTR="$CTR_MATCHED -a $CTR_SOCKET -n k8s.io"
+
+# Save every image once, then stream to all selected nodes IN PARALLEL.
+declare -A TARS
 for image in "${IMAGES[@]}"; do
-  log "Importing $image"
-  tarfile="$(mktemp /tmp/import.XXXXXX.tar.gz)"
+  tarfile="$(mktemp "${TMPDIR:-/tmp}/import.XXXXXX.tar.gz")"
+  log "Saving $image"
   docker save "$image" | gzip -1 > "$tarfile"
-  size=$(du -h "$tarfile" | cut -f1)
-  for pod in $PODS; do
-    echo "  -> $pod ($size)"
+  TARS["$image"]="$tarfile"
+done
+
+import_to_pod() {
+  local pod="$1" image tarfile verified
+  for image in "${IMAGES[@]}"; do
+    tarfile="${TARS[$image]}"
+    echo "  -> $pod: $image ($(du -h "$tarfile" | cut -f1))"
+    kubectl exec -n "$DS_NS" "$pod" -- bash -c "$CTR images rm '$image' >/dev/null 2>&1 || true"
     gzip -dc "$tarfile" | kubectl exec -i -n "$DS_NS" "$pod" -- \
-      bash -c "cat > /tmp/img.tar && $CTR_BIN -a $CTR_SOCKET -n k8s.io images import /tmp/img.tar >/dev/null && rm /tmp/img.tar" \
-      || { echo "     IMPORT FAILED on $pod"; exit 1; }
+      bash -c "cat > /tmp/img.tar && $CTR images import /tmp/img.tar >/dev/null && rm /tmp/img.tar" \
+      || { echo "     IMPORT FAILED on $pod: $image"; return 1; }
     # containerd 2.x CRI ignores unmanaged imports even when ctr lists them.
     # Register the image with CRI so IfNotPresent can find it without a pull.
-    kubectl exec -n "$DS_NS" "$pod" -- \
-      "$CTR_BIN" -a "$CTR_SOCKET" -n k8s.io images label "$image" \
-      io.cri-containerd.image=managed >/dev/null
-    verified=$(kubectl exec -n "$DS_NS" "$pod" -- \
-      bash -c "$CTR_BIN -a $CTR_SOCKET -n k8s.io images ls -q | grep -F '$image' | head -1" || true)
-    echo "     verified: ${verified:-MISSING}"
+    kubectl exec -n "$DS_NS" "$pod" -- bash -c "$CTR images label '$image' io.cri-containerd.image=managed >/dev/null" \
+      || { echo "     CRI LABEL FAILED on $pod: $image"; return 1; }
+    verified=$(kubectl exec -n "$DS_NS" "$pod" -- bash -c "$CTR images ls -q | grep -Fx '$image' | head -1" || true)
+    echo "     $pod verified: ${verified:-MISSING}"
   done
-  rm -f "$tarfile"
-done
+}
+pids=()
+for pod in $PODS; do import_to_pod "$pod" & pids+=($!); done
+rc=0; for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+for image in "${IMAGES[@]}"; do rm -f "${TARS[$image]}"; done
+[ "$rc" = 0 ] || { echo "one or more imports failed" >&2; exit 1; }
 
 log "Done. Deploy with: IMAGE_PULL_POLICY=IfNotPresent SKIP_BUILD=1 IMG_REGISTRY=ghcr.io/security-eval ./deploy.sh ..."

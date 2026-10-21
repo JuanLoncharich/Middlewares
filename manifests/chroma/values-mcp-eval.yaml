@@ -179,13 +179,16 @@ compactionService:
     type: DirectoryOrCreate
     mountPath: '/cache/'
     additionalVolumes: []
+  # Request what it really uses while compacting the corpus (~1 GiB): with
+  # 384Mi the scheduler packed it beside MinIO and the observability stack,
+  # and on a 3.9 GB node without swap that hung the whole node.
   resources:
     limits:
       cpu: '1000m'
       memory: '1536Mi'
     requests:
       cpu: '200m'
-      memory: '384Mi'
+      memory: '1Gi'
 
 # ----------------------------------------------------- Work queue + consumer
 workQueueService:

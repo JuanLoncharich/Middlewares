@@ -1,0 +1,13 @@
+# What Flux applies to the university k0s cluster (deploy/flux/k0s-sync.yaml).
+# generated/ is rendered from deploy.sh by hack/gitops/render.sh; the patches
+# below are what only this cluster needs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - generated
+patches:
+  # The 3.9 GB workers cannot hold Vigil (measured 2.6-3.5 GiB); it runs on
+  # the GPU PC when that is attached (hack/gpu-node). No PC, no scans: the
+  # evaluator fails closed.
+  - path: patches/vigil-on-gpu-node.yaml
+  - path: patches/occludra-small.yaml

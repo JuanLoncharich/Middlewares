@@ -2,6 +2,8 @@
 # One-shot build + deploy for the MCP evaluation platform.
 #
 #   IMG_REGISTRY=ghcr.io/<you> OPENCODE_API_KEY=<zen-key> ./deploy.sh
+#   IMG_REGISTRY=ghcr.io/<you> LLM_PROVIDER=nvidia NVIDIA_API_KEY=<nvapi-key> ./deploy.sh
+#   IMG_REGISTRY=ghcr.io/<you> LLM_PROVIDER=local LOCAL_LLM_URL=http://172.18.0.1:8080/v1 LLM_MODEL=<id> ./deploy.sh
 #
 # Steps: build & push the four images, install CRDs + operator (mcp-eval-system),
 # apply the evaluation namespace / NetworkPolicies / agent personas / sample
@@ -10,8 +12,28 @@
 # Env:
 #   IMG_REGISTRY       registry prefix for the images (required)
 #   IMG_TAG            image tag (default: 20260930 — frozen; never ship :latest)
-#   OPENCODE_API_KEY   written into Secret mcp-evals/llm-provider-credentials (required unless SKIP_SECRET=1)
-#   ANTHROPIC_API_KEY  optionally added to the same Secret when using provider `anthropic`
+#   LLM_PROVIDER       upstream LLM provider behind Occludra: zen (default, OpenCode Zen), nvidia
+#                      (NVIDIA NIM) or local (an OpenAI-compatible server such as llama-server,
+#                      reached by IP). Sets Occludra's upstream URL and the four agent personas' model.
+#   LLM_MODEL          model id for the personas (default: zen -> muse-spark-1.3-contributor-free,
+#                      nvidia -> z-ai/glm-5.3; required for local, and added verbatim to
+#                      Occludra's model allowlist)
+#   LOCAL_LLM_URL      local: base URL of the server as http(s)://<IPv4>:<port>/v1, e.g.
+#                      http://172.18.0.1:8080/v1 (kind: the `kind` docker network gateway).
+#                      Opens an egress rule Occludra -> exactly that IP/32 and port
+#                      (occludra-egress-local-llm); any other provider deletes the rule.
+#   LLM_CONTEXT_TOKENS context window the custom provider SERVES, declared to the agents as
+#                      spec.model.contextTokens (default: local -> 32768, hack/local-llm/llm's
+#                      CTX; nvidia -> unset = 128000). Must not exceed the server's per-slot
+#                      window (llama-server: -c / -np).
+#   LOCAL_LLM_API_KEY  local: optional, the server's --api-key; written ONLY into
+#                      security-gateways/llm-provider-credentials (UPSTREAM_API_KEY)
+#   OPENCODE_API_KEY   zen: written into Secret llm-provider-credentials in mcp-evals and
+#                      security-gateways (required unless SKIP_SECRET=1)
+#   ANTHROPIC_API_KEY  zen: optionally added to the same Secrets when using provider `anthropic`
+#   NVIDIA_API_KEY     nvidia: written ONLY into security-gateways/llm-provider-credentials
+#                      (key UPSTREAM_API_KEY); the evaluation namespace gets a placeholder
+#                      (required unless SKIP_SECRET=1)
 #   SKIP_BUILD=1       skip docker build/push
 #   SKIP_SECRET=1      do not (re)create the LLM secret
 #   TRIGGER=0          do not trigger a run at the end
@@ -52,6 +74,17 @@
 #   DEPLOY_AUTOSCALER=openstack  deploy Cluster Autoscaler (ephemeral Nova VMs). Requires OS_* env vars:
 #                                OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME OS_USER_DOMAIN_NAME
 #                                OS_REGION_NAME AUTOSCALER_NODE_GROUP (+ optional AUTOSCALER_MIN/AUTOSCALER_MAX)
+#   ---- GPU node: scale-to-zero GPU Vigil (hack/gpu-node) ----
+#   DEPLOY_KEDA=1                install KEDA (chart kedacore/keda@KEDA_CHART_VERSION, namespace keda,
+#                                values manifests/keda/values-mcp-eval.yaml)
+#   VIGIL_GPU=1                  deploy the GPU Vigil (hack/gpu-node/manifests/vigil-gpu.yaml) pinned to the
+#                                on-demand GPU node, scaled 0<->1 by KEDA from the operator's /active-runs,
+#                                and point the evaluator at it (VIGIL_GPU_URL, CPU Vigil stays the fallback).
+#                                Requires KEDA. Build the image with hack/gpu-node/build-vigil-gpu.sh.
+#   VIGIL_GPU_IMG                GPU Vigil image (default $IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG)
+#   VIGIL_GPU_MEM_LIMIT          GPU Vigil host-RAM limit (default 4Gi; measured ~3.4 GiB; must fit gpu-node's MEM_LIMIT_GIB)
+#   VIGIL_PROFILE=lite           in-cluster CPU Vigil runs only the YARA scanner (much less RAM); meant as
+#                                the fallback when the full scanner lives on the GPU node. Default: full.
 #   ---- SPOF elimination ----
 #   IN_CLUSTER_REGISTRY=1        deploy the in-cluster registry (manifests/registry.yaml)
 #   DEPLOY_NETBIRD_CP=1          self-host the NetBird control plane in-cluster (requires an OIDC IdP;
@@ -62,10 +95,23 @@
 #                                SysDB coordinator + Rust SysDB + Log Service (WAL) + Query Nodes
 #                                + Compactors + Work Queue + Garbage Collector, with MinIO object
 #                                storage and a Postgres-backed catalog. Vigil's vector scanner
-#                                queries its frontend for prompt-injection similarity.
+#                                queries it for prompt-injection similarity through chroma-gateway
+#                                (bearer token; Secrets chroma-auth / chroma-reader are generated).
+#                                REQUIRED by Vigil: with DEPLOY_VECTOR_DB=0 and no Chroma reachable at
+#                                chroma-gateway.chroma:8080, every scan answers 500 and evaluations
+#                                fail closed. Implemented by hack/chroma/deploy.sh (runs standalone too).
+#   VECTOR_DB_MODE=single        one-pod Chroma instead of the distributed one — for kind tests only
+#   CHROMA_QUERY_REPLICAS / CHROMA_COMPACTION_REPLICAS   distributed replicas (default 2 / 2)
 #   CHROMA_IMG_TAG               chroma component image tag (short commit SHA from the `chromadb`
 #                                Docker Hub org; keep in vintage with the vendored chart).
 #   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
+#   VIGIL_CORPUS_LOCK            lock of Vigil's calibrated corpus (default
+#                                hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json: file name, sha256,
+#                                thresholds, test report). Vigil's server.conf names its collections.
+#   VIGIL_CORPUS_FILE            that corpus file (default hack/vigil-corpus/dist/<file from the lock>;
+#                                build it with hack/vigil-corpus/build_corpus.py). Checked against the
+#                                lock's sha256, then baked into $IMG_REGISTRY/vigil-corpus:<name>-<sha12>.
+#   VIGIL_CORPUS_IMG             that image (default as above; with SKIP_BUILD=1, an already pushed one).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -84,7 +130,14 @@ DEPLOY_NETBIRD_CP="${DEPLOY_NETBIRD_CP:-0}"
 DEPLOY_VECTOR_DB="${DEPLOY_VECTOR_DB:-1}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
-LOADER_IMG="$IMG_REGISTRY/vigil-corpus-loader:$IMG_TAG"
+VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json}"
+if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
+  [ -f "$VIGIL_CORPUS_LOCK" ] || { echo "ERROR: corpus lock $VIGIL_CORPUS_LOCK missing" >&2; exit 1; }
+  read -r VIGIL_CORPUS_NAME VIGIL_CORPUS_BASENAME VIGIL_CORPUS_SHA256 < <(python3 -c \
+    'import json,sys; l=json.load(open(sys.argv[1])); print(l["name"], l["file"], l["sha256"])' "$VIGIL_CORPUS_LOCK")
+  VIGIL_CORPUS_FILE="${VIGIL_CORPUS_FILE:-hack/vigil-corpus/dist/$VIGIL_CORPUS_BASENAME}"
+  VIGIL_CORPUS_IMG="${VIGIL_CORPUS_IMG:-$IMG_REGISTRY/vigil-corpus:$VIGIL_CORPUS_NAME-${VIGIL_CORPUS_SHA256:0:12}}"
+fi
 WORKSTATION_NODEPORT="${WORKSTATION_NODEPORT:-0}"
 WORKSTATION_CIDR="${WORKSTATION_CIDR:-172.21.0.0/16}"
 # Vigil sizing: defaults fit multi-node production. The real vigil-llm image
@@ -100,6 +153,62 @@ OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_SRC_REPO="${VIGIL_SRC_REPO:-https://github.com/deadbits/vigil-llm}"
 VIGIL_SRC_REF="${VIGIL_SRC_REF:-f2b4c134d060bae81d29fad07003f3c657e63fc8}"
 VIGIL_IMG="${VIGIL_IMG:-$IMG_REGISTRY/vigil-llm:$IMG_TAG}"
+DEPLOY_KEDA="${DEPLOY_KEDA:-0}"
+KEDA_CHART_VERSION="${KEDA_CHART_VERSION:-2.21.0}"
+VIGIL_GPU="${VIGIL_GPU:-0}"
+VIGIL_GPU_IMG="${VIGIL_GPU_IMG:-$IMG_REGISTRY/vigil-llm-gpu:$IMG_TAG}"
+VIGIL_GPU_MEM_LIMIT="${VIGIL_GPU_MEM_LIMIT:-4Gi}"
+VIGIL_PROFILE="${VIGIL_PROFILE:-full}"
+case "$VIGIL_PROFILE" in full|lite) ;; *) echo "VIGIL_PROFILE must be full or lite" >&2; exit 1 ;; esac
+# LLM provider: the personas in config/samples and Occludra's manifest are
+# written for OpenCode Zen; other providers are rendered in at apply time.
+LLM_PROVIDER="${LLM_PROVIDER:-zen}"
+case "$LLM_PROVIDER" in
+  zen)
+    LLM_PROVIDER_ID=opencode
+    LLM_MODEL="${LLM_MODEL:-muse-spark-1.3-contributor-free}"
+    LLM_UPSTREAM_BASE_URL="" ;;   # empty: Occludra's built-in Zen default
+  nvidia)
+    LLM_PROVIDER_ID=nvidia
+    LLM_MODEL="${LLM_MODEL:-z-ai/glm-5.3}"
+    LLM_UPSTREAM_BASE_URL="https://integrate.api.nvidia.com/v1" ;;
+  local)
+    LLM_PROVIDER_ID=local
+    LLM_CONTEXT_TOKENS="${LLM_CONTEXT_TOKENS:-32768}"
+    : "${LLM_MODEL:?set LLM_MODEL (the model id the local server answers to)}"
+    : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. http://172.18.0.1:8080/v1}"
+    LLM_UPSTREAM_BASE_URL="$LOCAL_LLM_URL"
+    # NetworkPolicy ipBlocks take addresses, not names: require an IPv4
+    # literal so the egress rule opens exactly one host and port.
+    if [[ "$LOCAL_LLM_URL" =~ ^(https?)://([0-9]{1,3}(\.[0-9]{1,3}){3})(:([0-9]{1,5}))?(/.*)?$ ]]; then
+      LOCAL_LLM_IP="${BASH_REMATCH[2]}"
+      LOCAL_LLM_PORT="${BASH_REMATCH[5]}"
+      if [ -z "$LOCAL_LLM_PORT" ]; then
+        if [ "${BASH_REMATCH[1]}" = https ]; then LOCAL_LLM_PORT=443; else LOCAL_LLM_PORT=80; fi
+      fi
+    else
+      echo "LOCAL_LLM_URL must be http(s)://<IPv4>[:port][/path], got '$LOCAL_LLM_URL':" >&2
+      echo "  the egress rule needs an IP address, not a hostname" >&2
+      exit 1
+    fi ;;
+  *) echo "LLM_PROVIDER must be zen, nvidia or local" >&2; exit 1 ;;
+esac
+LLM_CONTEXT_TOKENS="${LLM_CONTEXT_TOKENS:-}"
+if [ -n "$LLM_CONTEXT_TOKENS" ]; then
+  [[ "$LLM_CONTEXT_TOKENS" =~ ^[0-9]+$ ]] && [ "$LLM_CONTEXT_TOKENS" -ge 1024 ] \
+    || { echo "LLM_CONTEXT_TOKENS must be an integer >= 1024, got '$LLM_CONTEXT_TOKENS'" >&2; exit 1; }
+  [ "$LLM_PROVIDER" != zen ] || echo "WARNING: LLM_CONTEXT_TOKENS is ignored for zen (catalog models)" >&2
+fi
+# Check the key up front, before anything is applied to the cluster.
+if [ "$SKIP_SECRET" != "1" ]; then
+  if [ "$LLM_PROVIDER" = nvidia ]; then
+    : "${NVIDIA_API_KEY:?set NVIDIA_API_KEY (LLM_PROVIDER=nvidia) or SKIP_SECRET=1}"
+  elif [ "$LLM_PROVIDER" = local ]; then
+    :   # LOCAL_LLM_API_KEY is optional (llama-server without --api-key)
+  else
+    : "${OPENCODE_API_KEY:?set OPENCODE_API_KEY (OpenCode Zen key) or SKIP_SECRET=1}"
+  fi
+fi
 
 IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
@@ -130,14 +239,27 @@ if [ "$SKIP_BUILD" != "1" ]; then
     git -C "$VIGIL_SRC_DIR" remote add origin "$VIGIL_SRC_REPO"
     git -C "$VIGIL_SRC_DIR" fetch --depth 1 origin "$VIGIL_SRC_REF"
     git -C "$VIGIL_SRC_DIR" checkout --quiet FETCH_HEAD
-    docker build -t "$VIGIL_IMG" "$VIGIL_SRC_DIR"
+    # Built with images/vigil-llm/Dockerfile (CPU variant), not upstream's own
+    # Dockerfile: at the pinned commit an upstream-style build crashes at boot
+    # (unpinned huggingface_hub vs sentence-transformers 2.2.2, and a NameError
+    # in VectorDB). See the Dockerfile header for every change.
+    # vigil-patches: our files copied into the image (remote_vectordb.py).
+    docker build -t "$VIGIL_IMG" -f images/vigil-llm/Dockerfile \
+      --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu --build-arg EXPECT_CUDA=0 \
+      --build-context vigil-patches=images/vigil-llm \
+      "$VIGIL_SRC_DIR"
     rm -rf "$VIGIL_SRC_DIR"
     docker push "$VIGIL_IMG"
   fi
-  if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
-    log "Building Vigil corpus loader image"
-    docker build -t "$LOADER_IMG" images/vigil-corpus-loader
-    docker push "$LOADER_IMG"
+  if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
+    log "Building the Vigil corpus image ($VIGIL_CORPUS_IMG)"
+    [ -f "$VIGIL_CORPUS_FILE" ] || { echo "ERROR: $VIGIL_CORPUS_FILE missing — build it (hack/vigil-corpus/README.md) or set VIGIL_CORPUS_FILE" >&2; exit 1; }
+    echo "$VIGIL_CORPUS_SHA256  $VIGIL_CORPUS_FILE" | sha256sum -c --quiet \
+      || { echo "ERROR: $VIGIL_CORPUS_FILE does not match the sha256 in $VIGIL_CORPUS_LOCK" >&2; exit 1; }
+    docker build -f images/vigil-corpus-loader/Dockerfile.corpus \
+      --build-context corpus="$(dirname "$VIGIL_CORPUS_FILE")" --build-arg CORPUS_FILE="$VIGIL_CORPUS_BASENAME" \
+      -t "$VIGIL_CORPUS_IMG" images/vigil-corpus-loader
+    docker push "$VIGIL_CORPUS_IMG"
   fi
 fi
 
@@ -152,6 +274,11 @@ kubectl kustomize config/default \
         -e "s|ghcr.io/security-eval/mcp-evaluator:20260930|$EVALUATOR_IMG|g" \
         -e "s|https://netbird.example.com:443|$NETBIRD_MANAGEMENT_URL|g" \
   | kubectl apply -f -
+# The operator bundle now owns its Ingress policy (config/manager/network_policy.yaml).
+# Remove the per-client policies older deploys left behind so the cluster
+# matches the repo.
+kubectl -n mcp-eval-system delete networkpolicy operator-observability \
+  allow-keda-to-operator-activity --ignore-not-found
 kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager MESH_ENFORCE="$MESH_ENFORCE" >/dev/null
 # Air-gap deploys (images imported straight into the nodes' containerd store,
 # hack/import-images-to-nodes.sh) must set IMAGE_PULL_POLICY=IfNotPresent:
@@ -167,33 +294,90 @@ log "Applying evaluation namespace, NetworkPolicies, agent personas and sample M
 # The evaluate-phase egress policy is generated per-run by the operator with
 # the API-server endpoint IPs resolved at reconcile time — config/samples
 # needs no CIDR/endpoint substitution here.
-kubectl kustomize config/samples | kubectl apply -f -
+# Personas ship with the Zen model; point them at the chosen provider/model.
+render_personas() {
+  # Quote-agnostic: kustomize re-emits the YAML without the source's quotes.
+  sed -e "s|providerID: \"\\?opencode\"\\?\$|providerID: \"$LLM_PROVIDER_ID\"|" \
+      -e "s|modelID: \"\\?muse-spark-1.3-contributor-free\"\\?\$|modelID: \"$LLM_MODEL\"|" \
+      ${LLM_CONTEXT_TOKENS:+-e "s|^\\( *\\)modelID: .*\$|&\\n\\1contextTokens: $LLM_CONTEXT_TOKENS|"}
+}
+kubectl kustomize config/samples | render_personas | kubectl apply -f -
 kubectl apply -f config/rbac/runner_role.yaml
 
-if [ "$SKIP_SECRET" != "1" ]; then
-  : "${OPENCODE_API_KEY:?set OPENCODE_API_KEY (OpenCode Zen key) or SKIP_SECRET=1}"
-  log "Creating LLM credentials secret"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    kubectl -n mcp-evals create secret generic llm-provider-credentials \
-      --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-      --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-      --dry-run=client -o yaml | kubectl apply -f -
+# llm-provider-credentials for namespace $1. Values go through an env-file on a
+# pipe (printf is a shell builtin), so keys never appear on any process argv
+# and are never echoed.
+#  zen:    OPENCODE_API_KEY (+ ANTHROPIC_API_KEY) in both namespaces, as before.
+#  nvidia: the real key only in security-gateways (UPSTREAM_API_KEY, read by
+#          Occludra); mcp-evals gets a placeholder because the evaluator's
+#          custom provider never sends a real key (Occludra swaps it).
+#  local:  same shape; the gateway Secret is empty without LOCAL_LLM_API_KEY.
+llm_secret_env() {
+  local ns="$1"
+  if [ "$LLM_PROVIDER" = nvidia ] || [ "$LLM_PROVIDER" = local ]; then
+    if [ "$ns" = security-gateways ]; then
+      if [ "$LLM_PROVIDER" = nvidia ]; then
+        printf 'UPSTREAM_API_KEY=%s\n' "$NVIDIA_API_KEY"
+      elif [ -n "${LOCAL_LLM_API_KEY:-}" ]; then
+        printf 'UPSTREAM_API_KEY=%s\n' "$LOCAL_LLM_API_KEY"
+      fi
+    else
+      printf 'OPENCODE_API_KEY=%s\n' egress-via-occludra
+    fi
+  elif [ "$ns" = security-gateways ]; then
+    printf 'OPENCODE_API_KEY=%s\n' "$OPENCODE_API_KEY"
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY"; fi
   else
-    kubectl -n mcp-evals create secret generic llm-provider-credentials \
-      --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-      --dry-run=client -o yaml | kubectl apply -f -
+    # Zen too: the evaluation namespace runs untrusted code and never needs
+    # the real key — Occludra drops the client's Authorization and sends its
+    # own (images/occludra-gateway/main.go). Bypassing Occludra
+    # (OCCLUDRA_ENABLED=false, dev only) means creating this Secret by hand.
+    printf 'OPENCODE_API_KEY=%s\n' egress-via-occludra
   fi
+}
+apply_llm_secret() {
+  kubectl -n "$1" create secret generic llm-provider-credentials \
+    --from-env-file=<(llm_secret_env "$1") \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+if [ "$SKIP_SECRET" != "1" ]; then
+  log "Creating LLM credentials secret (provider $LLM_PROVIDER)"
+  apply_llm_secret mcp-evals
 fi
 
 # Rewrite the gateway image references for this deployment (stdin → stdout).
 # With IMAGE_PULL_POLICY set (air-gap), gateways must not pull either.
 substitute_gateway_images() {
+  # VIGIL_PROFILE=lite: the in-cluster Vigil keeps only the YARA scanner (the
+  # full transformer/vectordb set runs on the GPU node, see VIGIL_GPU).
+  local profile_args=()
+  if [ "$VIGIL_PROFILE" = lite ]; then
+    profile_args=(-e "s|input_scanners = transformer,yara,vectordb|input_scanners = yara|")
+  fi
   sed -e "s|ghcr.io/security-eval/occludra-gateway:20260930|$OCCLUDRA_IMG|g" \
       -e "s|image: ghcr.io/security-eval/vigil-llm:20260930|image: $VIGIL_IMG|g" \
       -e "s|__VIGIL_REPLICAS__|$VIGIL_REPLICAS|g" \
       -e "s|__VIGIL_HPA_MIN__|$VIGIL_HPA_MIN|g" \
       -e "s|__VIGIL_MAX_UNAVAILABLE__|$VIGIL_MAX_UNAVAILABLE|g" \
-      ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"}
+      -e "/name: OCCLUDRA_UPSTREAM_BASE_URL\$/{n;s|value: \"\"|value: \"$LLM_UPSTREAM_BASE_URL\"|;}" \
+      ${profile_args[@]+"${profile_args[@]}"} \
+      ${IMAGE_PULL_POLICY:+-e "s|imagePullPolicy: Always|imagePullPolicy: $IMAGE_PULL_POLICY|g"} \
+    | allow_local_model
+}
+# LLM_PROVIDER=local: add exactly the configured model id (anchored, regex-
+# escaped) to Occludra's model allowlist rather than widening the shared
+# patterns. A no-op for other providers and for manifests without the list.
+allow_local_model() {
+  if [ "$LLM_PROVIDER" != local ]; then cat; return; fi
+  LLM_MODEL="$LLM_MODEL" python3 -c '
+import json, os, re, sys
+entry = json.dumps("^" + re.escape(os.environ["LLM_MODEL"]) + "$")
+for line in sys.stdin:
+    sys.stdout.write(line)
+    if line.rstrip("\n") == "      allow:":
+        sys.stdout.write("        - " + entry + "   # LLM_PROVIDER=local (deploy.sh)\n")
+'
 }
 apply_gateway_manifest() {
   substitute_gateway_images < "$1" | kubectl apply -f -
@@ -235,53 +419,14 @@ for doc in docs:
 # Vigil's vector scanner queries the frontend; topology docs in ARCHITECTURE.md,
 # manifests in manifests/chroma/.
 # ---------------------------------------------------------------------------
+if [ "$DEPLOY_VECTOR_DB" != "1" ] && [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ] \
+  && ! kubectl -n chroma get service chroma-gateway >/dev/null 2>&1; then
+  echo "WARNING: DEPLOY_VECTOR_DB=0 and no chroma-gateway in namespace chroma: Vigil needs it (and its" \
+       "Secret chroma-reader to even start), so evaluations will fail closed." >&2
+fi
 if [ "$DEPLOY_VECTOR_DB" = "1" ]; then
-  log "Deploying vector-DB substrate (MinIO, Postgres, OTel) into namespace chroma"
-  # The substrate manifests and the chart both target namespace `chroma`;
-  # create it up front so apply order never matters. The PriorityClass is
-  # referenced by MinIO/Postgres (and the gateways further down).
-  kubectl create namespace chroma --dry-run=client -o yaml | kubectl apply -f -
-  kubectl apply -f manifests/priorityclass.yaml
-  kubectl apply -f manifests/chroma/minio.yaml \
-                 -f manifests/chroma/postgres.yaml \
-                 -f manifests/chroma/otel-collector.yaml \
-                 -f manifests/chroma/networkpolicy.yaml
-  for dep in minio postgres otel-collector; do
-    kubectl -n chroma rollout status "deploy/$dep" --timeout=300s
-  done
-
-  log "Rendering + applying distributed Chroma (component images chromadb/*:$CHROMA_IMG_TAG)"
-  # CRDs first: the MemberList custom resources in the chart cannot be
-  # applied until the chroma.cluster CRD is established.
-  kubectl apply -f manifests/chroma/chart/crds/
-  helm template distributed-chroma manifests/chroma/chart \
-    -f manifests/chroma/values-mcp-eval.yaml \
-    --set-file rustFrontendService.configuration=manifests/chroma/frontend-config.yaml \
-    --set-file rustLogService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file queryService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file compactionService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file garbageCollector.configuration=manifests/chroma/worker-config.yaml \
-    --set-file rustSysdbService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file workQueueService.configuration=manifests/chroma/worker-config.yaml \
-    --set-file fnConsumer.configuration=manifests/chroma/worker-config.yaml \
-    | sed "s|__CHROMA_IMG_TAG__|$CHROMA_IMG_TAG|g" \
-    | kubectl apply -f -
-  for dep in sysdb rust-sysdb-service rust-frontend-service work-queue-service fn-consumer; do
-    kubectl -n chroma rollout status "deploy/$dep" --timeout=600s
-  done
-  for sts in rust-log-service query-service compaction-service garbage-collector; do
-    kubectl -n chroma rollout status "statefulset/$sts" --timeout=600s
-  done
-
-  if [ "$SKIP_CORPUS_LOAD" != "1" ]; then
-    log "Loading Vigil embedding corpora into Chroma (Job vigil-corpus-loader)"
-    sed "s|__LOADER_IMG__|$LOADER_IMG|g" manifests/chroma/corpus-loader-job.yaml \
-      | kubectl apply -f -
-    # First (cold) run downloads the datasets from HuggingFace.
-    kubectl -n chroma wait --for=condition=complete job/vigil-corpus-loader --timeout=900s \
-      || { echo "ERROR: corpus loader did not complete — logs: kubectl -n chroma logs job/vigil-corpus-loader" >&2; exit 1; }
-  fi
-  echo "Vector DB up: http://rust-frontend-service.chroma.svc.cluster.local:8000 (namespace chroma)"
+  CHROMA_IMG_TAG="$CHROMA_IMG_TAG" SKIP_CORPUS_LOAD="$SKIP_CORPUS_LOAD" \
+    VIGIL_CORPUS_IMG="${VIGIL_CORPUS_IMG:-}" VIGIL_CORPUS_LOCK="$VIGIL_CORPUS_LOCK" hack/chroma/deploy.sh
 fi
 
 if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
@@ -289,13 +434,56 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
   # PriorityClass shared by the operator and both gateways (node-pressure
   # evictions must not take out the control plane or the security perimeter).
   kubectl apply -f manifests/priorityclass.yaml
+  # Our YARA rules (manifests/vigil-yara/*.yar) replace the ones upstream bakes
+  # into the image; every Vigil pod (CPU and GPU) mounts this ConfigMap as its
+  # rules_dir. Needs the namespace, which the Occludra manifest creates.
+  apply_vigil_yara_rules() {
+    local args=() f
+    for f in manifests/vigil-yara/*.yar; do args+=("--from-file=$f"); done
+    kubectl -n security-gateways create configmap vigil-yara-rules "${args[@]}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  }
   if [ "$MESH_ENFORCE" = "true" ]; then
     apply_gateway_manifest manifests/occludra-deployment.yaml
     apply_gateway_manifest manifests/netbird-daemonset.yaml
+    apply_vigil_yara_rules
     apply_gateway_manifest manifests/vigil-deployment.yaml
   else
     substitute_gateway_images < manifests/occludra-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
+    apply_vigil_yara_rules
     substitute_gateway_images < manifests/vigil-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
+  fi
+  # gateway-egress lets Occludra reach private addresses only on NetBird
+  # ports, so a local LLM server (a private IP) needs its own rule: exactly
+  # that IP and port, only while LLM_PROVIDER=local. Every other provider
+  # deletes it, so switching back leaves no opening behind.
+  if [ "$LLM_PROVIDER" = local ]; then
+    log "Allowing Occludra -> local LLM $LOCAL_LLM_IP:$LOCAL_LLM_PORT (NetworkPolicy occludra-egress-local-llm)"
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: occludra-egress-local-llm
+  namespace: security-gateways
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  annotations:
+    security.eval.io/reason: "LLM_PROVIDER=local: Occludra's upstream is $LOCAL_LLM_URL"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: occludra
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: $LOCAL_LLM_IP/32
+      ports:
+        - protocol: TCP
+          port: $LOCAL_LLM_PORT
+EOF
+  else
+    kubectl -n security-gateways delete networkpolicy occludra-egress-local-llm --ignore-not-found
   fi
   if [ "$MESH_ENFORCE" != "true" ]; then
     echo "NOTE: MESH_ENFORCE=false — NetBird enrollment secrets skipped." >&2
@@ -315,17 +503,14 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
     exit 1
   fi
   if [ "$SKIP_SECRET" != "1" ]; then
-    log "Mirroring LLM credentials into security-gateways (Occludra is the upstream egress point)"
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-      kubectl -n security-gateways create secret generic llm-provider-credentials \
-        --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-        --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    else
-      kubectl -n security-gateways create secret generic llm-provider-credentials \
-        --from-literal=OPENCODE_API_KEY="$OPENCODE_API_KEY" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    fi
+    log "Writing LLM credentials into security-gateways (Occludra is the upstream egress point)"
+    apply_llm_secret security-gateways
+    # Occludra reads the key from env, i.e. once at pod start: pods created
+    # by the apply above can start before this Secret is written (measured
+    # in kind: 1 s apart, first replica ran keyless), and a rotated key never
+    # reaches running pods. Restart so every replica has the current key.
+    kubectl -n security-gateways rollout restart deployment/occludra
+    kubectl -n security-gateways rollout status deployment/occludra --timeout=180s
   else
     echo "WARNING: SKIP_SECRET=1 — security-gateways/llm-provider-credentials not (re)created." >&2
   fi
@@ -436,6 +621,34 @@ region = $OS_REGION_NAME" \
       -e "s|__AUTOSCALER_NODE_GROUP__|$AUTOSCALER_NODE_GROUP|g" \
       manifests/cluster-autoscaler-openstack.yaml | kubectl apply -f -
   echo "Autoscaler: workers scale $AUTOSCALER_MIN..$AUTOSCALER_MAX in node group '$AUTOSCALER_NODE_GROUP'; idle VMs are deleted after 5m."
+fi
+
+# ---------------------------------------------------------------------------
+# GPU node: KEDA + scale-to-zero GPU Vigil (see hack/gpu-node/README.md).
+# ---------------------------------------------------------------------------
+if [ "$DEPLOY_KEDA" = "1" ]; then
+  log "Installing KEDA $KEDA_CHART_VERSION (namespace keda)"
+  helm upgrade --install keda keda --repo https://kedacore.github.io/charts \
+    --version "$KEDA_CHART_VERSION" -n keda --create-namespace \
+    -f manifests/keda/values-mcp-eval.yaml --wait --timeout 5m
+fi
+
+if [ "$VIGIL_GPU" = "1" ]; then
+  kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1 \
+    || { echo "ERROR: VIGIL_GPU=1 needs KEDA (DEPLOY_KEDA=1)" >&2; exit 1; }
+  log "Deploying the scale-to-zero GPU Vigil ($VIGIL_GPU_IMG)"
+  # Keep the ScaledObject's current pause state: a re-deploy must not pause a
+  # GPU Vigil that `gpu-node up` has already released (new objects start paused).
+  was_paused="$(kubectl -n security-gateways get scaledobject vigil-gpu \
+    -o jsonpath='{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}' 2>/dev/null || echo 0)"
+  existed="$(kubectl -n security-gateways get scaledobject vigil-gpu -o name 2>/dev/null || true)"
+  sed -e "s|__VIGIL_GPU_IMG__|$VIGIL_GPU_IMG|g" -e "s|__VIGIL_GPU_MEM_LIMIT__|$VIGIL_GPU_MEM_LIMIT|g" \
+    hack/gpu-node/manifests/vigil-gpu.yaml | kubectl apply -f -
+  if [ -n "$existed" ] && [ -z "$was_paused" ]; then
+    kubectl -n security-gateways annotate scaledobject vigil-gpu autoscaling.keda.sh/paused-replicas- >/dev/null
+  fi
+  kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager \
+    VIGIL_GPU_URL="http://vigil-gpu-service.security-gateways.svc.cluster.local:5000/analyze/prompt" >/dev/null
 fi
 
 log "Done. Watch progress with:"

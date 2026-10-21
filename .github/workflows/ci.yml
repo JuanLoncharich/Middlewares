@@ -1,0 +1,91 @@
+# Every push and pull request: build, vet and test what can run without a
+# cluster. Image builds and pushes live in images.yml.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  operator:
+    name: operator (go vet + test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l api cmd internal)" || { gofmt -l api cmd internal; exit 1; }
+      - run: go vet ./...
+      - run: go test ./...
+
+  occludra:
+    name: occludra (go vet + test)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: images/occludra-gateway
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: images/occludra-gateway/go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test ./...
+
+  runner:
+    name: runner (typecheck + node --test)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: runner
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy-scripts:
+    name: deploy.sh and manifests (offline)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shell syntax
+        run: for f in deploy.sh hack/chroma/deploy.sh hack/local-llm/llm test/*.sh test/*/*.sh; do bash -n "$f" || exit 1; done
+      # kubectl (for kustomize) and python3 ship with the runner image; the
+      # tests make their own PyYAML venv when it is missing.
+      - run: test/deploy/manifests-test.sh
+      - run: test/deploy/llm-provider-test.sh
+      - run: test/deploy/operator-netpol-test.sh
+
+  vigil-clients:
+    name: Vigil Chroma client + corpus loader (docker)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # A real Chroma behind the real chroma-gateway, in docker; the legacy
+      # half downloads a subset of deadbits' corpora from HuggingFace.
+      - run: test/vigil/remote-vectordb-test.sh
+      - name: YARA rules against attack phrasings and benign text
+        run: |
+          python3 -m venv /tmp/yara && /tmp/yara/bin/pip install -q yara-python==4.3.1
+          /tmp/yara/bin/python test/vigil/yara-rules-test.py

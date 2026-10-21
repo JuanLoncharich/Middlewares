@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vigil
+  namespace: security-gateways
+spec:
+  template:
+    spec:
+      nodeSelector:
+        security.eval.io/gpu: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+---
+# One node, one replica: a second one would not fit the PC's 6 GiB slice.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vigil
+  namespace: security-gateways
+spec:
+  maxReplicas: 1

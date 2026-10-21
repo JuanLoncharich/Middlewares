@@ -189,15 +189,19 @@ compaction_service:
           kube_namespace: "chroma"
           memberlist_name: "rust-log-service-memberlist"
           queue_size: 100
+  # Sized for the 1536Mi limit on 4 GB nodes. Upstream's values (8 GB caches,
+  # 50 concurrent jobs) are for big machines: with them the compactor was
+  # OOM-killed loading the 240k-vector corpus, the log stopped being compacted
+  # and Chroma refused writes (HTTP 429 "log needs compaction").
   dispatcher:
-    num_worker_threads: 4
+    num_worker_threads: 2
     dispatcher_queue_size: 1000
     worker_queue_size: 100
     task_queue_limit: 10000
     active_io_tasks: 10000
   compactor:
     compaction_manager_queue_size: 1000
-    max_concurrent_jobs: 50
+    max_concurrent_jobs: 2
     compaction_interval_sec: 10
     min_compaction_size: 10
     max_compaction_size: 10000
@@ -219,13 +223,13 @@ compaction_service:
         block_cache_config:
           lru:
             name: "block_cache"
-            capacity: 1000
-        num_concurrent_block_flushes: 40
+            capacity: 32 # blocks of <= 8 MiB
+        num_concurrent_block_flushes: 4
       sparse_index_manager_config:
         sparse_index_cache_config:
           lru:
             name: "sparse_index_cache"
-            capacity: 1000
+            capacity: 64
   bloom_filter_manager:
     cache_config:
       lru:
@@ -238,7 +242,7 @@ compaction_service:
     hnsw_cache_config:
       memory:
         name: "hnsw_cache"
-        capacity: 8192 # 8192 MiB = 8GB
+        capacity: 256 # MiB
     permitted_parallelism: 180
   spann_provider:
     pl_block_size: 5242880 # 5MiB
@@ -254,7 +258,7 @@ compaction_service:
       cache_config:
         memory:
           name: "usearch_cache"
-          capacity: 8192 # 8192 MiB = 8GB
+          capacity: 256 # MiB
 work_queue_service:
   service_name: "work-queue-service"
   my_port: 50051

@@ -1,0 +1,57 @@
+# NVIDIA device plugin — advertises nvidia.com/gpu on the GPU node only.
+# Not the full GPU Operator: one DaemonSet, pinned to the labelled node, so
+# the rest of the cluster never sees it.
+# k0s keeps the kubelet root under /var/lib/k0s/kubelet (not /var/lib/kubelet).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: nvidia-device-plugin
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvidia-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvidia-device-plugin
+    spec:
+      runtimeClassName: nvidia
+      priorityClassName: system-node-critical
+      nodeSelector:
+        security.eval.io/gpu: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      containers:
+        - name: plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.20.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits:   {cpu: 100m, memory: 128Mi}
+          volumeMounts:
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/k0s/kubelet/device-plugins

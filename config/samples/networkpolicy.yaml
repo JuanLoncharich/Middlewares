@@ -40,13 +40,18 @@ spec:
     - Ingress
     - Egress
 ---
+# Matches NOTHING in the shipped architecture: the target is a container of
+# the role=evaluation-pod Pod and shares its network namespace, so it gets
+# the evaluator's egress (README "the target shares the Pod network"). This
+# policy only takes effect if a target is deployed as its own Pod labelled
+# role=target.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: target-deny-all
   namespace: mcp-evals
   annotations:
-    security.eval.io/invariant: "untrusted MCP target never has ingress or egress"
+    security.eval.io/invariant: "a target deployed as its own Pod (role=target) has no ingress or egress; the shipped in-Pod target is NOT covered"
 spec:
   podSelector:
     matchLabels:
@@ -125,8 +130,8 @@ spec:
 #       upstream, and untrusted payloads are scanned by vigil first.
 #
 #   legacy (MESH_ENFORCE=false) — DNS, API server, the security-gateway
-#       services (vigil 5000 / occludra 8080) and public 443 for direct
-#       provider calls.
+#       services (vigil 5000 / occludra 8080). Public 443 only with
+#       EVAL_PUBLIC_EGRESS=true on the operator (default off).
 #
 # A static evaluate-phase policy here would UNION with the per-run policy and
 # silently re-open egress, so it is deliberately absent from this file.

@@ -1,0 +1,173 @@
+# ---------------------------------------------------------------------------
+# chroma-gateway — the only door into Chroma from outside namespace `chroma`.
+#
+# Chroma's Rust server (distributed frontend and single-node alike) has no
+# authentication of its own, so this nginx sits in front of it and checks a
+# bearer token. Two tokens, two roles (Secret `chroma-auth`, created by
+# hack/chroma/deploy.sh, never printed):
+#
+#   reader  GET  /api/v2/tenants/<t>/databases/<d>/collections/<name>
+#           POST /api/v2/tenants/<t>/databases/<d>/collections/<id>/query
+#           — exactly the two calls Vigil's client makes
+#           (images/vigil-llm/remote_vectordb.py). A stolen reader token can
+#           read the corpus, never change or delete it.
+#   writer  everything — the corpus loader Job only.
+#
+# Everything else answers 401 (no/unknown token) or 403 (reader asking for
+# more). /api/v2/heartbeat is open so probes need no token.
+#
+# The reader rules match the RAW request URI with a strict charset per path
+# segment, so `..`, `%2F` or `//` tricks cannot turn an allowed path into a
+# different one after nginx forwards it.
+#
+# Upstream: CHROMA_UPSTREAM (host:port) — rust-frontend-service:8000 for the
+# distributed Chroma, chroma-single:8000 for the kind test instance
+# (manifests/chroma/single.yaml). hack/chroma/deploy.sh sets it.
+#
+# NetworkPolicies (manifests/chroma/networkpolicy.yaml): clients outside the
+# namespace reach this pod on 8080 and nothing else in `chroma`.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chroma-gateway
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: chroma-gateway
+    app.kubernetes.io/part-of: chroma-distributed
+data:
+  # Rendered by the nginx image's envsubst step (/etc/nginx/templates →
+  # /etc/nginx/conf.d); only variables present in the environment are
+  # substituted, so nginx's own $variables are left alone.
+  default.conf.template: |
+    # "Bearer <64 hex chars>" keys are longer than the default bucket.
+    map_hash_bucket_size 128;
+    map $http_authorization $chroma_role {
+      default                         none;
+      "Bearer ${CHROMA_READER_TOKEN}" reader;
+      "Bearer ${CHROMA_WRITER_TOKEN}" writer;
+    }
+    map "$chroma_role $request_method $request_uri" $chroma_allow {
+      default 0;
+      "~^writer "                                                                                    1;
+      "~^reader GET /api/v2/tenants/[A-Za-z0-9_-]+/databases/[A-Za-z0-9_-]+/collections/[A-Za-z0-9_-]+$"        1;
+      "~^reader POST /api/v2/tenants/[A-Za-z0-9_-]+/databases/[A-Za-z0-9_-]+/collections/[A-Za-z0-9-]+/query$"  1;
+    }
+    server {
+      listen 8080;
+      server_tokens off;
+      # Loader batches: 500 x 384 floats as JSON is ~4 MB.
+      client_max_body_size 16m;
+      proxy_read_timeout 120s;
+
+      location = /api/v2/heartbeat {
+        proxy_pass http://${CHROMA_UPSTREAM};
+      }
+      location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+      }
+      location / {
+        if ($chroma_role = none) { return 401; }
+        if ($chroma_allow = 0)   { return 403; }
+        # The token stays here: Chroma never sees it.
+        proxy_set_header Authorization "";
+        proxy_pass http://${CHROMA_UPSTREAM};
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chroma-gateway
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: chroma-gateway
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chroma-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chroma-gateway
+        app.kubernetes.io/part-of: chroma-distributed
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:1.29.1-alpine@sha256:27985295bdb22a1ef8f712863210bd5877c0f3006494a593e86b3fe0fa55467e
+          # Refuse to start with a missing or short token: an empty token
+          # would make the header "Bearer " a valid credential.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              for t in "$CHROMA_READER_TOKEN" "$CHROMA_WRITER_TOKEN"; do
+                [ "${#t}" -ge 32 ] || { echo "chroma-gateway: token shorter than 32 chars" >&2; exit 1; }
+              done
+              [ "$CHROMA_READER_TOKEN" != "$CHROMA_WRITER_TOKEN" ] || { echo "chroma-gateway: reader and writer tokens are equal" >&2; exit 1; }
+              exec /docker-entrypoint.sh nginx -g 'daemon off;'
+          env:
+            - name: CHROMA_UPSTREAM
+              value: __CHROMA_UPSTREAM__
+            - name: CHROMA_READER_TOKEN
+              valueFrom: {secretKeyRef: {name: chroma-auth, key: reader-token}}
+            - name: CHROMA_WRITER_TOKEN
+              valueFrom: {secretKeyRef: {name: chroma-auth, key: writer-token}}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+          volumeMounts:
+            - {name: templates, mountPath: /etc/nginx/templates, readOnly: true}
+            - {name: confd, mountPath: /etc/nginx/conf.d}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: templates
+          configMap:
+            name: chroma-gateway
+        - name: confd
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chroma-gateway
+  namespace: chroma
+  labels:
+    app.kubernetes.io/name: chroma-gateway
+    app.kubernetes.io/part-of: chroma-distributed
+spec:
+  selector:
+    app.kubernetes.io/name: chroma-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

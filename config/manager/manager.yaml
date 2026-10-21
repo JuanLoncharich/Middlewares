@@ -1,3 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+    app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  name: system
+---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -61,6 +72,8 @@ spec:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8443
+        # GET /active-runs for KEDA scale-to-zero of the GPU Vigil (empty disables).
+        - --activity-bind-address=:8082
         image: ghcr.io/security-eval/mcp-eval-operator:20260930
         imagePullPolicy: Always
         name: manager
@@ -128,12 +141,20 @@ spec:
         # stay Pending. Uncomment to enable.
         # - name: RUNTIME_CLASS_NAME
         #   value: gvisor
+        # Optional GPU Vigil on the on-demand GPU node (hack/gpu-node): the
+        # evaluator tries it first and falls back to VIGIL_URL when it is
+        # unreachable or scaled to zero. Set by deploy.sh when VIGIL_GPU=1.
+        # - name: VIGIL_GPU_URL
+        #   value: http://vigil-gpu-service.security-gateways.svc.cluster.local:5000/analyze/prompt
         ports:
         - containerPort: 8443
           name: metrics
           protocol: TCP
         - containerPort: 8081
           name: probes
+          protocol: TCP
+        - containerPort: 8082
+          name: activity
           protocol: TCP
         securityContext:
           runAsNonRoot: true
@@ -168,3 +189,23 @@ spec:
             memory: 128Mi
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
+---
+# Activity endpoint (number of non-terminal MCPEvaluationRuns) read by KEDA's
+# metrics-api scaler to scale the GPU Vigil 0 <-> 1. Served by every replica
+# from the informer cache. Rendered as mcp-eval-operator-activity.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-activity
+  namespace: system
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+  ports:
+  - name: activity
+    port: 8082
+    targetPort: activity
+    protocol: TCP

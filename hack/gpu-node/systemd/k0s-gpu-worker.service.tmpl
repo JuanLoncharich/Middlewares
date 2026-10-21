@@ -1,0 +1,24 @@
+# Deliberately NOT enabled: it only runs when `gpu-node up` starts it.
+[Unit]
+Description=k0s worker (on-demand GPU node)
+Documentation=https://docs.k0sproject.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Slice=__SLICE__
+# runc must be on PATH: nvidia-container-runtime wraps the runc that k0s ships.
+Environment=PATH=/var/lib/k0s/bin:/usr/local/sbin:/usr/local/bin:/usr/bin
+ExecStart=/usr/local/bin/k0s worker \
+  --token-file=__TOKEN_FILE__ \
+  --labels=__NODE_LABEL__ \
+  --taints=__NODE_TAINT__ \
+  '--kubelet-extra-args=__KUBELET_ARGS__'
+Restart=no
+Delegate=yes
+KillMode=control-group
+TimeoutStopSec=60
+LimitNOFILE=1048576
+# Files in /etc/k0s/containerd.d/*.toml are merged into k0s's containerd config.
+
+# No [Install] section on purpose: `systemctl enable` is impossible.

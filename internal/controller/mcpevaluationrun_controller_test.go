@@ -247,6 +247,7 @@ func TestImageConfigEndpointDerivation(t *testing.T) {
 func TestBuildEvaluateNetworkPolicyLegacyMode(t *testing.T) {
 	images := meshImages()
 	images.MeshEnforce = false
+	images.EvalPublicEgress = true
 	run := testRun()
 	policy := buildEvaluateNetworkPolicy(run, images, []string{"172.21.0.2/32"})
 
@@ -450,5 +451,148 @@ func TestBuildJobRuntimeClassName(t *testing.T) {
 	job = (&MCPEvaluationRunReconciler{Images: meshImages()}).buildJob(run, server)
 	if job.Spec.Template.Spec.RuntimeClassName != nil {
 		t.Fatalf("pod template RuntimeClassName must stay nil when unset, got %q", *job.Spec.Template.Spec.RuntimeClassName)
+	}
+}
+
+func TestBuildJobVigilGPUURLOnlyWhenConfigured(t *testing.T) {
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "filesystem-mcp", Namespace: "mcp-evals"},
+		Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+	}
+	build := func(images ImageConfig) *corev1.Container {
+		return evaluatorContainer(t, (&MCPEvaluationRunReconciler{Images: images}).buildJob(testRun(), server))
+	}
+
+	if _, ok := findEnv(*build(meshImages()), "VIGIL_GPU_URL"); ok {
+		t.Error("VIGIL_GPU_URL must be absent unless configured (GPU scanner is opt-in)")
+	}
+	images := meshImages()
+	images.VigilGPUURL = "http://vigil-gpu-service.security-gateways.svc.cluster.local:5000/analyze/prompt"
+	evaluator := build(images)
+	if got, ok := findEnv(*evaluator, "VIGIL_GPU_URL"); !ok || got != images.VigilGPUURL {
+		t.Errorf("VIGIL_GPU_URL = %q (present=%v), want %q", got, ok, images.VigilGPUURL)
+	}
+	// The CPU endpoint stays the fallback, unchanged.
+	if got, _ := findEnv(*evaluator, "VIGIL_URL"); got != images.VigilURL {
+		t.Errorf("VIGIL_URL changed to %q", got)
+	}
+}
+
+// The custom git CA (key ca.crt of credentialsSecretRef) is PEM text. git's
+// GIT_SSL_CAINFO must be a file path, so the operator hands the PEM over as
+// GIT_CA_PEM and the cloner writes it to a file itself.
+func TestBuildJobPassesGitCAAsPEMNotAsCAInfoPath(t *testing.T) {
+	run := testRun()
+	server := &securityv1alpha1.MCPServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "fixture", Namespace: "mcp-evals"},
+		Spec: securityv1alpha1.MCPServerSpec{
+			RepositoryUrl:        "https://git.internal/x/y",
+			Transport:            "stdio",
+			CredentialsSecretRef: "git-creds",
+		},
+	}
+	job := (&MCPEvaluationRunReconciler{Images: meshImages()}).buildJob(run, server)
+	var cloner *corev1.Container
+	for i := range job.Spec.Template.Spec.InitContainers {
+		if job.Spec.Template.Spec.InitContainers[i].Name == containerCloner {
+			cloner = &job.Spec.Template.Spec.InitContainers[i]
+		}
+	}
+	if cloner == nil {
+		t.Fatal("no cloner init container")
+	}
+	var pem *corev1.EnvVar
+	for i := range cloner.Env {
+		switch cloner.Env[i].Name {
+		case "GIT_SSL_CAINFO":
+			t.Fatalf("GIT_SSL_CAINFO must not carry the secret's PEM content (git treats it as a path)")
+		case "GIT_CA_PEM":
+			pem = &cloner.Env[i]
+		}
+	}
+	if pem == nil || pem.ValueFrom == nil || pem.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("GIT_CA_PEM missing or not sourced from a secret: %+v", pem)
+	}
+	ref := pem.ValueFrom.SecretKeyRef
+	if ref.Name != "git-creds" || ref.Key != "ca.crt" || ref.Optional == nil || !*ref.Optional {
+		t.Fatalf("GIT_CA_PEM ref = %+v, want optional git-creds/ca.crt", ref)
+	}
+}
+
+// Untrusted code (the cloner runs repository build steps, the target is the
+// server under test) must never mount the evaluator's HOME.
+func TestBuildJobUntrustedContainersDoNotShareTheEvaluatorHome(t *testing.T) {
+	for _, images := range []ImageConfig{meshImages(), {}} {
+		job := (&MCPEvaluationRunReconciler{Images: images}).buildJob(testRun(), &securityv1alpha1.MCPServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "mcp-evals"},
+			Spec:       securityv1alpha1.MCPServerSpec{RepositoryUrl: "https://github.com/x/y", Transport: "stdio"},
+		})
+		spec := job.Spec.Template.Spec
+		mounts := map[string]map[string]string{} // container -> mountPath -> volume
+		for _, c := range append(append([]corev1.Container{}, spec.InitContainers...), spec.Containers...) {
+			mounts[c.Name] = map[string]string{}
+			for _, m := range c.VolumeMounts {
+				mounts[c.Name][m.MountPath] = m.Name
+			}
+		}
+		home := mounts[containerEvaluator][mountTmp]
+		if home == "" {
+			t.Fatal("evaluator has no /tmp")
+		}
+		for _, untrusted := range []string{containerCloner, containerTarget} {
+			if mounts[untrusted] == nil {
+				t.Fatalf("no %s container", untrusted)
+			}
+			if mounts[untrusted][mountTmp] == "" {
+				t.Errorf("%s has no /tmp of its own", untrusted)
+			}
+			for path, vol := range mounts[untrusted] {
+				if vol == home {
+					t.Errorf("%s mounts the evaluator's HOME volume %q at %s", untrusted, vol, path)
+				}
+			}
+		}
+		if mounts[containerCloner][mountTmp] == mounts[containerTarget][mountTmp] {
+			t.Error("cloner and target share a /tmp")
+		}
+		declared := map[string]bool{}
+		for _, v := range spec.Volumes {
+			declared[v.Name] = true
+		}
+		for c, ms := range mounts {
+			for path, vol := range ms {
+				if !declared[vol] {
+					t.Errorf("%s mounts undeclared volume %q at %s", c, vol, path)
+				}
+			}
+		}
+	}
+}
+
+func TestBuildEvaluateNetworkPolicyLegacyWithoutPublicEgress(t *testing.T) {
+	images := meshImages()
+	images.MeshEnforce = false
+	images.EvalPublicEgress = false
+	policy := buildEvaluateNetworkPolicy(testRun(), images, []string{"172.21.0.2/32"})
+	if len(policy.Spec.Egress) != 3 {
+		t.Fatalf("want DNS + API server + gateways, got %d rules", len(policy.Spec.Egress))
+	}
+	for _, rule := range policy.Spec.Egress {
+		for _, to := range rule.To {
+			if to.IPBlock != nil && to.IPBlock.CIDR == "0.0.0.0/0" {
+				t.Fatal("public egress rule present with EvalPublicEgress=false")
+			}
+		}
+	}
+}
+
+func TestEvalPublicEgressDefaultsOff(t *testing.T) {
+	t.Setenv("EVAL_PUBLIC_EGRESS", "")
+	if ImageConfigFromEnv().EvalPublicEgress {
+		t.Fatal("EVAL_PUBLIC_EGRESS unset must keep public 443 closed")
+	}
+	t.Setenv("EVAL_PUBLIC_EGRESS", "true")
+	if !ImageConfigFromEnv().EvalPublicEgress {
+		t.Fatal("EVAL_PUBLIC_EGRESS=true ignored")
 	}
 }
