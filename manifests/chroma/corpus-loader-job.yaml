@@ -44,6 +44,8 @@ spec:
         app.kubernetes.io/name: vigil-corpus-loader
         app.kubernetes.io/part-of: chroma-distributed
     spec:
+      # Re-runnable: evicted first under node memory pressure (manifests/priorityclass.yaml).
+      priorityClassName: mcp-eval-batch
       restartPolicy: Never
       automountServiceAccountToken: false
       securityContext:

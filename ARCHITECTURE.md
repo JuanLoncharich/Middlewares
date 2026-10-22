@@ -66,9 +66,9 @@ its code lives, and whether it holds state.
 | OpenCode child server | **in-process subprocess** spawned by the SDK inside the evaluator container (`opencode serve`, loopback 4096+) | evaluator container | npm `opencode-ai` | session files in container `/tmp` |
 | netbird run sidecar | **sidecar container** (userspace WireGuard) | run Pod | `netbirdio/netbird@sha256:9d8480d87b7f7c10d67b820eecf332ecca5c2756792d4bdfa532182b4fc3005f` | emptyDir `/var/lib/netbird` |
 | netbird node client | **DaemonSet** `netbird-node` (TUN mode, CAP_NET_ADMIN) | `security-gateways`, 1/node | `manifests/netbird-daemonset.yaml` | emptyDir state |
-| Occludra gateway | **Deployment** `occludra` (2 replicas, PDB min 1, rolling maxUnavailable 0) + **Service** `occludra-service` (ClusterIP 8080) + **Service** `occludra-np` (NodePort 30080) | `security-gateways` | `images/occludra-gateway/` (Go, single file `main.go`) | **stateless**; policy read per-request |
+| Occludra gateway | **Deployment** `occludra` (1 replica, HPA 1→8, PDB maxUnavailable 1, rolling maxUnavailable 0) + **Service** `occludra-service` (ClusterIP 8080) + **Service** `occludra-np` (NodePort 30080) | `security-gateways` | `images/occludra-gateway/` (Go, single file `main.go`) | **stateless**; policy read per-request |
 | `occludra-policy` | **ConfigMap** (mounted at `/conf`, watched per-request) | `security-gateways` | `manifests/occludra-deployment.yaml` | policy source of truth (etcd) |
-| Vigil scanner | **Deployment** `vigil` (replicas via `VIGIL_REPLICAS`, default 2; HPA 70 % CPU, `VIGIL_HPA_MIN`→8; PDB) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | `$IMG_REGISTRY/vigil-llm:$IMG_TAG` — built by `deploy.sh` from pinned upstream source `VIGIL_SRC_REPO@VIGIL_SRC_REF` (`VIGIL_IMG` overrides for mirrored images; upstream publishes no image) | stateless scanner pods, config via `vigil-server-conf` (§5.2); vector plane = distributed Chroma (§5.2.1) |
+| Vigil scanner | **Deployment** `vigil` (replicas via `VIGIL_REPLICAS`, default 1; HPA 70 % CPU, `VIGIL_HPA_MIN`→8; PDB maxUnavailable 1) + **Service** `vigil-service` (ClusterIP 5000) + **Service** `vigil-np` (NodePort 30500) | `security-gateways` | `$IMG_REGISTRY/vigil-llm:$IMG_TAG` — built by `deploy.sh` from pinned upstream source `VIGIL_SRC_REPO@VIGIL_SRC_REF` (`VIGIL_IMG` overrides for mirrored images; upstream publishes no image) | stateless scanner pods, config via `vigil-server-conf` (§5.2); vector plane = distributed Chroma (§5.2.1) |
 | Distributed Chroma | SysDB coordinator (`sysdb`) + Rust SysDB + Log Service WAL (StatefulSet) + **2 Query Nodes** + **2 Compactors** + Work Queue + Fn Consumer + Garbage Collector + Rust frontend (REST v2 :8000); chart vendored at `manifests/chroma/chart/` | `chroma` | `manifests/chroma/` (chart + values + worker/frontend configs), images `chromadb/<svc>:<sha>` | object segments in **MinIO**; catalog in **Postgres** |
 | `vigil-server-conf` | **ConfigMap** (`server.conf`, scanner enable/disable) | `security-gateways` | `manifests/vigil-deployment.yaml` | scanner profile (etcd) |
 | NetworkPolicies | **NetworkPolicy** ×5 static + **1 generated per run** (`<run>-evaluate-egress`) | `security-gateways` / `mcp-evals` | `manifests/occludra-deployment.yaml`, `workstation-nodeport.yaml`, controller §4 | — |
@@ -214,8 +214,8 @@ Owns run → Job → Pod. Key mechanics:
   `/dev/termination-log` for `kubectl describe` visibility.
 - Manager flags (`cmd/main.go`): `--metrics-bind-address` (default off),
   `--health-probe-bind-address :8081`, `--leader-elect` (**enabled** via
-  manager.yaml; Deployment replicas: 2 — one active, one hot standby, PDB
-  minAvailable 1 + topology spread). `/readyz` includes a real API-server
+  manager.yaml; Deployment replicas: 1 — scale up for hot standbys, PDB
+  maxUnavailable 1 + topology spread). `/readyz` includes a real API-server
   reachability check (`internal/controller/health.go`: GET on the API
   server's own `/readyz`, cached 5 s), so a wedged manager leaves Service
   endpoints instead of holding its lease blind.
@@ -440,10 +440,11 @@ Vigil sizing note: the scanner's per-replica footprint is governed by the
 models the pinned image loads at boot (classifier + embedding engines), not
 by a platform constant — size requests/limits from the image you pin.
 `VIGIL_REPLICAS` / `VIGIL_HPA_MIN`
-/ `VIGIL_MAX_UNAVAILABLE` (deploy.sh; defaults 2 / 2 / 0) exist because
-laptop-class single-node clusters cannot hold a surge replica alongside the
-first one — there, `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`
-keeps the scanner deployable; production nodes size for 2+.
+/ `VIGIL_MAX_UNAVAILABLE` (deploy.sh; defaults 1 / 1 / 1): the platform
+serves a few concurrent users, and small nodes cannot hold a surge replica
+alongside the first one, so a rollout replaces the pod (brief scan outage,
+evaluations fail closed meanwhile). On big nodes, `2 / 2 / 0` gives
+zero-downtime rollouts.
 
 Namespace `chroma` is default-deny in both directions: full intra-namespace
 mesh, ingress to the frontend only from Vigil scanner pods (port 8000), DNS
@@ -598,8 +599,8 @@ namespace `chroma` and consumed only through the Vigil scanner.
 | Scheduling correctness | cron math vs etcd timestamps every reconcile | survives failover/restarts, no timers |
 | Run creation | uncached (APIReader) active-run check at fire time closes the cache-lag dedup window | no double-create on reconcile races |
 | Evaluation workloads | independent batch Jobs per run; transient infra failures recreate the Job (≤2, `status.retries`); stuck-Pending pods fast-retried at 5 min | **yes** — embarrassingly parallel across servers; infra flakes recover without waiting for the next cron |
-| Occludra | HPA 2→8 (CPU 70 %), shared ConfigMap policy, PDB 50 %, rolling maxUnavailable 0, topology spread, HTTP probes + graceful shutdown + in-flight backpressure | **yes** |
-| Vigil | HPA 2→8 (CPU 70 %), PDB 50 %, topology spread, tcpSocket probes + generous startupProbe (no verified HTTP health route on the pinned image); scanner pods are stateless and do not self-limit — the vector corpora live in the distributed Chroma (§5.2.1) | **yes** — a replacement replica re-reads its config and the cluster-side corpora, nothing to rebuild locally |
+| Occludra | HPA 1→8 (CPU 70 %), shared ConfigMap policy, PDB maxUnavailable 1, rolling maxUnavailable 0, topology spread, HTTP probes + graceful shutdown + in-flight backpressure | **yes** |
+| Vigil | HPA 1→8 (CPU 70 %), PDB maxUnavailable 1, topology spread, tcpSocket probes + generous startupProbe (no verified HTTP health route on the pinned image); scanner pods are stateless and do not self-limit — the vector corpora live in the distributed Chroma (§5.2.1) | **yes** — a replacement replica re-reads its config and the cluster-side corpora, nothing to rebuild locally |
 | Mesh data plane | NetBird WireGuard peer-to-peer | **yes** — no central data chokepoint (management plane is external/SPOF) |
 | Policy distribution | kubelet ConfigMap sync (~1 min) + per-request re-read | eventually consistent, atomic per request |
 | Node capacity | Cluster Autoscaler on OpenStack (ephemeral Nova VMs, scale-out on pending pods, scale-in after 5 min idle); static on kind | **yes** on OpenStack (gated by `DEPLOY_AUTOSCALER=openstack`) |
@@ -644,8 +645,8 @@ scale by moving to external S3/RDS equivalents via the worker configs.
 |---|---|---|---|
 | Operator (manager) | reconcile of N servers × M runs; every run's Job/NP/pod transitions | The default single reconcile worker would serialize everything; workers are now 8 (run ctrl) / 4 (server ctrl), each reconcile is stateless. List/watch goes through the informer cache; the uncached fire-time list is one extra read per actual fire | Vertical: CPU/mem 500m/512Mi. Horizontal replicas add standby only (leader election) — throughput comes from workers. Retry storms bounded by the default exponential rate limiter |
 | MCPEvaluationRun Jobs | one pod per run; each ~1.1 vCPU / 1 GiB requests | Pods go Pending when nodes fill — this is the signal the Cluster Autoscaler consumes | Embarrassingly parallel; bounded per-server by the single-active-run rule, cluster-wide by node capacity / autoscaler MAX |
-| Occludra | every LLM completion of every agent of every run (regex scrub CPU + long-lived SSE streams) | Up to HPA max 8 replicas; beyond per-replica `OCCLUDRA_MAX_INFLIGHT=64` in-flight it answers 503 + Retry-After (clients back off) instead of exhausting memory | HPA CPU 70 %, 2→8, PDB 50 %; backpressure as the last resort |
-| Vigil | every untrusted payload scan (surface, fuzz, probes) of every run | HPA to 8 replicas; Vigil does not self-limit — per-replica capacity is governed by the image and the HPA, so saturation shows up as latency/queueing until new replicas are Ready (the evaluator's Vigil client retries ≥5xx) | HPA CPU 70 %, 2→8, PDB 50 %; backpressure = HPA + evaluator 5xx backoff (Vigil itself no longer answers 503) |
+| Occludra | every LLM completion of every agent of every run (regex scrub CPU + long-lived SSE streams) | Up to HPA max 8 replicas; beyond per-replica `OCCLUDRA_MAX_INFLIGHT=64` in-flight it answers 503 + Retry-After (clients back off) instead of exhausting memory | HPA CPU 70 %, 1→8, PDB maxUnavailable 1; backpressure as the last resort |
+| Vigil | every untrusted payload scan (surface, fuzz, probes) of every run | HPA to 8 replicas; Vigil does not self-limit — per-replica capacity is governed by the image and the HPA, so saturation shows up as latency/queueing until new replicas are Ready (the evaluator's Vigil client retries ≥5xx) | HPA CPU 70 %, 1→8, PDB maxUnavailable 1; backpressure = HPA + evaluator 5xx backoff (Vigil itself no longer answers 503) |
 | NetBird | userspace WireGuard inside each eval pod (sidecar) and per gateway pod | Per-pod resource, scales 1:1 with pods; TUN sidecars liveness-probed | No central data plane to scale (management plane is the documented external SPOF) |
 | API server / etcd | CR patches (status per agent), Jobs, per-run NPs, events | controller-runtime informer caches absorb reads; writes are merge-patches, retries with backoff. Metrics-server adds kubelet scrape load | Cluster-infra concern (multi-master on production OpenStack; single-node kind accepted locally) |
 | Upstream LLM (Zen) | N runs × 4 agents streaming completions | 429s from the provider surface as agent errors → per-agent degradation, never a lost run | External quota; degradation semantics absorb it safely |

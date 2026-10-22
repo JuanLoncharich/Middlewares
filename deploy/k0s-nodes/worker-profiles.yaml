@@ -1,0 +1,48 @@
+# k0s worker profiles for the university cluster (3.9 GB / 2 vCPU VMs, no
+# swap). apply.sh merges this list into spec.workerProfiles of the
+# controller's /etc/k0s/k0s.yaml and starts each node's k0s with --profile.
+#
+# Why: with k0s defaults the kubelet reserves nothing for the OS and evicts
+# only below 100 MiB free. On a VM without swap the kernel stalls (page-cache
+# thrashing) before that point, so instead of one pod being evicted the whole
+# VM hung (nodo-g1-3, 2026-10-21). With these values the scheduler sees less
+# allocatable memory, and the kubelet evicts pods (lowest priority and
+# furthest over their request first; Deployments come back on another node)
+# while the OS still has room to breathe.
+#
+# Allocatable memory = capacity - systemReserved - kubeReserved - evictionHard.
+- name: protected
+  # Workers (nodo-g1-1, nodo-g1-3): 3910 - 350 - 250 - 250 ≈ 3.0 GiB for pods.
+  values:
+    systemReserved: {cpu: 100m, memory: 350Mi}
+    kubeReserved: {cpu: 100m, memory: 250Mi}
+    # Soft: under 500 MiB free for a full minute, evict with a 30 s grace.
+    evictionSoft: {memory.available: 500Mi}
+    evictionSoftGracePeriod: {memory.available: 1m}
+    evictionMaxPodGracePeriod: 30
+    # Hard: under 250 MiB free, evict now. The disk signals keep the kubelet
+    # defaults (setting evictionHard replaces the whole map).
+    evictionHard:
+      memory.available: 250Mi
+      nodefs.available: 10%
+      nodefs.inodesFree: 5%
+      imagefs.available: 15%
+      imagefs.inodesFree: 5%
+- name: control-plane
+  # nodo-g1-2 runs etcd and the API server as host processes (~1.7 GiB): pods
+  # there must never starve them, so this node evicts early — once memory use
+  # reaches 75 % (hard) — and the scheduler only uses it when the workers are
+  # full (its taint becomes PreferNoSchedule, see apply.sh).
+  # 3910 - 1500 - 300 - 25 % (978) ≈ 1.1 GiB for pods.
+  values:
+    systemReserved: {cpu: 500m, memory: 1500Mi}
+    kubeReserved: {cpu: 100m, memory: 300Mi}
+    evictionSoft: {memory.available: 30%}
+    evictionSoftGracePeriod: {memory.available: 30s}
+    evictionMaxPodGracePeriod: 30
+    evictionHard:
+      memory.available: 25%
+      nodefs.available: 10%
+      nodefs.inodesFree: 5%
+      imagefs.available: 15%
+      imagefs.inodesFree: 5%

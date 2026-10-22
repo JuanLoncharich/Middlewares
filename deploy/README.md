@@ -15,6 +15,7 @@ Flux (every 2 min) ──► sees the new commit ──► applies deploy/k0s
 | `k0s/generated/` | **generated** by `hack/gitops/render.sh` from `deploy.sh`: everything it would apply, minus Secrets. Never edit by hand |
 | `k0s/patches/` | what only this cluster needs (Vigil pinned to the GPU PC) |
 | `flux/` | Flux itself (source + kustomize controllers only) and its sync objects |
+| `k0s-nodes/` | node-level settings Flux cannot manage: kubelet memory reserves and eviction thresholds (`apply.sh`, run by hand from the laptop) |
 
 `deploy.sh` stays the one description of the platform: kind and one-off
 clusters still use it directly, and `render.sh` runs it with a stand-in
@@ -29,6 +30,15 @@ clusters still use it directly, and `render.sh` runs it with a stand-in
 - **Images**: nothing to do. CI builds them and bumps the tag.
 - The corpus image is the exception: its data file is git-ignored
   (hack/vigil-corpus), so it is built and pushed by hand, once per corpus.
+
+## Node memory protection (outside Flux)
+
+The kubelet settings live on the VMs, not in the API, so Flux cannot apply
+them. `k0s-nodes/worker-profiles.yaml` is their source of truth;
+`k0s-nodes/apply.sh plan` shows the current state (read-only) and
+`apply.sh apply` rolls them out one node at a time (`rollback` undoes it).
+Run it from the laptop, which holds the SSH key for the nodes, or from
+anywhere with `JUMP=<laptop>`. Re-run `apply` after reinstalling a node.
 
 ## Secrets
 

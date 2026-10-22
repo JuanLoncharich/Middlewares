@@ -50,7 +50,7 @@ metadata:
     app.kubernetes.io/component: ai-gateway
     app.kubernetes.io/part-of: mcp-eval-platform
 spec:
-  replicas: 2
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -202,7 +202,7 @@ metadata:
   name: occludra
   namespace: security-gateways
 spec:
-  minAvailable: 50%
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: occludra
@@ -219,7 +219,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: occludra
-  minReplicas: 2
+  minReplicas: 1
   maxReplicas: 8
   metrics:
   - type: Resource
@@ -643,7 +643,7 @@ metadata:
   name: vigil
   namespace: security-gateways
 spec:
-  minAvailable: 50%
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: vigil-llm
@@ -709,6 +709,23 @@ spec:
     ports:
     - protocol: TCP
       port: 8080
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  namespace: security-gateways
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 500m
+      memory: 256Mi
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

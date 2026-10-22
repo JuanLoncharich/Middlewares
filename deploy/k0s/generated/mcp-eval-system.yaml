@@ -101,7 +101,7 @@ metadata:
   name: mcp-eval-controller-manager
   namespace: mcp-eval-system
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/part-of: mcp-eval-operator
@@ -226,7 +226,7 @@ metadata:
   name: mcp-eval-controller-manager
   namespace: mcp-eval-system
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/part-of: mcp-eval-operator
@@ -273,3 +273,20 @@ spec:
       control-plane: controller-manager
   policyTypes:
   - Ingress
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  namespace: mcp-eval-system
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 500m
+      memory: 256Mi
