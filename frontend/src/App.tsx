@@ -8,20 +8,23 @@ import { LiveSource } from "./data/live.ts";
 import type { Mode, Snapshot } from "./data/source.ts";
 import { type MCPEvaluationRun, isTerminal } from "./model/crd.ts";
 import { AnalysisView } from "./views/AnalysisView.tsx";
+import { ChatView } from "./views/ChatView.tsx";
 import { ServerDetail } from "./views/ServerDetail.tsx";
 import { TerminalView } from "./views/TerminalView.tsx";
 import { ServersView } from "./views/ServersView.tsx";
 import "./styles/app.css";
 import "./styles/bento.css";
 import "./styles/analysis.css";
+import "./styles/chat.css";
 import "./styles/chrome.css";
 
-type ViewId = "analysis" | "servers" | "terminal";
+type ViewId = "analysis" | "chat" | "servers" | "terminal";
 
 const VIEWS: { id: ViewId; label: string; key: string }[] = [
   { id: "analysis", label: "Análisis", key: "1" },
-  { id: "servers", label: "Servidores", key: "2" },
-  { id: "terminal", label: "Registro técnico", key: "3" },
+  { id: "chat", label: "Chat", key: "2" },
+  { id: "servers", label: "Servidores", key: "3" },
+  { id: "terminal", label: "Registro técnico", key: "4" },
 ];
 
 function initialMode(): Mode {
@@ -85,7 +88,7 @@ export function App() {
     history.replaceState(null, "", url);
   }, [mode]);
 
-  // Presenter keys: 1–3 switch views, space pauses the replay.
+  // Presenter keys: 1–4 switch views, space pauses the replay.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement && e.target.closest("input, select, textarea, dialog, .xterm")) return;
@@ -176,6 +179,10 @@ export function App() {
 
       <main className="stage">
         {view === "analysis" && <AnalysisView snap={snap} runName={selectedRun} />}
+        {/* Kept mounted so switching views does not lose the conversation. */}
+        <div hidden={view !== "chat"}>
+          <ChatView mode={mode} />
+        </div>
         {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
         {/* Kept mounted once opened: disposing xterm with writes still queued
             throws inside xterm ("reading 'dimensions'"). */}

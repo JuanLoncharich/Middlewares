@@ -40,6 +40,9 @@
 #   DEPLOY_UI=1        deploy the demo/live UI (namespace mcp-eval-ui, frontend/deploy/):
 #                      read-only RBAC on the eval CRs. Default 0; on for the k0s cluster.
 #   UI_IMG             UI image (default $IMG_REGISTRY/mcp-eval-ui:$IMG_TAG, built from frontend/)
+#   DEPLOY_UI_CHAT=0   leave out the UI chat (frontend/deploy/ui-chat.yaml): a tool-less OpenCode
+#                      server whose only provider is Occludra, plus the policies that let the UI
+#                      reach it and read Occludra's request journal. Default: same as DEPLOY_UI.
 #   ---- security layers (Vigil / Occludra / NetBird) ----
 #   DEPLOY_SECURITY_GATEWAYS=0   skip the security-gateways namespace (default: deploy it)
 #   MESH_ENFORCE=false           legacy mode: strip the NetBird sidecars and let the evaluator
@@ -126,6 +129,7 @@ SKIP_SECRET="${SKIP_SECRET:-0}"
 TRIGGER="${TRIGGER:-1}"
 DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
 DEPLOY_UI="${DEPLOY_UI:-0}"
+DEPLOY_UI_CHAT="${DEPLOY_UI_CHAT:-$DEPLOY_UI}"
 MESH_ENFORCE="${MESH_ENFORCE:-true}"
 AUTOSCALE_METRICS="${AUTOSCALE_METRICS:-0}"
 DEPLOY_AUTOSCALER="${DEPLOY_AUTOSCALER:-0}"
@@ -539,7 +543,63 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$DEPLOY_UI" = "1" ]; then
   log "Deploying the UI (namespace mcp-eval-ui, read-only)"
-  sed "s|__UI_IMG__|$UI_IMG|g" frontend/deploy/mcp-eval-ui.yaml | kubectl apply -f -
+  if [ "$DEPLOY_UI_CHAT" = "1" ]; then
+    UI_CHAT_URL="http://opencode-chat.mcp-eval-ui.svc.cluster.local:4096"
+    UI_CHAT_INSPECT_URL="http://occludra-service.security-gateways.svc.cluster.local:8081"
+  else
+    UI_CHAT_URL=""
+    UI_CHAT_INSPECT_URL=""
+  fi
+  sed -e "s|__UI_IMG__|$UI_IMG|g" \
+      -e "s|__CHAT_URL__|$UI_CHAT_URL|g" \
+      -e "s|__CHAT_MODEL__|$LLM_PROVIDER_ID/$LLM_MODEL|g" \
+      -e "s|__OCCLUDRA_INSPECT_URL__|$UI_CHAT_INSPECT_URL|g" \
+      frontend/deploy/mcp-eval-ui.yaml | kubectl apply -f -
+  if [ "$DEPLOY_UI_CHAT" = "1" ]; then
+    log "Deploying the UI chat (OpenCode without tools, model via Occludra)"
+    # Same provider block the runner gives the agents (runner/src/evaluator.ts
+    # bootOpencode), pointed at Occludra's ClusterIP and tagged so Occludra
+    # journals these calls. JSON goes in with python, not sed: it has quotes.
+    EVALUATOR_IMG="$EVALUATOR_IMG" LLM_PROVIDER_ID="$LLM_PROVIDER_ID" LLM_MODEL="$LLM_MODEL" \
+    LLM_CONTEXT_TOKENS="$LLM_CONTEXT_TOKENS" python3 - <<'CHAT' | kubectl apply -f -
+import json, os
+pid, model = os.environ["LLM_PROVIDER_ID"], os.environ["LLM_MODEL"]
+options = {
+    "baseURL": "http://occludra-service.security-gateways.svc.cluster.local:8080/v1",
+    "headers": {"X-Occludra-Client": "ui-chat"},
+}
+if pid in ("opencode", "anthropic"):
+    provider = {"options": options}
+else:
+    context = int(os.environ.get("LLM_CONTEXT_TOKENS") or 128000)
+    provider = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": pid,
+        "options": {**options, "apiKey": "egress-via-occludra"},
+        "models": {model: {"name": model, "tool_call": False,
+                           "limit": {"context": context, "output": min(8192, context // 4)}}},
+    }
+config = {
+    "model": f"{pid}/{model}",
+    "permission": "deny",
+    "autoupdate": False,
+    "share": "disabled",
+    "snapshot": False,
+    "provider": {pid: provider},
+    # A short system prompt instead of OpenCode's coding-agent one: the chat
+    # has no tools, and Occludra's counts then reflect what the person wrote.
+    "agent": {"build": {"prompt": "Sos el asistente de la plataforma MCP Eval. Respondé en español, breve y claro. "
+                                  "No tenés herramientas: no podés leer archivos, ejecutar comandos ni navegar."}},
+}
+text = open("frontend/deploy/ui-chat.yaml").read()
+text = text.replace("__EVALUATOR_IMG__", os.environ["EVALUATOR_IMG"])
+text = text.replace("__OPENCODE_CONFIG__", json.dumps(json.dumps(config, ensure_ascii=False), ensure_ascii=False))
+print(text)
+CHAT
+  else
+    kubectl delete -n mcp-eval-ui deploy/opencode-chat svc/opencode-chat networkpolicy/opencode-chat networkpolicy/mcp-eval-ui-chat --ignore-not-found
+    kubectl delete -n security-gateways networkpolicy/occludra-from-ui-chat --ignore-not-found
+  fi
   # The UI watches the CRs through the API server. NetworkPolicies match its
   # real endpoint (after the Service DNAT), which differs per cluster, so this
   # egress rule is rendered from the cluster's endpoints, like Chroma's.

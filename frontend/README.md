@@ -38,7 +38,7 @@ KUBECONFIG=$PWD/test/.fake-kubeconfig npm run live
 
 | Tecla | Acción |
 |---|---|
-| `1` a `3` | Análisis, Servidores, Registro técnico |
+| `1` a `4` | Análisis, Chat, Servidores, Registro técnico |
 | `espacio` | Pausar o reanudar la demo |
 
 El selector Claro/Oscuro de la barra superior cambia el tema y lo recuerda en
@@ -99,10 +99,36 @@ ConfigMap `<run>-report`. El flujo del prompt se deriva igual en los dos modos
 - El backend usa permisos de solo lectura: `get/list/watch` de los tres CRDs,
   `get` de ConfigMaps, `get/list` de pods y `get` de `pods/log`. No tiene
   `pods/exec` ni acceso a Secrets.
+- La única ruta que manda algo es `POST /api/chat`: una pregunta al OpenCode
+  del chat (abajo). Chequea `Origin` igual que el WebSocket.
 - La terminal no tiene stdin. Solo muestra el contenedor `evaluator`; los
   logs de `target` (el servidor no confiable) y de `cloner` nunca se leen.
 - El runner enmascara prompts, payloads y credenciales antes de escribir cada
   línea, así que la terminal no expone evidencia.
+
+## El chat
+
+La vista Chat le pregunta al modelo por el mismo camino que usan los agentes y
+muestra, para cada respuesta, por dónde pasó: servidor de la UI → OpenCode →
+Occludra (qué tapó) → la PC por ZeroTier → LFM en la GPU → vuelta.
+
+- `frontend/deploy/ui-chat.yaml`: un Deployment `opencode-chat` (imagen del
+  runner, `opencode serve`) con todas las herramientas denegadas, sin token de
+  ServiceAccount, no-root y con filesystem de solo lectura. Su único proveedor
+  es Occludra (`occludra-service:8080`), con el header
+  `X-Occludra-Client: ui-chat`. `deploy.sh` arma la configuración con
+  `LLM_PROVIDER`/`LLM_MODEL`; `DEPLOY_UI_CHAT=0` lo deja afuera.
+- Occludra anota esas llamadas en su registro (`journal.go`): solo cuentas por
+  detector, estado, tiempos y tamaños, nunca el texto. La UI lo lee en el
+  puerto 8081, que solo está abierto para el pod de la UI.
+- `server/chat.ts` atiende de a una pregunta por vez (el modelo es una sola
+  GPU) y devuelve la respuesta con las llamadas que vio Occludra.
+- En modo demo el chat está desactivado: usa el modelo de verdad.
+
+Para probarlo con `npm run live`, apuntá `CHAT_URL` a un OpenCode y
+`OCCLUDRA_INSPECT_URL` al registro de Occludra, por ejemplo con
+`kubectl -n mcp-eval-ui port-forward svc/opencode-chat 4096` y
+`kubectl -n security-gateways port-forward svc/occludra-service 8081`.
 
 ## Supuestos sobre los datos
 
@@ -120,9 +146,9 @@ ConfigMap `<run>-report`. El flujo del prompt se deriva igual en los dos modos
 - **Logs en live.** Los logs existen mientras exista el pod: el Job se borra 10
   minutos después de terminar (`ttlSecondsAfterFinished: 600`). Los runs
   viejos muestran veredicto y report, pero no el flujo.
-- **Sesión de OpenCode.** La sesión interna (`127.0.0.1:4096` dentro del pod)
-  no se expone, a propósito. Lo que se ve es el log del evaluator, que es
-  quien la maneja.
+- **Sesión de OpenCode de las evaluaciones.** La sesión interna
+  (`127.0.0.1:4096` dentro del pod de evaluación) no se expone, a propósito:
+  ese pod corre el servidor no confiable. El chat usa otro OpenCode, aparte.
 - **Repositorios de la demo.** Son ficticios, salvo `filesystem-mcp`, que es el
   sample del repo.
 

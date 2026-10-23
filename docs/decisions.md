@@ -342,3 +342,34 @@ Decisions made before this log existed are not back-filled here.
   scan outage; set `VIGIL_REPLICAS=2 VIGIL_HPA_MIN=2 VIGIL_MAX_UNAVAILABLE=0`
   on big nodes).
 - **Who decided:** Juan.
+
+### 2026-10-23 — UI: the run told as a plain-language story
+- **Decision:** replace the prompt-flow and lifecycle views with one
+  "Análisis" view: each check of a run says what it does, what it found and
+  what it concluded, with the technical detail behind a disclosure.
+- **Reason:** the old views explained the infrastructure, not the analysis,
+  and assumed Kubernetes vocabulary.
+- **Alternatives:** polish the four existing views (cheaper, still confusing);
+  rewrite on a component library (more dependencies, throws away tested code).
+- **Who decided:** Juan.
+
+### 2026-10-23 — UI chat through OpenCode in the cluster, model on the PC GPU
+- **Decision:** a tool-less OpenCode server in `mcp-eval-ui` whose only
+  provider is Occludra; the UI shows each answer's path using a new
+  metadata-only request journal in Occludra (separate port 8081). The model
+  stays the local LFM on Juan's GPU.
+- **Reason:** shows the real egress path of the platform end to end.
+- **Alternatives:** chat straight to Occludra without OpenCode (simpler, but
+  not "the OpenCode chat"); the Docker workstation outside the cluster (only
+  works on one machine).
+- **Who decided:** Juan (approach and model); Claude (journal on its own port,
+  short system prompt so Occludra's counts reflect what the person wrote).
+
+### 2026-10-23 — Occludra detector order: credentials first
+- **Decision:** move `api-key`, `bearer-token`, `password-context` and
+  `secret-assignment` ahead of the PII detectors.
+- **Reason:** found through the chat: `phone-intl` ran first, masked only the
+  digits inside a GitHub token and broke the `api-key` match, so the rest of
+  the token reached the model (also OpenAI, AWS and Bearer shapes).
+  `policy_test.go` pins it.
+- **Who decided:** Claude (bug fix); flagged to Juan.
