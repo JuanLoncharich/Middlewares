@@ -44,6 +44,8 @@ export class DemoSource implements DataSource {
   private active: Playback | null = null;
   private bg: Playback | null = null;
   private bgIdleMs = 0;
+  /** Virtual wall clock: advances only while playing, at the chosen speed. */
+  private vnow = Date.now();
   private replay: ReplayState;
   private readonly replayListeners = new Set<() => void>();
 
@@ -110,7 +112,9 @@ export class DemoSource implements DataSource {
   skipToEnd(): void {
     if (!this.active) return;
     this.active.elapsed = this.active.scenario.durationMs;
-    this.advance(this.active);
+    this.advance(this.active, true);
+    this.vnow = Math.max(this.vnow, this.active.startWall + this.active.elapsed);
+    this.snap = { ...this.snap, now: this.vnow };
     this.emit();
     this.setReplay({ elapsedMs: this.active.elapsed });
   }
@@ -124,7 +128,9 @@ export class DemoSource implements DataSource {
 
   private reset(): void {
     const now = Date.now();
+    this.vnow = now;
     const snap = emptySnapshot();
+    snap.now = now;
     for (const a of DEMO_AGENTS) snap.agents[a.metadata.name] = a;
     this.snap = snap;
 
@@ -134,7 +140,7 @@ export class DemoSource implements DataSource {
       for (const daysAgo of [2, 1]) {
         const pb = this.newPlayback(sc, now - daysAgo * 24 * HOUR - (i + 1) * HOUR);
         pb.elapsed = sc.durationMs;
-        this.advance(pb);
+        this.advance(pb, true);
       }
     });
 
@@ -143,7 +149,7 @@ export class DemoSource implements DataSource {
     this.bg = this.newPlayback(BACKGROUND, now - BACKGROUND_OFFSET_MS);
     this.bg.elapsed = BACKGROUND_OFFSET_MS;
     this.bgIdleMs = 0;
-    this.advance(this.bg);
+    this.advance(this.bg, true);
     this.advance(this.active);
     this.emit();
     this.setReplay({ elapsedMs: 0, durationMs: scenario.durationMs, playing: true });
@@ -188,7 +194,8 @@ export class DemoSource implements DataSource {
   private tick(): void {
     if (!this.replay.playing) return;
     const delta = TICK_MS * this.replay.speed;
-    let changed = false;
+    this.vnow += delta;
+    let changed = true;
 
     if (this.active) {
       this.active.elapsed = Math.min(this.active.elapsed + delta, this.active.scenario.durationMs);
@@ -202,29 +209,37 @@ export class DemoSource implements DataSource {
         changed = this.advance(this.bg) || changed;
       } else if ((this.bgIdleMs += delta) > BACKGROUND_PAUSE_MS) {
         // The cron fires again: a fresh background run.
-        this.bg = this.newPlayback(BACKGROUND, Date.now());
+        this.bg = this.newPlayback(BACKGROUND, this.vnow);
         this.bgIdleMs = 0;
         changed = true;
       }
     }
 
-    if (changed) this.emit();
+    if (changed) {
+      this.snap = { ...this.snap, now: this.vnow };
+      this.emit();
+    }
   }
 
-  /** Applies every step due at the playback's elapsed time; true if any applied. */
-  private advance(pb: Playback): boolean {
+  /**
+   * Applies every step due at the playback's elapsed time; true if any applied.
+   * `scripted` stamps steps with their scripted offset (history, catch-up);
+   * otherwise they carry the virtual clock, so times match what the UI shows.
+   */
+  private advance(pb: Playback, scripted = false): boolean {
     const steps = pb.scenario.steps;
     let applied = false;
     while (pb.cursor < steps.length && steps[pb.cursor]!.at <= pb.elapsed) {
-      this.apply(pb, steps[pb.cursor]!);
+      const step = steps[pb.cursor]!;
+      this.apply(pb, step, scripted ? pb.startWall + step.at : this.vnow);
       pb.cursor += 1;
       applied = true;
     }
     return applied;
   }
 
-  private apply(pb: Playback, step: Step): void {
-    const ts = new Date(pb.startWall + step.at).toISOString();
+  private apply(pb: Playback, step: Step, at: number): void {
+    const ts = new Date(at).toISOString();
     const runName = pb.runName;
     switch (step.kind) {
       case "status": {

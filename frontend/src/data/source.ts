@@ -24,6 +24,8 @@ export interface Snapshot {
   /** Gateway-wide Occludra redaction counts (live, when PROM_URL is set). */
   gateway: { redactions: Redaction[]; window: string } | null;
   connection: Connection;
+  /** Demo: the replay's virtual clock (ms since epoch). Live: null, use Date.now(). */
+  now: number | null;
 }
 
 export interface ReplayState {
@@ -45,7 +47,7 @@ export interface DataSource {
 }
 
 export function emptySnapshot(connection: Connection = { state: "open" }): Snapshot {
-  return { servers: {}, runs: {}, agents: {}, reports: {}, logs: {}, extras: {}, gateway: null, connection };
+  return { servers: {}, runs: {}, agents: {}, reports: {}, logs: {}, extras: {}, gateway: null, connection, now: null };
 }
 
 /**

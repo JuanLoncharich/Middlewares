@@ -5,13 +5,17 @@ import { useReplay, useSnapshot } from "./data/hooks.ts";
 import { LiveSource } from "./data/live.ts";
 import type { Mode, Snapshot } from "./data/source.ts";
 import { isTerminal } from "./model/crd.ts";
+import { LifecycleView } from "./views/LifecycleView.tsx";
 import { ServerDetail } from "./views/ServerDetail.tsx";
 import { ServersView } from "./views/ServersView.tsx";
 import "./styles/app.css";
 
-type ViewId = "servers";
+type ViewId = "lifecycle" | "servers";
 
-const VIEWS: { id: ViewId; label: string; key: string }[] = [{ id: "servers", label: "Servidores", key: "1" }];
+const VIEWS: { id: ViewId; label: string; key: string }[] = [
+  { id: "lifecycle", label: "Ciclo de vida", key: "2" },
+  { id: "servers", label: "Servidores", key: "3" },
+];
 
 function initialMode(): Mode {
   return new URLSearchParams(location.search).get("mode") === "live" ? "live" : "demo";
@@ -134,6 +138,7 @@ export function App() {
       )}
 
       <main className="stage">
+        {view === "lifecycle" && <LifecycleView snap={snap} runName={selectedRun} />}
         {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
       </main>
 
@@ -146,6 +151,7 @@ export function App() {
           onShowRun={(run) => {
             setSelectedRun(run);
             setOpenServer(null);
+            setView("lifecycle");
           }}
         />
       )}
