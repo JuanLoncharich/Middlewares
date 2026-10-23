@@ -86,6 +86,15 @@ policy targets this cluster's real API endpoints, read from the
 `kubernetes` EndpointSlice, because NetworkPolicies see traffic after the
 Service DNAT.
 
+The vendored chart is never edited. `hack/chroma/post-render.sh` applies the
+strategic-merge patches in `patches/` to its rendered output with kustomize.
+Today there is one: the garbage collector waits for the sysdb schema. If it
+starts before `sysdb-migration` has created the tables, its first pass
+panics and it never runs again while the process stays up. On 2026-10-15
+that left it idle for 8 days. Old segment versions and the blocks of failed
+compactions filled MinIO's 20 GiB with about 450 MB of live data. A healthy
+collector logs `Garbage collection completed` every minute.
+
 Measured on k0s (2026-10-15, query and compaction at 1 replica each, corpus
 loaded): about 770 MiB of RAM for the whole namespace. MinIO, the compactor
 and the query node use about 170–190 MiB each; everything else uses under

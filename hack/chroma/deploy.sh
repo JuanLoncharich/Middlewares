@@ -119,6 +119,7 @@ else
     --set-file rustSysdbService.configuration=manifests/chroma/worker-config.yaml \
     --set-file workQueueService.configuration=manifests/chroma/worker-config.yaml \
     --set-file fnConsumer.configuration=manifests/chroma/worker-config.yaml \
+    | hack/chroma/post-render.sh \
     | sed "s|__CHROMA_IMG_TAG__|$CHROMA_IMG_TAG|g" \
     | k apply -f -
   # The components find each other through MemberList custom resources and

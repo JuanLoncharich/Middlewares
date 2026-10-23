@@ -737,9 +737,9 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: chroma
   labels:
     name: chroma
+  name: chroma
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
 ---

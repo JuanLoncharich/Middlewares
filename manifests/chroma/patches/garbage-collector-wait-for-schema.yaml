@@ -1,0 +1,34 @@
+# The garbage collector must not start before sysdb-migration has created the
+# catalog tables. Its first pass then fails ("relation collections does not
+# exist"), the handler panics before scheduling the next pass, and the process
+# stays up doing nothing: on 2026-10-15 that left it idle for 8 days while
+# old segment versions filled MinIO. Postgres and the migration Job come up
+# together on a fresh install, so the pod waits here instead.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: garbage-collector
+  namespace: chroma
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-for-sysdb-schema
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until [ "$(psql -tAc "select to_regclass('collections') is not null and to_regclass('attached_functions') is not null" 2>/dev/null)" = t ]; do
+                echo "waiting for the sysdb schema (sysdb-migration)"; sleep 5
+              done
+          env:
+            # Same credentials as values-mcp-eval.yaml (sysdbMigration).
+            - {name: PGHOST, value: postgres}
+            - {name: PGUSER, value: chroma}
+            - {name: PGPASSWORD, value: chroma}
+            - {name: PGDATABASE, value: sysdb}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
