@@ -187,8 +187,9 @@ evaluation data path. Deployed by `deploy.sh`, or individually with
   with our patches (`images/vigil-llm/Dockerfile` lists them); upstream
   publishes no image. `SKIP_BUILD=1` + `VIGIL_IMG` is the air-gap path;
   models download from HuggingFace at boot. Pods scale via HPA (CPU 70 %,
-  `VIGIL_HPA_MIN`→8) with a PDB at 50 %; on laptop-class nodes deploy with
-  `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1`.
+  `VIGIL_HPA_MIN`→8) from one replica by default (PDB maxUnavailable 1); on
+  big nodes `VIGIL_REPLICAS=2 VIGIL_HPA_MIN=2 VIGIL_MAX_UNAVAILABLE=0` gives
+  zero-downtime rollouts.
 * **Occludra** (outbound) — every OpenCode provider is pinned to
   `occludra-service:8080/v1` (`OCCLUDRA_BASE_URL`): the gateway regex-scrubs
   PII (emails, SSNs, phone numbers, IBANs) and credential-looking strings from
@@ -264,7 +265,7 @@ The exception is a **strict-mode Vigil detection**, which remains a hard abort
 | Transient API/etcd error creating a Job | controller-runtime backoff-retry (only validation errors fail the run) |
 | Pod evicted / node lost / image-pull flake / OOM kill | run controller recreates the Job, bounded by `status.retries ≤ 2`; evaluation-verdict failures are never retried |
 | Pod stuck Pending (pull/scheduling) | detected after 5 min without container progress → same bounded retry instead of burning the whole deadline |
-| Vigil/Occludra replica loss | 2 replicas each, PDB, node spread, HTTP health probes with startupProbe; netbird TUN sidecars liveness-probed |
+| Vigil/Occludra replica loss | 1 replica each by default (HPA adds more under load), PDB maxUnavailable 1, node spread, HTTP health probes with startupProbe; netbird TUN sidecars liveness-probed |
 | Evaluator crash (uncaught exception / rejection) | process-level handler patches `phase: Failed` + termination message before exit |
 | Terminal status patch lost to an API outage | terminal patches get extended backoff + one final `flushTerminalPatch()` from the shutdown path; the termination message is the last-resort copy the run controller reads back |
 | NetBird sidecar slow to enroll | evaluator waits for the SOCKS5 proxy to accept connections (`MESH_READY_TIMEOUT_MS`, default 60s) before the first security-gateway call |
@@ -272,7 +273,7 @@ The exception is a **strict-mode Vigil detection**, which remains a hard abort
 | Stale per-run NetworkPolicies | deleted when the run reaches a terminal phase (owner-ref GC remains the backstop) |
 | Deploying mesh mode without a setup key | `deploy.sh` hard-fails instead of shipping a platform whose runs cannot reach the gateways |
 | Many runs due at once | run reconciler uses 8 concurrent workers (4 for the cron scheduler) — no serialization at the control plane |
-| Gateway saturation (too many concurrent runs) | Vigil and Occludra autoscale via HPA (CPU 70 %, 2→8 replicas); at per-replica capacity limits they answer 503 + Retry-After and the evaluator backs off and retries |
+| Gateway saturation (too many concurrent runs) | Vigil and Occludra autoscale via HPA (CPU 70 %, 1→8 replicas); at per-replica capacity limits they answer 503 + Retry-After and the evaluator backs off and retries |
 | Cluster out of node capacity (OpenStack) | Cluster Autoscaler (`DEPLOY_AUTOSCALER=openstack`) boots an ephemeral Nova VM into the worker group for the pending run/gateway pods and deletes it again ~5 min after it goes idle; running evaluations are never preempted for scale-in |
 
 ### Scaling knobs

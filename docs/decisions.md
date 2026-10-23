@@ -310,3 +310,35 @@ Decisions made before this log existed are not back-filled here.
 - **Alternatives:** kNN only (v2); a small MLP head (similar results in the
   study, more to maintain); fine-tuning the embedder (much more work and GPU).
 - **Who decided:** Juan.
+
+### 2026-10-22 — Kubernetes evicts pods before a VM runs out of memory
+- **Decision:** k0s worker profiles (`deploy/k0s-nodes/`). Workers reserve
+  350 MiB for the OS and 250 MiB for Kubernetes, and evict below 500 MiB
+  free for a minute or 250 MiB at once. The control plane (nodo-g1-2) now
+  takes pods, but only when the workers are full (taint PreferNoSchedule),
+  with 1.5 GiB reserved for etcd/API server and eviction once memory use
+  reaches 75 %. Every platform namespace gets a LimitRange (default request
+  64 MiB, limit 256 MiB for containers that set none), the corpus loader a
+  low PriorityClass (`mcp-eval-batch`, evicted first, never preempts), and
+  one-replica PDBs allow drains (`maxUnavailable: 1`).
+- **Reason:** nodo-g1-3 hung on 2026-10-21 and ended in OpenStack ERROR. With
+  the k0s defaults the kubelet reserved nothing and evicted only below
+  100 MiB, but a VM without swap stalls well before that. Pod limits on the
+  workers added up to 230 % of their memory.
+- **Alternatives:** swap on the VMs (slower and still no eviction); limits
+  equal to requests everywhere (wastes the little memory there is); waiting
+  for bigger VMs (requested from the admin; this stays useful then).
+- **Who decided:** Juan (both layers, control plane with a 75 % eviction
+  threshold); the values are the agent's.
+
+### 2026-10-22 — One replica by default; the HPA scales out
+- **Decision:** `deploy.sh` defaults to one replica of Vigil, Occludra, the
+  operator and Chroma's query/compaction services. Vigil and Occludra keep
+  their HPAs (CPU 70 %, up to 8). Vigil rollouts replace the pod instead of
+  surging a second ~3 GiB one.
+- **Reason:** few concurrent users, small nodes. A second replica of each
+  cost memory the cluster does not have.
+- **Alternatives:** two replicas with PDBs (survives losing a node with no
+  scan outage; set `VIGIL_REPLICAS=2 VIGIL_HPA_MIN=2 VIGIL_MAX_UNAVAILABLE=0`
+  on big nodes).
+- **Who decided:** Juan.

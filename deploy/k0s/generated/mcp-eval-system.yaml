@@ -101,7 +101,7 @@ metadata:
   name: mcp-eval-controller-manager
   namespace: mcp-eval-system
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/part-of: mcp-eval-operator
@@ -129,11 +129,11 @@ spec:
         - /manager
         env:
         - name: CLONER_IMAGE
-          value: docker.io/jjhonson/mcp-cloner:sha-a53311a
+          value: docker.io/jjhonson/mcp-cloner:sha-8bedb8d
         - name: TARGET_IMAGE
-          value: docker.io/jjhonson/mcp-target-sandbox:sha-a53311a
+          value: docker.io/jjhonson/mcp-target-sandbox:sha-8bedb8d
         - name: EVALUATOR_IMAGE
-          value: docker.io/jjhonson/mcp-evaluator:sha-a53311a
+          value: docker.io/jjhonson/mcp-evaluator:sha-8bedb8d
         - name: RUNNER_SERVICE_ACCOUNT
           value: mcp-eval-runner
         - name: LLM_SECRET_NAME
@@ -158,7 +158,7 @@ spec:
           value: netbird.selfhosted
         - name: MESH_ENFORCE
           value: 'false'
-        image: docker.io/jjhonson/mcp-eval-operator:sha-a53311a
+        image: docker.io/jjhonson/mcp-eval-operator:sha-8bedb8d
         imagePullPolicy: Always
         livenessProbe:
           httpGet:
@@ -226,7 +226,7 @@ metadata:
   name: mcp-eval-controller-manager
   namespace: mcp-eval-system
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/part-of: mcp-eval-operator
@@ -273,3 +273,20 @@ spec:
       control-plane: controller-manager
   policyTypes:
   - Ingress
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  namespace: mcp-eval-system
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 500m
+      memory: 256Mi

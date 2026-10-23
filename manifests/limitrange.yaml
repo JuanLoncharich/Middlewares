@@ -1,0 +1,21 @@
+# Defaults for any container in the platform's namespaces that does not set
+# its own requests/limits (deploy.sh applies this file with -n <namespace>).
+# Every workload we ship sets both; this is the safety net so that nothing
+# lands on a node with no memory limit and no request — invisible to the
+# scheduler and unbounded on the node, which is how a small VM gets pushed
+# into a kernel-level OOM hang instead of a single pod being killed.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      default:
+        cpu: 500m
+        memory: 256Mi

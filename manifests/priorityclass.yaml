@@ -15,3 +15,19 @@ description: >-
   Vigil and Occludra gateways). Prevents node pressure from evicting the
   evaluation platform's brain and security perimeter in favour of lower-value
   workloads.
+---
+# Batch work that can always be re-run (the Vigil corpus loader): under node
+# memory pressure the kubelet evicts it before anything serving traffic, and
+# it never preempts other pods to get scheduled.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: mcp-eval-batch
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+value: -1000
+globalDefault: false
+preemptionPolicy: Never
+description: >-
+  Re-runnable batch jobs of the MCP security evaluation platform (corpus
+  loads). First to be evicted under node pressure; never preempts.

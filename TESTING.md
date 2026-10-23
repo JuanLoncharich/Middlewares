@@ -55,10 +55,10 @@ OPENCODE_API_KEY=<tu-zen-key> \
 
 > **Nodo laptop (RAM limitada)**: las réplicas de vigil cargan sus modelos de
 > clasificación al arranque y son memory-hungry (el footprint exacto depende
-> de la imagen que pinées vía `VIGIL_IMG`). En un nodo único chico
-> agregá `VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1 VIGIL_MAX_UNAVAILABLE=1` al
-> comando anterior o la segunda réplica puede morir por OOM durante los
-> rollouts.
+> de la imagen que pinées vía `VIGIL_IMG`). Por eso los defaults son una
+> réplica y rollouts sin surge (`VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1
+> VIGIL_MAX_UNAVAILABLE=1`); en nodos grandes, `2 / 2 / 0` evita el corte
+> durante los rollouts.
 > `AUTOSCALE_METRICS=1` instala metrics-server para que el HPA (CPU 70 %,
 > min `VIGIL_HPA_MIN` → 8) tenga métricas reales.
 

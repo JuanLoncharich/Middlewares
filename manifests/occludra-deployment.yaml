@@ -149,7 +149,7 @@ metadata:
     app.kubernetes.io/component: ai-gateway
     app.kubernetes.io/part-of: mcp-eval-platform
 spec:
-  replicas: 2
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -391,8 +391,9 @@ metadata:
   name: occludra
   namespace: security-gateways
 spec:
-  # Percentage so the budget scales with the HPA (min 50% of N replicas).
-  minAvailable: 50%
+  # One pod at a time may go (drains, node-pressure moves). A percentage
+  # minAvailable rounds up to every pod at one replica and blocks any drain.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: occludra
@@ -415,7 +416,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: occludra
-  minReplicas: 2
+  minReplicas: 1
   maxReplicas: 8
   metrics:
     - type: Resource

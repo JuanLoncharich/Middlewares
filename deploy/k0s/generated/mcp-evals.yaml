@@ -753,6 +753,23 @@ spec:
     \ with JSON matching the required schema.\n"
 ---
 apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  namespace: mcp-evals
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 500m
+      memory: 256Mi
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mcp-eval-runner
