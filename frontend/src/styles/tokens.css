@@ -1,0 +1,53 @@
+/*
+ * Tokens. The page is projected, so it stays light (projectors wash out dark
+ * backgrounds) and every colour pair clears WCAG AA at body size.
+ * The idea is a customs airlock: a parcel crosses inspection posts.
+ */
+:root {
+  --paper: #e6ecef;
+  --paper-raised: #f4f7f8;
+  --ink: #132238;
+  --steel: #5a6b80;
+  --rule: #b9c5cf;
+
+  --quarantine: #d99a0b;      /* in progress */
+  --quarantine-ink: #7a5300;  /* amber text on paper */
+  --cleared: #1c7a6a;         /* approved / scanner passed */
+  --rejected: #b3261e;        /* blocked / rejected */
+  --warning-wash: #f6e7c0;
+  --rejected-wash: #f4d9d6;
+  --cleared-wash: #d3ebe5;
+
+  --terminal-bg: #132238;
+  --terminal-fg: #e6ecef;
+
+  --font-sans: "Archivo Variable", "Archivo", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /* Modular scale, ratio 1.25 from a 20px body (reads from the back row). */
+  --step--1: 1rem;
+  --step-0: 1.25rem;
+  --step-1: 1.5625rem;
+  --step-2: 1.953rem;
+  --step-3: 2.441rem;
+  --step-4: 3.052rem;
+
+  --space-1: 0.375rem;
+  --space-2: 0.75rem;
+  --space-3: 1.25rem;
+  --space-4: 2rem;
+  --space-5: 3.25rem;
+
+  --radius-station: 14px;   /* inspection posts */
+  --radius-tag: 4px;        /* small status tags */
+
+  --ease: cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

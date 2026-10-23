@@ -1,0 +1,35 @@
+html {
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--step-0);
+  line-height: 1.45;
+  font-variation-settings: "wdth" 100;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+  margin: 0;
+  line-height: 1.1;
+  font-weight: 700;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 3px solid var(--quarantine);
+  outline-offset: 3px;
+}
+
+code, kbd, pre {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
