@@ -57,15 +57,31 @@ export function TerminalView({ snap, runName, mode, theme }: Props) {
     const fit = new FitAddon();
     t.loadAddon(fit);
     t.open(host.current);
-    fit.fit();
     term.current = t;
     written.current = { run: null, count: 0 };
-    const onResize = () => fit.fit();
-    window.addEventListener("resize", onResize);
+    // Fit only once the host has a laid-out size, and never after dispose:
+    // fitting synchronously on mount measured a 0×0 box (blank terminal) and a
+    // StrictMode remount let xterm's queued viewport sync hit a disposed
+    // renderer ("reading 'dimensions'").
+    let disposed = false;
+    let frame = 0;
+    const refit = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (!disposed && host.current && host.current.clientWidth > 0) fit.fit();
+      });
+    };
+    const observer = new ResizeObserver(refit);
+    observer.observe(host.current);
+    refit();
     return () => {
-      window.removeEventListener("resize", onResize);
-      t.dispose();
+      disposed = true;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
       term.current = null;
+      // xterm's viewport schedules a sync right after open(); disposing in the
+      // same tick (StrictMode's mount-unmount-mount) makes that sync throw.
+      setTimeout(() => t.dispose(), 100);
     };
   }, []);
 
@@ -95,10 +111,10 @@ export function TerminalView({ snap, runName, mode, theme }: Props) {
   const phase = run?.status?.phase;
 
   return (
-    <div className="bento view terminal-view" aria-label="Terminal de OpenCode">
-      <Tile span={9} rows={3} className="tile-terminal" label="Sesión del evaluator">
+    <div className="bento view terminal-view" aria-label="Registro técnico">
+      <Tile span={9} rows={3} className="tile-terminal" label="Registro del evaluador">
         <header className="terminal-head">
-          <h2>Sesión del evaluator</h2>
+          <h2>Registro del evaluador</h2>
           <p className={`terminal-status ${following ? "terminal-status-live" : ""}`}>
             {!runName ? "Sin run seleccionado" : following ? "Siguiendo en vivo" : `${lines.length} líneas`}
           </p>
