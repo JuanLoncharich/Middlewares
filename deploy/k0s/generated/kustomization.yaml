@@ -6,5 +6,6 @@ resources:
 - _cluster.yaml
 - chroma.yaml
 - mcp-eval-system.yaml
+- mcp-eval-ui.yaml
 - mcp-evals.yaml
 - security-gateways.yaml

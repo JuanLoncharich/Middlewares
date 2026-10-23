@@ -121,22 +121,43 @@ ConfigMap `<run>-report`. El flujo del prompt se deriva igual en los dos modos
 - **Repositorios de la demo.** Son ficticios, salvo `filesystem-mcp`, que es el
   sample del repo.
 
-## Desplegarlo en el cluster (opcional)
+## Desplegarlo en el cluster
+
+La imagen la construye CI (`.github/workflows/images.yml`) en cada push a
+`main`: `docker.io/jjhonson/mcp-eval-ui:sha-<commit>`, nunca `:latest`.
+`deploy.sh` la instala con `DEPLOY_UI=1`, que está activado para el cluster
+k0s (`deploy/k0s/render.env`), así que Flux la despliega sola. Para verla:
+
+```bash
+kubectl -n mcp-eval-ui port-forward svc/mcp-eval-ui 8787:80     # http://localhost:8787/?mode=live
+```
+
+En otro cluster: `DEPLOY_UI=1 IMG_REGISTRY=... ./deploy.sh` (construye,
+pushea y aplica), o solo la imagen y el manifest:
 
 ```bash
 docker build -t $IMG_REGISTRY/mcp-eval-ui:$TAG frontend && docker push $IMG_REGISTRY/mcp-eval-ui:$TAG
-sed "s|ghcr.io/security-eval/mcp-eval-ui:latest|$IMG_REGISTRY/mcp-eval-ui:$TAG|" frontend/deploy/mcp-eval-ui.yaml | kubectl apply -f -
-kubectl -n mcp-eval-ui port-forward svc/mcp-eval-ui 8787:80     # http://localhost:8787/?mode=live
+sed "s|__UI_IMG__|$IMG_REGISTRY/mcp-eval-ui:$TAG|" frontend/deploy/mcp-eval-ui.yaml | kubectl apply -f -
 ```
 
 El manifest crea el namespace `mcp-eval-ui` (PodSecurity `restricted`), un
 Role de solo lectura en `mcp-evals`, el Deployment (no-root, filesystem raíz
-de solo lectura) y una NetworkPolicy sin ingress, con salida solo a DNS, al
-API server y a Prometheus. Para que lleguen los conteos de Occludra, la
-NetworkPolicy `observability-isolation` tiene que aceptar tráfico desde
-`mcp-eval-ui` al puerto 9090; hoy solo acepta pods de su propio namespace.
+de solo lectura) y una NetworkPolicy sin ingress, con salida solo a DNS y a
+Prometheus. La salida al API server es otra NetworkPolicy
+(`mcp-eval-ui-kube-api`) que `deploy.sh` genera con la IP y el puerto reales
+del API server de cada cluster: Calico evalúa la política después del DNAT
+del Service `kubernetes`, así que hay que nombrar el endpoint real, no
+`kubernetes.default`. Sin `deploy.sh`, creala a mano con la salida de
+`kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`.
 
-`deploy.sh` no lo instala todavía.
+Para que lleguen los conteos de Occludra, la NetworkPolicy
+`observability-isolation` tiene que aceptar tráfico desde `mcp-eval-ui` al
+puerto 9090; hoy solo acepta pods de su propio namespace.
+
+El WebSocket (`/api/stream`) solo acepta conexiones cuyo `Origin` sea el de la
+propia página (o sin `Origin`, fuera de un navegador): así ninguna otra web
+abierta en el navegador puede leer los runs a través de un `npm run live`
+local o de un port-forward.
 
 ## Desarrollo
 

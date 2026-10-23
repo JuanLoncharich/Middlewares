@@ -829,3 +829,53 @@ subjects:
 - kind: ServiceAccount
   name: mcp-eval-runner
   namespace: mcp-evals
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-eval-ui-reader
+  namespace: mcp-evals
+rules:
+- apiGroups:
+  - security.eval.io
+  resources:
+  - mcpservers
+  - mcpevaluationruns
+  - opencodeagents
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ''
+  resources:
+  - pods/log
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-eval-ui-reader
+  namespace: mcp-evals
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-eval-ui-reader
+subjects:
+- kind: ServiceAccount
+  name: mcp-eval-ui
+  namespace: mcp-eval-ui
