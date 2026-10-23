@@ -18,6 +18,7 @@ import type { ClientMessage, ServerMessage } from "../src/data/live.ts";
 import { API_VERSION, LABEL_RUN, type MCPEvaluationRun, isTerminal } from "../src/model/crd.ts";
 import { type LogLine, parseLogLine } from "../src/model/logs.ts";
 import type { EvaluationReport } from "../src/model/report.ts";
+import { isSameOrigin } from "./origin.ts";
 
 const NAMESPACE = process.env["NAMESPACE"] ?? "mcp-evals";
 const PORT = Number(process.env["PORT"] ?? 8787);
@@ -360,6 +361,11 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
 server.on("upgrade", (req, socket, head) => {
   if (!req.url?.startsWith("/api/stream")) {
     socket.destroy();
+    return;
+  }
+  if (!isSameOrigin(req.headers.origin, req.headers.host)) {
+    log("websocket from another origin refused", { origin: req.headers.origin });
+    socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => clients.add(new Client(ws)));
