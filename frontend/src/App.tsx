@@ -5,14 +5,16 @@ import { useReplay, useSnapshot } from "./data/hooks.ts";
 import { LiveSource } from "./data/live.ts";
 import type { Mode, Snapshot } from "./data/source.ts";
 import { isTerminal } from "./model/crd.ts";
+import { FlowView } from "./views/FlowView.tsx";
 import { LifecycleView } from "./views/LifecycleView.tsx";
 import { ServerDetail } from "./views/ServerDetail.tsx";
 import { ServersView } from "./views/ServersView.tsx";
 import "./styles/app.css";
 
-type ViewId = "lifecycle" | "servers";
+type ViewId = "flow" | "lifecycle" | "servers";
 
 const VIEWS: { id: ViewId; label: string; key: string }[] = [
+  { id: "flow", label: "Flujo del prompt", key: "1" },
   { id: "lifecycle", label: "Ciclo de vida", key: "2" },
   { id: "servers", label: "Servidores", key: "3" },
 ];
@@ -36,7 +38,7 @@ export function App() {
   const source = mode === "demo" ? demo : live;
   const snap = useSnapshot(source);
   const replay = useReplay(mode === "demo" ? demo : null);
-  const [view, setView] = useState<ViewId>("servers");
+  const [view, setView] = useState<ViewId>("flow");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [openServer, setOpenServer] = useState<string | null>(null);
 
@@ -138,6 +140,7 @@ export function App() {
       )}
 
       <main className="stage">
+        {view === "flow" && <FlowView snap={snap} runName={selectedRun} />}
         {view === "lifecycle" && <LifecycleView snap={snap} runName={selectedRun} />}
         {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
       </main>
