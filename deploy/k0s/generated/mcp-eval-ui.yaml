@@ -155,7 +155,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: opencode
-        image: docker.io/jjhonson/mcp-evaluator:sha-15866c0
+        image: docker.io/jjhonson/mcp-evaluator:sha-f2a76eb
         command:
         - opencode
         - serve
