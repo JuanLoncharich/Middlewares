@@ -94,7 +94,7 @@ spec:
           sizeLimit: 128Mi
       containers:
       - name: gateway
-        image: docker.io/jjhonson/occludra-gateway:sha-d413533
+        image: docker.io/jjhonson/occludra-gateway:sha-15866c0
         imagePullPolicy: Always
         ports:
         - name: http
@@ -549,7 +549,7 @@ spec:
           sizeLimit: 256Mi
       containers:
       - name: vigil
-        image: docker.io/jjhonson/vigil-llm:sha-d413533
+        image: docker.io/jjhonson/vigil-llm:sha-15866c0
         imagePullPolicy: Always
         command:
         - python
