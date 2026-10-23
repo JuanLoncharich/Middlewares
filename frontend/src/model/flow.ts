@@ -20,7 +20,7 @@ export const STATIONS: StationInfo[] = [
   { id: "prompt", name: "Prompt", role: "La evidencia se arma como mensaje para el agente" },
   { id: "occludra", name: "Occludra", role: "Enmascara datos personales y credenciales" },
   { id: "netbird", name: "NetBird", role: "Túnel WireGuard; única salida del sandbox" },
-  { id: "llm", name: "Modelo", role: "Proveedor LLM vía OpenCode Zen" },
+  { id: "llm", name: "Modelo", role: "LFM 2.5 en la GPU de la PC" },
   { id: "agent", name: "Agente", role: "Respuesta estructurada en JSON" },
   { id: "synthesis", name: "Síntesis", role: "SynthesisScorer combina los cuatro informes" },
   { id: "verdict", name: "Veredicto", role: "Puntaje y riesgo escritos en el CR" },

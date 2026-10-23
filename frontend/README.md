@@ -38,7 +38,7 @@ KUBECONFIG=$PWD/test/.fake-kubeconfig npm run live
 
 | Tecla | Acción |
 |---|---|
-| `1` a `4` | Flujo del prompt, Ciclo de vida, Servidores, Terminal |
+| `1` a `3` | Análisis, Servidores, Registro técnico |
 | `espacio` | Pausar o reanudar la demo |
 
 El selector Claro/Oscuro de la barra superior cambia el tema y lo recuerda en
@@ -60,25 +60,30 @@ cron.
 
 ## Vistas
 
-Cada vista es una grilla Bento de 12 columnas: el tamaño de cada mosaico
-marca su importancia y el veredicto es el único mosaico de color sólido.
-
-- **Flujo del prompt.** Cada llamada al modelo recorre las estaciones Servidor
-  MCP → Vigil → Prompt → Occludra → NetBird → Modelo → Agente → Síntesis →
-  Veredicto. Al hacer click en una estación se ve su detalle.
-- **Ciclo de vida.** Las fases del `MCPEvaluationRun` y un carril por agente,
-  sobre un eje de tiempo común.
+- **Análisis.** Un run contado de arriba abajo, para alguien que nunca oyó
+  hablar de MCP: cada paso (caja aislada, auditor estático, Vigil, fuzzer,
+  sonda, síntesis) dice qué hace, qué encontró en este run y qué concluyó.
+  El detalle técnico de cada paso (la respuesta JSON del agente, el modelo y
+  el camino de la consulta por Occludra y NetBird hasta el LFM) queda en un
+  desplegable. Arriba, el sello con el veredicto y una frase que responde
+  "¿lo puedo conectar?"; al final, qué habría que arreglar.
 - **Servidores.** Columnas En evaluación, Aprobados y Rechazados. El detalle
   incluye spec, veredicto, hallazgos e historial.
-- **Terminal.** El log del contenedor `evaluator`, en solo lectura.
+- **Registro técnico.** El log del contenedor `evaluator`, en solo lectura.
+
+La historia sale de `buildStory` (`src/model/story.ts`): primero la respuesta
+estructurada de cada agente en `status.agentResults` (vive con el CR, así que
+sirve también para runs viejos), después el report y, mientras el Job existe,
+los logs.
 
 ## Cómo se arma
 
 ```
 src/model/       tipos espejo de api/v1alpha1 y del report del runner;
-                 flow.ts reconstruye cada llamada a partir de los logs
+                 flow.ts reconstruye cada llamada a partir de los logs;
+                 story.ts arma la historia del run en lenguaje llano
 src/data/        DataSource: DemoSource (replay) y LiveSource (WebSocket)
-src/views/       las cuatro vistas
+src/views/       las vistas; AnalysisView es la principal
 server/live.ts   backend live: watch de CRs, ConfigMap del report, logs del evaluator
 test/            vitest + API server falso
 deploy/          Deployment opcional para el cluster (ver abajo)

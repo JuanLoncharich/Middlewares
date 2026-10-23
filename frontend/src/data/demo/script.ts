@@ -29,7 +29,7 @@ export interface AgentDef {
   kind: AgentKind;
 }
 
-export const MODEL = "opencode/muse-spark-1.3-contributor-free";
+export const MODEL = "local/lfm2.5-24b-a2b";
 
 export const SUITE: AgentDef[] = [
   { name: "mcp-sast-auditor", role: "StaticSecurityAuditor", kind: "static" },
