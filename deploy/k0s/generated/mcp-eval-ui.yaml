@@ -34,7 +34,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: ui
-        image: docker.io/jjhonson/mcp-eval-ui:sha-f2a76eb
+        image: docker.io/jjhonson/mcp-eval-ui:sha-b4d4b4d
         ports:
         - name: http
           containerPort: 8787
@@ -155,7 +155,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: opencode
-        image: docker.io/jjhonson/mcp-evaluator:sha-f2a76eb
+        image: docker.io/jjhonson/mcp-evaluator:sha-b4d4b4d
         command:
         - opencode
         - serve
