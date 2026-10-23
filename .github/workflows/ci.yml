@@ -61,6 +61,26 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+  frontend:
+    name: frontend (typecheck + vitest + build)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # What ships in the image: no known advisory in the runtime dependencies.
+      - run: npm audit --omit=dev
+
   deploy-scripts:
     name: deploy.sh and manifests (offline)
     runs-on: ubuntu-24.04

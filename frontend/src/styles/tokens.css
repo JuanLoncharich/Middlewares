@@ -1,0 +1,146 @@
+/*
+ * MCP Eval brand: four colours and three typefaces.
+ *   #1A1A18 ink, #F0614F coral, #9FE1CB mint, #F4F4F0 paper
+ *   Space Grotesk for the logotype and titles, Inter for the interface,
+ *   JetBrains Mono for the terminal and data.
+ * Meaning: ink is "in progress" (the sandbox), mint is approved, coral is
+ * rejected; a coral outline or wash is a warning, solid coral is a block.
+ * Coral and mint fail contrast as text on paper, so text uses the darker
+ * *-text variants; fills carry ink text.
+ */
+:root {
+  color-scheme: light;
+
+  --page: #f4f4f0;
+  --paper: #ecece6;
+  --paper-raised: #fbfbf8;    /* tile surface */
+  --surface-strong: #ffffff;
+  --ink: #1a1a18;
+  --steel: #5c5c55;
+  --rule: #d6d6cf;
+  --on-accent: #1a1a18;       /* text on a coral or mint fill */
+
+  --progress: #1a1a18;        /* in progress */
+  --progress-ink: #1a1a18;
+  --progress-wash: #e4e4dd;
+
+  --cleared: #9fe1cb;
+  --cleared-text: #1d6e55;
+  --cleared-wash: #def4ec;
+
+  --rejected: #f0614f;
+  --rejected-text: #b5382a;
+  --rejected-wash: #fde3de;
+
+  --warn: #f0614f;
+  --warn-text: #b5382a;
+  --warn-wash: #fdeeea;
+
+  --glow-warn: rgb(240 97 79 / 0.25);
+  --glow-block: rgb(240 97 79 / 0.4);
+  --backdrop: rgb(26 26 24 / 0.4);
+
+  --terminal-bg: #1a1a18;
+  --terminal-fg: #f4f4f0;
+
+  --logo-tile: #1a1a18;
+  --logo-mark: #f4f4f0;
+
+  --font-display: "Space Grotesk Variable", "Space Grotesk", system-ui, sans-serif;
+  --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+
+  /* Modular scale, ratio 1.25 from a 20px body (reads from the back row). */
+  --step--1: 1rem;
+  --step-0: 1.25rem;
+  --step-1: 1.5625rem;
+  --step-2: 1.953rem;
+  --step-3: 2.441rem;
+  --step-4: 3.052rem;
+
+  --space-1: 0.375rem;
+  --space-2: 0.75rem;
+  --space-3: 1.25rem;
+  --space-4: 2rem;
+  --space-5: 3.25rem;
+
+  --bento-gap: 14px;
+  --radius-tile: 22px;      /* bento tiles, same as the logo's */
+  --radius-station: 14px;   /* inspection posts inside a tile */
+  --radius-tag: 6px;        /* small status tags */
+
+  --ease: cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+
+/* Dark: the brand's ink becomes the page; paper becomes the ink. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #1a1a18;
+    --paper: #24241f;
+    --paper-raised: #212120;
+    --surface-strong: #2e2e29;
+    --ink: #f4f4f0;
+    --steel: #aeaea4;
+    --rule: #3c3c36;
+    --on-accent: #1a1a18;
+    --progress: #f4f4f0;
+    --progress-ink: #f4f4f0;
+    --progress-wash: #34342e;
+    --cleared: #9fe1cb;
+    --cleared-text: #9fe1cb;
+    --cleared-wash: #1f3a31;
+    --rejected: #f0614f;
+    --rejected-text: #f58676;
+    --rejected-wash: #3d2420;
+    --warn: #f0614f;
+    --warn-text: #f58676;
+    --warn-wash: #2f2220;
+    --glow-warn: rgb(240 97 79 / 0.3);
+    --glow-block: rgb(240 97 79 / 0.45);
+    --backdrop: rgb(0 0 0 / 0.6);
+    --terminal-bg: #121211;
+    --terminal-fg: #f4f4f0;
+    --logo-tile: #f4f4f0;
+    --logo-mark: #1a1a18;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #1a1a18;
+  --paper: #24241f;
+  --paper-raised: #212120;
+  --surface-strong: #2e2e29;
+  --ink: #f4f4f0;
+  --steel: #aeaea4;
+  --rule: #3c3c36;
+  --on-accent: #1a1a18;
+  --progress: #f4f4f0;
+  --progress-ink: #f4f4f0;
+  --progress-wash: #34342e;
+  --cleared: #9fe1cb;
+  --cleared-text: #9fe1cb;
+  --cleared-wash: #1f3a31;
+  --rejected: #f0614f;
+  --rejected-text: #f58676;
+  --rejected-wash: #3d2420;
+  --warn: #f0614f;
+  --warn-text: #f58676;
+  --warn-wash: #2f2220;
+  --glow-warn: rgb(240 97 79 / 0.3);
+  --glow-block: rgb(240 97 79 / 0.45);
+  --backdrop: rgb(0 0 0 / 0.6);
+  --terminal-bg: #121211;
+  --terminal-fg: #f4f4f0;
+  --logo-tile: #f4f4f0;
+  --logo-mark: #1a1a18;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

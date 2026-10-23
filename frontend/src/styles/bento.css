@@ -1,0 +1,424 @@
+/*
+ * Bento layout. Tiles differ in size by importance: the pipeline spans the
+ * whole width, the verdict is one solid tile whose colour is the answer, and
+ * small stat tiles carry a single number each. Loaded after app.css and
+ * flow.css, so it also re-seats their pieces inside tiles.
+ */
+
+/* --- shell: the bars float as tiles over the page ------------------------- */
+
+.app {
+  gap: var(--bento-gap);
+  padding: var(--bento-gap);
+  background: var(--page);
+}
+
+.topbar,
+.replay,
+.live-bar {
+  border: 1px solid color-mix(in srgb, var(--rule) 55%, transparent);
+  border-radius: var(--radius-tile);
+  background: var(--paper-raised);
+}
+
+.topbar {
+  border-bottom-width: 1px;
+}
+
+.tab { margin-bottom: 0; border-radius: 999px; padding: 0.3rem 0.9rem; border-bottom: 0; }
+.tab-on { background: var(--ink); color: var(--paper); }
+
+.live-open { background: var(--cleared-wash); }
+.live-connecting { background: var(--progress-wash); }
+.live-error { background: var(--rejected-wash); }
+
+.theme-toggle {
+  display: flex;
+  border: 1.5px solid var(--rule);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.theme {
+  border: 0;
+  background: transparent;
+  padding: 0.3rem 0.8rem;
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--steel);
+  cursor: pointer;
+}
+
+.theme-on {
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+
+.stage {
+  padding: 0;
+}
+
+/* --- grid ------------------------------------------------------------------ */
+
+.bento {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-auto-flow: row dense;
+  gap: var(--bento-gap);
+  align-items: stretch;
+}
+
+.tile {
+  min-width: 0;
+  background: var(--paper-raised);
+  border: 1px solid color-mix(in srgb, var(--rule) 55%, transparent);
+  border-radius: var(--radius-tile);
+  padding: var(--space-3);
+}
+
+.span-3 { grid-column: span 3; }
+.span-4 { grid-column: span 4; }
+.span-5 { grid-column: span 5; }
+.span-6 { grid-column: span 6; }
+.span-7 { grid-column: span 7; }
+.span-8 { grid-column: span 8; }
+.span-9 { grid-column: span 9; }
+.span-12 { grid-column: span 12; }
+.rows-2 { grid-row: span 2; }
+.rows-3 { grid-row: span 3; }
+
+.tile-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--steel);
+}
+
+/* Tinted tiles: state without shouting. */
+.tile-evaluating { border: 2px solid var(--progress); }
+.tile-warn { background: var(--warn-wash); border-color: var(--warn); }
+.tile-rejected { background: var(--rejected-wash); border-color: var(--rejected); }
+.tile-approved { background: var(--cleared-wash); border-color: var(--cleared); }
+
+/* --- head and verdict ------------------------------------------------------ */
+
+.tile-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.head-repo {
+  margin: 0;
+  color: var(--steel);
+  font-size: var(--step--1);
+  overflow-wrap: anywhere;
+}
+
+.head-summary {
+  margin: auto 0 0;
+  padding-top: var(--space-3);
+  font-size: var(--step-0);
+  max-width: 60ch;
+}
+
+.head-server {
+  font-size: var(--step-4);
+  overflow-wrap: anywhere;
+}
+
+.head-run {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--steel);
+}
+
+.flow-now {
+  margin: 0 !important;
+  font-weight: 700;
+  color: var(--progress-ink);
+}
+
+/* The verdict tile is the only solid fill on a page. */
+.tile-verdict {
+  display: flex;
+  flex-direction: column;
+  border: 0;
+}
+
+.tile-verdict .tile-title { color: inherit; opacity: 0.8; }
+
+.tile-verdict.tile-approved { background: var(--cleared); color: var(--on-accent); }
+.tile-verdict.tile-rejected { background: var(--rejected); color: var(--on-accent); }
+.tile-verdict.tile-warn { background: var(--warn); color: var(--on-warn); }
+.tile-verdict.tile-evaluating {
+  background: var(--progress-wash);
+  border: 2px solid var(--progress);
+  color: var(--ink);
+}
+
+.tile-verdict.tile-evaluating .verdict-word { color: var(--progress-ink); }
+.verdict-of { font-size: 0.45em; opacity: 0.7; }
+
+.verdict-big {
+  margin: auto 0 0;
+  font-size: clamp(3.5rem, 6vw, 5.5rem);
+  font-weight: 800;
+  line-height: 0.9;
+  font-variant-numeric: tabular-nums;
+}
+
+.verdict-word {
+  margin: var(--space-1) 0 0;
+  font-size: var(--step-1);
+  font-weight: 800;
+}
+
+.verdict-note {
+  margin: var(--space-1) 0 0;
+  font-size: var(--step--1);
+  opacity: 0.85;
+}
+
+/* --- stats ----------------------------------------------------------------- */
+
+.stat { display: grid; gap: 0.15rem; }
+
+.stat-value {
+  margin: 0;
+  font-size: var(--step-4);
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label { margin: 0; font-weight: 600; }
+.stat-note { margin: 0; font-size: var(--step--1); color: var(--steel); }
+
+.tile-stat { display: flex; align-items: flex-end; }
+
+.tile-stats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.tile-stats .stat + .stat {
+  border-top: 1px solid var(--rule);
+  padding-top: var(--space-3);
+}
+
+.tile-stats .stat-value { font-size: var(--step-3); }
+
+/* --- flow ------------------------------------------------------------------ */
+
+.tile-hero { padding: var(--space-4) var(--space-3); }
+.tile-hero .pipeline { margin-bottom: 0; }
+.tile-hero .cut-banner { margin: var(--space-3) 0 0; }
+.tile-hero-cut { border-color: var(--rejected); }
+
+.station-idle { background: var(--paper); }
+.station-pass, .station-fail { background: var(--surface-strong); }
+.trip { background: var(--paper); }
+.trip-on { background: var(--surface-strong); }
+
+.tile-detail .detail {
+  display: block;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tile-detail .detail-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.tile-detail .detail-head p { margin: 0; }
+.tile-detail.tile-rejected .excerpt blockquote { background: var(--paper-raised); }
+
+.flow-waiting-title {
+  font-size: var(--step-2);
+  font-weight: 700;
+  margin: 0 0 var(--space-1);
+}
+
+/* --- lifecycle ------------------------------------------------------------- */
+
+.tile .phases { margin: 0; }
+.tile .lanes { gap: 4px; }
+.tile .lane { background: var(--paper); border-radius: 10px; }
+.tile .lane-head { background: none; }
+
+.tile-banner .banner-lead {
+  margin: 0;
+  font-size: var(--step-0);
+  font-weight: 700;
+}
+
+.tile-warn.tile-banner .banner-lead { color: var(--warn-text); }
+.tile-rejected.tile-banner .banner-lead { color: var(--rejected-text); }
+
+.tile-banner .banner-raw {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+/* --- servers --------------------------------------------------------------- */
+
+.column + .column { border-left: 0; padding-left: var(--space-3); }
+.column-unknown { margin-top: 0; padding-left: var(--space-3) !important; }
+
+.column h2 {
+  font-size: var(--step-2);
+  border-bottom-width: 5px;
+  border-radius: 0;
+}
+
+.ticket {
+  background: var(--paper);
+  border-radius: 0 12px 12px 0;
+}
+
+/* --- terminal -------------------------------------------------------------- */
+
+.tile-terminal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.tile-terminal .terminal-frame {
+  flex: 1;
+  min-height: 28rem;
+  height: auto;
+  border-radius: 14px;
+}
+
+.terminal-head h2 { font-size: var(--step-2); }
+.terminal-head p { margin: 0; }
+
+.side-strong {
+  margin: 0 0 var(--space-1);
+  font-size: var(--step-1);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.tile p.small { margin: 0; line-height: 1.4; }
+
+/* --- drawer ---------------------------------------------------------------- */
+
+.drawer {
+  border-left: 0;
+  border-radius: var(--radius-tile) 0 0 var(--radius-tile);
+}
+
+/* --- narrower screens ------------------------------------------------------ */
+
+@media (max-width: 1100px) {
+  .span-3, .span-4, .span-5 { grid-column: span 6; }
+  .span-7, .span-8, .span-9 { grid-column: span 12; }
+  .tile-verdict { grid-column: span 12; }
+  .rows-3, .rows-2 { grid-row: auto; }
+}
+
+@media (max-width: 700px) {
+  .bento > .tile { grid-column: span 12; }
+  .head-server { font-size: var(--step-3); }
+  .column + .column { padding-left: var(--space-3); }
+}
+
+/* --- brand ----------------------------------------------------------------- */
+
+h1, h2, h3,
+.brand-name,
+.head-server,
+.station-name,
+.ticket-name,
+.phase-name,
+.side-strong,
+.verdict-word,
+.flow-waiting-title,
+.terminal-head h2,
+.detail-head h3,
+.drawer-head h2 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* Big numbers are display type; small figures and identifiers are data. */
+.verdict-big,
+.stat-value,
+.ticket-score,
+.big,
+.station-verdict,
+.station-num,
+.phase-num,
+.trip-num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+.count,
+.phase-time,
+.history .num,
+.redactions .num {
+  font-family: var(--font-mono);
+}
+
+.verdict-big, .stat-value, .ticket-score, .big { font-weight: 700; }
+
+.topbar .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.brand-logo { width: 2.6rem; height: 2.6rem; flex: none; }
+
+.brand-name {
+  font-size: var(--step-1);
+  font-weight: 700;
+  word-spacing: 0;
+}
+
+/* Caution is approved with reservations: coral outline, not a coral fill. */
+.tile-verdict.tile-warn {
+  background: var(--warn-wash);
+  border: 3px solid var(--warn);
+  color: var(--ink);
+}
+
+.tile-verdict.tile-warn .verdict-word { color: var(--warn-text); }
+
+.station-pass {
+  background: var(--cleared-wash);
+  border: 2px solid var(--cleared-text);
+}
+
+.lamp-warn .lamp-bulb {
+  background: transparent;
+  box-shadow: inset 0 0 0 3px var(--warn), 0 0 0 3px var(--glow-warn);
+}
+
+.packet {
+  background: var(--cleared);
+  border-color: var(--progress);
+}
+
+.seg-done { background: var(--cleared-text); }
+
+.station-name {
+  font-size: clamp(1.05rem, 1.3vw, 1.5rem);
+  overflow-wrap: normal;
+  word-break: keep-all;
+  hyphens: none;
+}

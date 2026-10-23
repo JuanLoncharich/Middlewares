@@ -40,6 +40,7 @@ evaluator ──LLM calls──────▶ occludra┐ (security-gateways, W
 | `runner/` | TypeScript evaluator (`@opencode-ai/sdk` + `@kubernetes/client-node`) |
 | `images/cloner/` | init-container image: git + npm/uv/go toolchain detection |
 | `images/target/` | sandbox image: supervisor that binds the server's stdio to the IPC FIFOs |
+| `frontend/` | demo / live UI: prompt flow, run lifecycle, server board and read-only evaluator terminal ([frontend/README.md](frontend/README.md)) |
 
 ## Install
 

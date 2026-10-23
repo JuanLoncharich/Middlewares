@@ -1,0 +1,40 @@
+{
+  "name": "mcp-eval-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Demo and live dashboard for mcp-eval-operator",
+  "scripts": {
+    "demo": "vite",
+    "live": "concurrently -k -n server,web -c blue,green \"npm:server\" \"vite --mode live\"",
+    "server": "tsx server/live.ts",
+    "build": "vite build",
+    "start": "NODE_ENV=production tsx server/live.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "fake-api": "tsx test/fake-apiserver.ts"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.1.1",
+    "@fontsource-variable/space-grotesk": "5.3.0",
+    "@kubernetes/client-node": "1.0.0",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsx": "4.23.15",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@types/ws": "8.5.13",
+    "@vitejs/plugin-react": "4.3.3",
+    "concurrently": "9.1.0",
+    "typescript": "5.6.3",
+    "vite": "5.4.21",
+    "vitest": "2.1.9"
+  }
+}

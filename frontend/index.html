@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Evaluación de seguridad de servidores MCP en un sandbox de Kubernetes" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>MCP Eval</title>
+    <script>
+      // Apply the saved theme before first paint; React keeps it in sync after.
+      try {
+        var t = localStorage.getItem("mcp-eval-ui.theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

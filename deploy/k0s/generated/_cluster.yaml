@@ -791,3 +791,12 @@ spec:
     kind: MemberList
     shortNames:
     - ml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-eval-ui
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled

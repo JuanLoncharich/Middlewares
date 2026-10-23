@@ -37,6 +37,9 @@
 #   SKIP_BUILD=1       skip docker build/push
 #   SKIP_SECRET=1      do not (re)create the LLM secret
 #   TRIGGER=0          do not trigger a run at the end
+#   DEPLOY_UI=1        deploy the demo/live UI (namespace mcp-eval-ui, frontend/deploy/):
+#                      read-only RBAC on the eval CRs. Default 0; on for the k0s cluster.
+#   UI_IMG             UI image (default $IMG_REGISTRY/mcp-eval-ui:$IMG_TAG, built from frontend/)
 #   ---- security layers (Vigil / Occludra / NetBird) ----
 #   DEPLOY_SECURITY_GATEWAYS=0   skip the security-gateways namespace (default: deploy it)
 #   MESH_ENFORCE=false           legacy mode: strip the NetBird sidecars and let the evaluator
@@ -122,6 +125,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_SECRET="${SKIP_SECRET:-0}"
 TRIGGER="${TRIGGER:-1}"
 DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
+DEPLOY_UI="${DEPLOY_UI:-0}"
 MESH_ENFORCE="${MESH_ENFORCE:-true}"
 AUTOSCALE_METRICS="${AUTOSCALE_METRICS:-0}"
 DEPLOY_AUTOSCALER="${DEPLOY_AUTOSCALER:-0}"
@@ -214,6 +218,7 @@ IMG="$IMG_REGISTRY/mcp-eval-operator:$IMG_TAG"
 CLONER_IMG="$IMG_REGISTRY/mcp-cloner:$IMG_TAG"
 TARGET_IMG="$IMG_REGISTRY/mcp-target-sandbox:$IMG_TAG"
 EVALUATOR_IMG="$IMG_REGISTRY/mcp-evaluator:$IMG_TAG"
+UI_IMG="${UI_IMG:-$IMG_REGISTRY/mcp-eval-ui:$IMG_TAG}"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
@@ -250,6 +255,11 @@ if [ "$SKIP_BUILD" != "1" ]; then
       "$VIGIL_SRC_DIR"
     rm -rf "$VIGIL_SRC_DIR"
     docker push "$VIGIL_IMG"
+  fi
+  if [ "$DEPLOY_UI" = "1" ]; then
+    log "Building the UI image"
+    docker build -t "$UI_IMG" frontend
+    docker push "$UI_IMG"
   fi
   if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
     log "Building the Vigil corpus image ($VIGIL_CORPUS_IMG)"
@@ -527,6 +537,37 @@ fi
 # programmer's workstation reach the gateways directly (TESTING.md §3-4).
 # Off by default — the security perimeter stays ClusterIP/mesh-only.
 # ---------------------------------------------------------------------------
+if [ "$DEPLOY_UI" = "1" ]; then
+  log "Deploying the UI (namespace mcp-eval-ui, read-only)"
+  sed "s|__UI_IMG__|$UI_IMG|g" frontend/deploy/mcp-eval-ui.yaml | kubectl apply -f -
+  # The UI watches the CRs through the API server. NetworkPolicies match its
+  # real endpoint (after the Service DNAT), which differs per cluster, so this
+  # egress rule is rendered from the cluster's endpoints, like Chroma's.
+  ui_api_peers="$(kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes \
+    -o jsonpath='{range .items[*]}{range .endpoints[*]}{.addresses[0]}{" "}{end}{end}')"
+  ui_api_port="$(kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[0].ports[0].port}')"
+  [ -n "$ui_api_peers" ] && [ -n "$ui_api_port" ] || { echo "ERROR: cannot read the API server endpoints" >&2; exit 1; }
+  {
+    cat <<'POLICY'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-eval-ui-kube-api
+  namespace: mcp-eval-ui
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-eval-ui
+  policyTypes: [Egress]
+  egress:
+    - to:
+POLICY
+    for ip in $ui_api_peers; do printf '        - ipBlock: {cidr: %s/32}\n' "$ip"; done
+    printf '      ports:\n        - {protocol: TCP, port: %s}\n' "$ui_api_port"
+  } | kubectl apply -f -
+  kubectl -n mcp-eval-ui rollout status deploy/mcp-eval-ui --timeout=180s
+fi
+
 if [ "$WORKSTATION_NODEPORT" = "1" ]; then
   if [ "$DEPLOY_SECURITY_GATEWAYS" != "1" ]; then
     echo "WARNING: WORKSTATION_NODEPORT=1 but DEPLOY_SECURITY_GATEWAYS=0 — no gateways to expose, skipping." >&2

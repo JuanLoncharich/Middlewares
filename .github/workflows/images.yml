@@ -48,6 +48,7 @@ jobs:
           - {name: mcp-target-sandbox, context: images/target, file: images/target/Dockerfile}
           - {name: mcp-evaluator, context: runner, file: runner/Dockerfile}
           - {name: occludra-gateway, context: images/occludra-gateway, file: images/occludra-gateway/Dockerfile}
+          - {name: mcp-eval-ui, context: frontend, file: frontend/Dockerfile}
           # The in-cluster Vigil is the CPU variant (deploy.sh builds it the same way).
           - name: vigil-llm
             context: vigil-src
