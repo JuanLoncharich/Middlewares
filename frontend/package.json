@@ -11,7 +11,8 @@
     "build": "vite build",
     "start": "NODE_ENV=production tsx server/live.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fake-api": "tsx test/fake-apiserver.ts"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "5.1.0",

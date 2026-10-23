@@ -17,3 +17,5 @@ hack/vigil-corpus/dist/
 message.txt
 frontend/node_modules/
 frontend/dist/
+frontend/test/.fake-kubeconfig
+frontend/test/.fake-tls/
