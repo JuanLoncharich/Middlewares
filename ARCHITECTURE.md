@@ -331,21 +331,36 @@ Request pipeline for `POST /v1/chat/completions` and `/v1/responses`
 6. Proxy to `OCCLUDRA_UPSTREAM_BASE_URL` (default `https://opencode.ai/zen/v1`),
    streaming the response back with per-chunk flush (SSE-safe, 10-min client timeout).
 
+**Request journal** (`images/occludra-gateway/journal.go`): requests that
+name their client in `X-Occludra-Client` (only the UI chat, `ui-chat`) are
+recorded in a 100-entry in-memory ring — model, redaction counts per
+detector, block reason, status, primary/fallback, timing, sizes; never
+content. Served on a separate port, `OCCLUDRA_INSPECT_LISTEN` (`:8081` on
+the cluster), as `GET /requests?client=<name>&after=<id>`; NetworkPolicy
+`occludra-from-ui-chat` opens it to the UI pod only. The client header is
+not forwarded upstream.
+
 Detector set (ConfigMap `occludra-policy`, **hot-reloaded per request** —
 kubelet propagates ConfigMap volume updates; the gateway re-reads the file
 on every scrub request and keeps the previous policy on transient read/parse
 errors, so updates converge without restarts and are never mixed mid-request):
 
+Detectors run in this order, each on the text the previous one left, so
+credential detectors come first: a broad pattern earlier in the list
+(`phone-intl` used to be third) masked the digits inside `ghp_…`/`sk-…`/`AKIA…`
+tokens and the rest of the token reached the model. `policy_test.go` loads
+the shipped ConfigMap and checks no piece of a credential survives.
+
 | Detector | Pattern class | Example caught |
 |---|---|---|
-| `email` | emails | `jane.doe@acme.com` |
-| `us-ssn` | `NNN-NN-NNNN` | `123-45-6789` |
-| `phone-intl` | intl phone shapes | `+1 555 234 5678` |
-| `iban` | IBAN | `DE89 3704 …` |
 | `api-key` | `sk-…`(16+), `AKIA…`(16), `ghp_/gho_…`(20+), `xox…`, `-----BEGIN … PRIVATE KEY-----` | `sk-proj-9Xk…` |
 | `bearer-token` | `bearer/authorization [: = ]` + 16+ chars | `Authorization: Bearer eyJ…` |
 | `password-context` | `password/passphrase/passcode/passwd (is\|are\|:\|=) ≥6 non-space` | `password is Xq7vR2mKp9wZ4tFj` |
 | `secret-assignment` | `api key\|secret\|token\|credential (is\|are\|:\|=) ≥8` | `secret: hunter2222…` |
+| `email` | emails | `jane.doe@acme.com` |
+| `us-ssn` | `NNN-NN-NNNN` | `123-45-6789` |
+| `iban` | IBAN | `DE89 3704 …` |
+| `phone-intl` | intl phone shapes | `+1 555 234 5678` |
 | `person-name-context` | role word (`customer/client/patient/employee/subscriber/beneficiary`) + optional honorific + `First Last` | `customer, Richard Philips` |
 | `large-amount` | ≥6-digit bare numbers, comma-grouped | `1300201`, `1,300,201` |
 | `currency-amount` | `$ € £ USD EUR`-prefixed amounts | `$1,300,201` |
