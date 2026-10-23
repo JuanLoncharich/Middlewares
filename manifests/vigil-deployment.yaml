@@ -140,12 +140,12 @@ metadata:
     app.kubernetes.io/part-of: mcp-eval-platform
 spec:
   # __VIGIL_REPLICAS__ / __VIGIL_MAX_UNAVAILABLE__ are substituted by
-  # deploy.sh (VIGIL_REPLICAS / VIGIL_MAX_UNAVAILABLE, defaults 2 / 0 for
-  # multi-node production). The vigil-llm image loads its classifier models
-  # at boot and is memory-hungry per replica: laptop-class single-node
-  # clusters should set VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1
-  # VIGIL_MAX_UNAVAILABLE=1 so a surge pod cannot OOM the node (see
-  # ARCHITECTURE.md §5.2 — size for the pinned image's model footprint).
+  # deploy.sh (VIGIL_REPLICAS / VIGIL_MAX_UNAVAILABLE, defaults 1 / 1: few
+  # concurrent users, the HPA adds replicas under load). The vigil-llm image
+  # loads its classifier models at boot and is memory-hungry per replica, so
+  # rollouts replace the pod rather than surge a second one that could OOM a
+  # small node (see ARCHITECTURE.md §5.2 — size for the pinned image's model
+  # footprint). Big nodes: 2 / 0 for zero-downtime rollouts.
   replicas: __VIGIL_REPLICAS__
   strategy:
     type: RollingUpdate
@@ -384,8 +384,9 @@ metadata:
   name: vigil
   namespace: security-gateways
 spec:
-  # Percentage so the budget scales with the HPA (min 50% of N replicas).
-  minAvailable: 50%
+  # One pod at a time may go (drains, node-pressure moves). A percentage
+  # minAvailable rounds up to every pod at one replica and blocks any drain.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: vigil-llm

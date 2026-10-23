@@ -149,6 +149,23 @@ spec:
       port: 8080
 ---
 apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  labels:
+    app.kubernetes.io/part-of: mcp-eval-platform
+  namespace: chroma
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 500m
+      memory: 256Mi
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: minio-data
@@ -2998,6 +3015,7 @@ spec:
         app.kubernetes.io/name: vigil-corpus-loader
         app.kubernetes.io/part-of: chroma-distributed
     spec:
+      priorityClassName: mcp-eval-batch
       restartPolicy: Never
       automountServiceAccountToken: false
       securityContext:

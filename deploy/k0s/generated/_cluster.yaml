@@ -12,6 +12,18 @@ globalDefault: false
 description: Control-plane components of the MCP security evaluation platform (operator, Vigil and Occludra gateways). Prevents
   node pressure from evicting the evaluation platform's brain and security perimeter in favour of lower-value workloads.
 ---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: mcp-eval-batch
+  labels:
+    app.kubernetes.io/name: mcp-eval-operator
+value: -1000
+globalDefault: false
+preemptionPolicy: Never
+description: Re-runnable batch jobs of the MCP security evaluation platform (corpus loads). First to be evicted under node
+  pressure; never preempts.
+---
 apiVersion: v1
 kind: Namespace
 metadata:

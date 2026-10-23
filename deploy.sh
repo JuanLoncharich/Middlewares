@@ -101,7 +101,7 @@
 #                                chroma-gateway.chroma:8080, every scan answers 500 and evaluations
 #                                fail closed. Implemented by hack/chroma/deploy.sh (runs standalone too).
 #   VECTOR_DB_MODE=single        one-pod Chroma instead of the distributed one — for kind tests only
-#   CHROMA_QUERY_REPLICAS / CHROMA_COMPACTION_REPLICAS   distributed replicas (default 2 / 2)
+#   CHROMA_QUERY_REPLICAS / CHROMA_COMPACTION_REPLICAS   distributed replicas (default 1 / 1)
 #   CHROMA_IMG_TAG               chroma component image tag (short commit SHA from the `chromadb`
 #                                Docker Hub org; keep in vintage with the vendored chart).
 #   SKIP_CORPUS_LOAD=1           do not load the Vigil embedding corpora after the stack is up.
@@ -140,14 +140,14 @@ if [ "$DEPLOY_VECTOR_DB" = "1" ] && [ "$SKIP_CORPUS_LOAD" != "1" ]; then
 fi
 WORKSTATION_NODEPORT="${WORKSTATION_NODEPORT:-0}"
 WORKSTATION_CIDR="${WORKSTATION_CIDR:-172.21.0.0/16}"
-# Vigil sizing: defaults fit multi-node production. The real vigil-llm image
-# loads its classifier models at boot and is memory-hungry per replica — on
-# laptop-class single nodes set VIGIL_REPLICAS=1 VIGIL_HPA_MIN=1
-# VIGIL_MAX_UNAVAILABLE=1 or a surge replica can OOM the node during
-# rollouts.
-VIGIL_REPLICAS="${VIGIL_REPLICAS:-2}"
-VIGIL_HPA_MIN="${VIGIL_HPA_MIN:-2}"
-VIGIL_MAX_UNAVAILABLE="${VIGIL_MAX_UNAVAILABLE:-0}"
+# Vigil sizing: one replica by default (few concurrent users; the HPA adds
+# replicas under CPU load). The vigil-llm image loads its classifier models at
+# boot (~3 GiB per replica), so rollouts replace the pod instead of surging a
+# second one next to it (VIGIL_MAX_UNAVAILABLE=1). For zero-downtime rollouts
+# on big nodes set VIGIL_REPLICAS=2 VIGIL_HPA_MIN=2 VIGIL_MAX_UNAVAILABLE=0.
+VIGIL_REPLICAS="${VIGIL_REPLICAS:-1}"
+VIGIL_HPA_MIN="${VIGIL_HPA_MIN:-1}"
+VIGIL_MAX_UNAVAILABLE="${VIGIL_MAX_UNAVAILABLE:-1}"
 NETBIRD_MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-https://netbird.example.com:443}"
 OCCLUDRA_IMG="${OCCLUDRA_IMG:-$IMG_REGISTRY/occludra-gateway:$IMG_TAG}"
 VIGIL_SRC_REPO="${VIGIL_SRC_REPO:-https://github.com/deadbits/vigil-llm}"
@@ -280,6 +280,8 @@ kubectl kustomize config/default \
 kubectl -n mcp-eval-system delete networkpolicy operator-observability \
   allow-keda-to-operator-activity --ignore-not-found
 kubectl -n mcp-eval-system set env deploy/mcp-eval-controller-manager MESH_ENFORCE="$MESH_ENFORCE" >/dev/null
+# Container defaults for anything in the namespace without its own requests/limits.
+kubectl -n mcp-eval-system apply -f manifests/limitrange.yaml
 # Air-gap deploys (images imported straight into the nodes' containerd store,
 # hack/import-images-to-nodes.sh) must set IMAGE_PULL_POLICY=IfNotPresent:
 # with Always the kubelet still dials the registry and ImagePullBackOffs.
@@ -302,6 +304,7 @@ render_personas() {
       ${LLM_CONTEXT_TOKENS:+-e "s|^\\( *\\)modelID: .*\$|&\\n\\1contextTokens: $LLM_CONTEXT_TOKENS|"}
 }
 kubectl kustomize config/samples | render_personas | kubectl apply -f -
+kubectl -n mcp-evals apply -f manifests/limitrange.yaml
 kubectl apply -f config/rbac/runner_role.yaml
 
 # llm-provider-credentials for namespace $1. Values go through an env-file on a
@@ -453,6 +456,8 @@ if [ "$DEPLOY_SECURITY_GATEWAYS" = "1" ]; then
     apply_vigil_yara_rules
     substitute_gateway_images < manifests/vigil-deployment.yaml | filter_mesh_sidecars | kubectl apply -f -
   fi
+  # Container defaults for anything in the namespace without its own requests/limits.
+  kubectl -n security-gateways apply -f manifests/limitrange.yaml
   # gateway-egress lets Occludra reach private addresses only on NetBird
   # ports, so a local LLM server (a private IP) needs its own rule: exactly
   # that IP and port, only while LLM_PROVIDER=local. Every other provider

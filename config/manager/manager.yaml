@@ -17,7 +17,8 @@ metadata:
   labels:
     app.kubernetes.io/name: mcp-eval-operator
 spec:
-  minAvailable: 1
+  # Not minAvailable: 1 — with one replica that would block every drain.
+  maxUnavailable: 1
   selector:
     matchLabels:
       control-plane: controller-manager
@@ -35,7 +36,9 @@ spec:
   selector:
     matchLabels:
       control-plane: controller-manager
-  replicas: 2
+  # One replica: a handful of concurrent runs. Leader election stays on, so
+  # scaling up adds hot standbys.
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -68,7 +71,7 @@ spec:
       - command:
         - /manager
         args:
-        # Two replicas with leader election: one active, one hot standby.
+        # Leader election: with more than one replica, one active, the rest hot standby.
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8443

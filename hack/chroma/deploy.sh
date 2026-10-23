@@ -12,8 +12,8 @@
 #                                (manifests/chroma/chart + values-mcp-eval.yaml);
 #                                single: one chroma pod with an emptyDir, for kind tests only
 #   CHROMA_IMG_TAG               distributed component image tag (default dff1d8a)
-#   CHROMA_QUERY_REPLICAS        query-service replicas (default 2)
-#   CHROMA_COMPACTION_REPLICAS   compaction-service replicas (default 2)
+#   CHROMA_QUERY_REPLICAS        query-service replicas (default 1)
+#   CHROMA_COMPACTION_REPLICAS   compaction-service replicas (default 1)
 #   SKIP_CORPUS_LOAD=1           do not run the loader Job
 #   VIGIL_CORPUS_IMG             image carrying the calibrated corpus file (deploy.sh builds it:
 #                                images/vigil-corpus-loader/Dockerfile.corpus); required unless
@@ -31,8 +31,8 @@ cd "$(dirname "$0")/../.."
 
 VECTOR_DB_MODE="${VECTOR_DB_MODE:-distributed}"
 CHROMA_IMG_TAG="${CHROMA_IMG_TAG:-dff1d8a}"
-CHROMA_QUERY_REPLICAS="${CHROMA_QUERY_REPLICAS:-2}"
-CHROMA_COMPACTION_REPLICAS="${CHROMA_COMPACTION_REPLICAS:-2}"
+CHROMA_QUERY_REPLICAS="${CHROMA_QUERY_REPLICAS:-1}"
+CHROMA_COMPACTION_REPLICAS="${CHROMA_COMPACTION_REPLICAS:-1}"
 SKIP_CORPUS_LOAD="${SKIP_CORPUS_LOAD:-0}"
 VIGIL_CORPUS_LOCK="${VIGIL_CORPUS_LOCK:-hack/vigil-corpus/vigil-corpus-e5s-v3.lock.json}"
 CHROMA_ROTATE_TOKENS="${CHROMA_ROTATE_TOKENS:-0}"
@@ -88,14 +88,17 @@ data:
 """)' | k apply -f - >/dev/null
 
 # ---- Chroma itself ----
+# PriorityClasses referenced by MinIO/Postgres (critical) and the corpus
+# loader (batch).
+k apply -f manifests/priorityclass.yaml
+# Container defaults for anything without its own requests/limits.
+k -n chroma apply -f manifests/limitrange.yaml
 if [ "$VECTOR_DB_MODE" = single ]; then
   log "Deploying single-node Chroma (test only: data lives in an emptyDir)"
   k apply -f manifests/chroma/single.yaml
   k -n chroma rollout status deploy/chroma-single --timeout=300s
 else
   log "Deploying vector-DB substrate (MinIO, Postgres, OTel)"
-  # The PriorityClass is referenced by MinIO/Postgres.
-  k apply -f manifests/priorityclass.yaml
   k apply -f manifests/chroma/minio.yaml -f manifests/chroma/postgres.yaml -f manifests/chroma/otel-collector.yaml
   for dep in minio postgres otel-collector; do
     k -n chroma rollout status "deploy/$dep" --timeout=300s
