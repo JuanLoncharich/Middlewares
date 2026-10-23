@@ -94,7 +94,7 @@
 
 .mode-on.mode-live {
   background: var(--cleared);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .mode-live.mode-on::before {
@@ -103,7 +103,7 @@
   width: 0.55em;
   height: 0.55em;
   border-radius: 50%;
-  background: #fff;
+  background: var(--surface-strong);
   margin-right: 0.4em;
   vertical-align: 0.1em;
   animation: pulse 1.6s ease-in-out infinite;
@@ -249,13 +249,13 @@
   white-space: nowrap;
 }
 
-.tag-risk-safe { background: var(--cleared); color: #fff; }
+.tag-risk-safe { background: var(--cleared); color: var(--on-accent); }
 .tag-risk-caution { background: var(--warning-wash); color: var(--quarantine-ink); box-shadow: inset 0 0 0 1.5px var(--quarantine); }
 .tag-risk-untrusted { background: var(--rejected-wash); color: var(--rejected); box-shadow: inset 0 0 0 1.5px var(--rejected); }
-.tag-risk-malicious { background: var(--rejected); color: #fff; }
+.tag-risk-malicious { background: var(--rejected); color: var(--on-accent); }
 .tag-risk-unknown { background: var(--rule); color: var(--ink); }
 
-.tag-sev-critical { background: var(--rejected); color: #fff; }
+.tag-sev-critical { background: var(--rejected); color: var(--on-accent); }
 .tag-sev-high { background: var(--rejected-wash); color: var(--rejected); }
 .tag-sev-medium { background: var(--warning-wash); color: var(--quarantine-ink); }
 .tag-sev-low, .tag-sev-info { background: var(--rule); color: var(--ink); }
@@ -340,7 +340,7 @@
   cursor: pointer;
 }
 
-.ticket:hover { background: #fff; }
+.ticket:hover { background: var(--surface-strong); }
 
 .ticket-evaluating { border-left-color: var(--quarantine); }
 .ticket-approved { border-left-color: var(--cleared); }
@@ -441,7 +441,7 @@
 }
 
 .drawer::backdrop {
-  background: rgb(19 34 56 / 0.35);
+  background: var(--backdrop);
 }
 
 .drawer[open] {

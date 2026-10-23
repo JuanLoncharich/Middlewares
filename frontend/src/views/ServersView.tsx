@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { Stat, Tile } from "../components/Bento.tsx";
 import { PhaseTag, RiskTag, SeverityTag } from "../components/Tags.tsx";
 import { PHASE_LABEL, relativeTime, shortRepo } from "../components/format.ts";
 import { type MCPEvaluationRun, type MCPServer, RUN_PHASES, bySeverity, isTerminal, verdictOf } from "../model/crd.ts";
@@ -107,10 +108,32 @@ export function ServersView({ snap, onOpen }: { snap: Snapshot; onOpen: (server:
       </section>
     );
   }
+
+  const judged = [...groups.approved, ...groups.rejected];
+  const average = judged.length > 0 ? Math.round(judged.reduce((n, r) => n + (r.server.status?.lastFinalScore ?? 0), 0) / judged.length) : null;
+  const critical = judged.reduce(
+    (n, r) => n + (r.verdictRun?.status?.findings ?? []).filter((f) => f.severity === "Critical").length,
+    0,
+  );
+  const malicious = judged.filter((r) => r.server.status?.overallRiskStatus === "Malicious").length;
+
   return (
-    <section className="view servers" aria-label="Servidores MCP">
+    <div className="bento view" aria-label="Servidores MCP">
+      <Tile span={3} className="tile-stat">
+        <Stat value={total} label={total === 1 ? "servidor registrado" : "servidores registrados"} />
+      </Tile>
+      <Tile span={3} className="tile-stat">
+        <Stat value={average ?? "sin dato"} label="puntaje promedio" note="Del último veredicto de cada servidor." />
+      </Tile>
+      <Tile span={3} className="tile-stat" tone={critical > 0 ? "rejected" : "plain"}>
+        <Stat value={critical} label={critical === 1 ? "hallazgo crítico" : "hallazgos críticos"} />
+      </Tile>
+      <Tile span={3} className="tile-stat" tone={malicious > 0 ? "rejected" : "plain"}>
+        <Stat value={malicious} label={malicious === 1 ? "servidor malicioso" : "servidores maliciosos"} note="Cortados por Vigil antes del modelo." />
+      </Tile>
+
       {COLUMNS.map((col) => (
-        <div key={col.id} className={`column column-${col.id}`}>
+        <Tile key={col.id} span={4} className={`column column-${col.id}`} label={col.title}>
           <h2>
             {col.title} <span className="count">{groups[col.id].length}</span>
           </h2>
@@ -123,10 +146,10 @@ export function ServersView({ snap, onOpen }: { snap: Snapshot; onOpen: (server:
               ))}
             </ul>
           )}
-        </div>
+        </Tile>
       ))}
       {groups.unknown.length > 0 && (
-        <div className="column column-unknown">
+        <Tile span={12} className="column column-unknown" label="Sin veredicto">
           <h2>
             Sin veredicto <span className="count">{groups.unknown.length}</span>
           </h2>
@@ -135,8 +158,8 @@ export function ServersView({ snap, onOpen }: { snap: Snapshot; onOpen: (server:
               <Ticket key={row.server.metadata.name} row={row} column="unknown" onOpen={() => onOpen(row.server.metadata.name)} />
             ))}
           </ul>
-        </div>
+        </Tile>
       )}
-    </section>
+    </div>
   );
 }

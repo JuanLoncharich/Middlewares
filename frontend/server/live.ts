@@ -7,7 +7,8 @@
 // HOST (127.0.0.1), PROM_URL (optional, for Occludra redaction counts),
 // NODE_ENV=production to also serve the built UI from dist/.
 import * as k8s from "@kubernetes/client-node";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -312,6 +313,20 @@ const TYPES: Record<string, string> = {
   ".json": "application/json",
 };
 
+/** Hashes of index.html's inline scripts (the pre-paint theme switch), for the CSP. */
+function inlineScriptHashes(): string {
+  const index = join(DIST, "index.html");
+  if (!existsSync(index)) return "";
+  const html = readFileSync(index, "utf8");
+  return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    .map((m) => ` 'sha256-${createHash("sha256").update(m[1]!).digest("base64")}'`)
+    .join("");
+}
+
+const CSP = PRODUCTION
+  ? `default-src 'self'; script-src 'self'${inlineScriptHashes()}; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:`
+  : "";
+
 function serveStatic(req: IncomingMessage, res: ServerResponse): void {
   const url = new URL(req.url ?? "/", "http://x");
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, "");
@@ -324,7 +339,7 @@ function serveStatic(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(200, {
     "content-type": TYPES[extname(file)] ?? "application/octet-stream",
     "x-content-type-options": "nosniff",
-    "content-security-policy": "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+    "content-security-policy": CSP,
   });
   createReadStream(file).pipe(res);
 }

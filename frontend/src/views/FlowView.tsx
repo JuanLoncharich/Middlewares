@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { RiskTag } from "../components/Tags.tsx";
+import { RunHeadTile, Stat, Tile, VerdictTile } from "../components/Bento.tsx";
 import { ROLE_LABEL } from "../components/format.ts";
 import { SCANNERS } from "../components/scanners.ts";
 import type { Snapshot } from "../data/source.ts";
@@ -95,17 +95,18 @@ export function FlowView({ snap, runName }: { snap: Snapshot; runName: string | 
   const phase = run.status?.phase ?? "Pending";
   if (!trip) {
     return (
-      <section className="view flow">
-        <FlowHead snap={snap} runName={runName} />
-        <div className="flow-waiting">
+      <div className="bento view" aria-label="Flujo del prompt">
+        <RunHeadTile run={run} server={data.server} />
+        <VerdictTile run={run} />
+        <Tile span={12} className="tile-hero" title="Recorrido del prompt">
           <p className="flow-waiting-title">Todavía no salió ningún prompt.</p>
           <p className="muted">
             {phase === "Pending" || phase === "Cloning" || phase === "Running"
               ? "El sandbox se está preparando: el primer agente arranca cuando el evaluator está listo."
               : "Este run no tiene eventos del evaluator. En live, los logs del pod duran 10 minutos después de terminar el Job."}
           </p>
-        </div>
-      </section>
+        </Tile>
+      </div>
     );
   }
 
@@ -114,125 +115,128 @@ export function FlowView({ snap, runName }: { snap: Snapshot; runName: string | 
   const lit = lamps(trip, states.vigil);
   const blocked = states.vigil === "block";
 
+  const scanned = trips.reduce((n, t) => n + t.scans.reduce((m, sc) => m + (sc.units ?? 0), 0), 0);
+  const warnings = trips.reduce((n, t) => n + t.scans.filter((sc) => sc.status === "warn").length, 0);
+  const redacted = trips.some((t) => t.extras?.redactions)
+    ? trips.reduce((n, t) => n + (t.extras?.redactions ?? []).reduce((m, r) => m + r.count, 0), 0)
+    : snap.gateway
+      ? snap.gateway.redactions.reduce((m, r) => m + r.count, 0)
+      : null;
+
   return (
-    <section className="view flow" aria-label="Flujo del prompt">
-      <FlowHead snap={snap} runName={runName} />
-
-      <ol className="trips" aria-label="Llamadas al modelo de este run">
-        {trips.map((t, i) => (
-          <li key={t.id}>
-            <button
-              type="button"
-              className={`trip trip-${t.status} ${i === tripIndex ? "trip-on" : ""}`}
-              aria-pressed={i === tripIndex}
-              onClick={() => {
-                setPinnedTrip(i === trips.length - 1 ? null : i);
-                setPinnedStation(null);
-              }}
-            >
-              <span className="trip-num">{i + 1}</span>
-              <span className="trip-name">{ROLE_LABEL[snap.agents[t.agent]?.spec.role ?? ""] ?? t.agent}</span>
-              <span className="trip-state">{TRIP_WORD[t.status]}</span>
-            </button>
-          </li>
-        ))}
-        {pinnedTrip !== null && (
-          <li>
-            <button type="button" className="button-quiet" onClick={() => setPinnedTrip(null)}>
-              Seguir la última
-            </button>
-          </li>
-        )}
-      </ol>
-
-      <div className={`pipeline ${blocked ? "pipeline-cut" : ""}`} role="list" aria-label="Recorrido del prompt">
-        {STATIONS.map((s, i) => {
-          const st = states[s.id];
-          const next = STATIONS[i + 1];
-          const nextSt = next ? states[next.id] : undefined;
-          let seg = "seg-idle";
-          if (next) {
-            if (s.id === "vigil" && blocked) seg = "seg-cut";
-            else if (st === "off" || nextSt === "off") seg = "seg-off";
-            else if (nextSt === "active") seg = "seg-moving";
-            else if (nextSt && nextSt !== "idle" && st !== "idle" && st !== "active") seg = `seg-done seg-${nextSt}`;
-          }
-          return (
-            <Fragment key={s.id}>
-              <div role="listitem" className={`station-wrap ${s.id === "vigil" ? "station-wrap-vigil" : ""}`}>
-                <button
-                  type="button"
-                  className={`station station-${st} ${station === s.id ? "station-on" : ""}`}
-                  aria-pressed={station === s.id}
-                  aria-label={`${s.name}: ${STATE_WORD[st]}`}
-                  onClick={() => setPinnedStation(s.id)}
-                >
-                  <span className="station-num">{i + 1}</span>
-                  <span className="station-name">{s.name}</span>
-                  {s.id === "vigil" ? (
-                    <span className="lamps">
-                      {SCANNERS.map((sc) => (
-                        <span key={sc.id} className={`lamp lamp-${lit[sc.id]}`}>
-                          <span className="lamp-bulb" aria-hidden="true" />
-                          {sc.name}
-                        </span>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="station-role">{s.role}</span>
-                  )}
-                  {s.id === "verdict" && run.status?.scoring && st !== "idle" && (
-                    <span className="station-verdict">
-                      {run.status.finalScore ?? 0} <small>{RISK_LABEL[run.status.scoring.riskCategory]}</small>
-                    </span>
-                  )}
-                  <span className="station-state">{(s.id === "verdict" && VERDICT_WORD[st]) || STATE_WORD[st]}</span>
-                </button>
-                {st === "active" && <span className="packet packet-here" aria-hidden="true" />}
-              </div>
-              {next && (
-                <div className={`seg ${seg}`} aria-hidden="true">
-                  {seg === "seg-moving" && <span className="packet packet-moving" />}
-                  {seg === "seg-cut" && <span className="cut-label">Cortado</span>}
-                </div>
-              )}
-            </Fragment>
-          );
-        })}
-      </div>
-
-      {blocked && (
-        <p className="cut-banner" role="status">
-          Vigil detectó una inyección en el texto del servidor. El prompt nunca se armó, ningún modelo lo vio y el run quedó{" "}
-          <strong>Malicioso con puntaje 0</strong>.
-        </p>
-      )}
-
-      <StationDetail
-        station={station}
-        state={states[station]}
-        trip={trip}
-        trips={trips}
-        snap={snap}
-        data={data}
+    <div className="bento view" aria-label="Flujo del prompt">
+      <RunHeadTile
+        run={run}
+        server={data.server}
+        aside={run.status?.currentAgent ? <p className="flow-now">Ahora: {run.status.currentAgent}</p> : undefined}
       />
-    </section>
+      <VerdictTile run={run} />
+
+      <Tile span={12} className={`tile-hero ${blocked ? "tile-hero-cut" : ""}`} title="Recorrido del prompt">
+        <ol className="trips" aria-label="Llamadas al modelo de este run">
+          {trips.map((t, i) => (
+            <li key={t.id}>
+              <button
+                type="button"
+                className={`trip trip-${t.status} ${i === tripIndex ? "trip-on" : ""}`}
+                aria-pressed={i === tripIndex}
+                onClick={() => {
+                  setPinnedTrip(i === trips.length - 1 ? null : i);
+                  setPinnedStation(null);
+                }}
+              >
+                <span className="trip-num">{i + 1}</span>
+                <span className="trip-name">{ROLE_LABEL[snap.agents[t.agent]?.spec.role ?? ""] ?? t.agent}</span>
+                <span className="trip-state">{TRIP_WORD[t.status]}</span>
+              </button>
+            </li>
+          ))}
+          {pinnedTrip !== null && (
+            <li>
+              <button type="button" className="button-quiet" onClick={() => setPinnedTrip(null)}>
+                Seguir la última
+              </button>
+            </li>
+          )}
+        </ol>
+
+        <div className={`pipeline ${blocked ? "pipeline-cut" : ""}`} role="list" aria-label="Estaciones">
+          {STATIONS.map((s, i) => {
+            const st = states[s.id];
+            const next = STATIONS[i + 1];
+            const nextSt = next ? states[next.id] : undefined;
+            let seg = "seg-idle";
+            if (next) {
+              if (s.id === "vigil" && blocked) seg = "seg-cut";
+              else if (st === "off" || nextSt === "off") seg = "seg-off";
+              else if (nextSt === "active") seg = "seg-moving";
+              else if (nextSt && nextSt !== "idle" && st !== "idle" && st !== "active") seg = `seg-done seg-${nextSt}`;
+            }
+            return (
+              <Fragment key={s.id}>
+                <div role="listitem" className={`station-wrap ${s.id === "vigil" ? "station-wrap-vigil" : ""}`}>
+                  <button
+                    type="button"
+                    className={`station station-${st} ${station === s.id ? "station-on" : ""}`}
+                    aria-pressed={station === s.id}
+                    aria-label={`${s.name}: ${STATE_WORD[st]}`}
+                    onClick={() => setPinnedStation(s.id)}
+                  >
+                    <span className="station-num">{i + 1}</span>
+                    <span className="station-name">{s.name}</span>
+                    {s.id === "vigil" ? (
+                      <span className="lamps">
+                        {SCANNERS.map((sc) => (
+                          <span key={sc.id} className={`lamp lamp-${lit[sc.id]}`}>
+                            <span className="lamp-bulb" aria-hidden="true" />
+                            {sc.name}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="station-role">{s.role}</span>
+                    )}
+                    {s.id === "verdict" && run.status?.scoring && st !== "idle" && (
+                      <span className="station-verdict">
+                        {run.status.finalScore ?? 0} <small>{RISK_LABEL[run.status.scoring.riskCategory]}</small>
+                      </span>
+                    )}
+                    <span className="station-state">{(s.id === "verdict" && VERDICT_WORD[st]) || STATE_WORD[st]}</span>
+                  </button>
+                  {st === "active" && <span className="packet packet-here" aria-hidden="true" />}
+                </div>
+                {next && (
+                  <div className={`seg ${seg}`} aria-hidden="true">
+                    {seg === "seg-moving" && <span className="packet packet-moving" />}
+                    {seg === "seg-cut" && <span className="cut-label">Cortado</span>}
+                  </div>
+                )}
+              </Fragment>
+            );
+          })}
+        </div>
+
+        {blocked && (
+          <p className="cut-banner" role="status">
+            Vigil detectó una inyección en el texto del servidor. El prompt nunca se armó, ningún modelo lo vio y el run quedó{" "}
+            <strong>Malicioso con puntaje 0</strong>.
+          </p>
+        )}
+      </Tile>
+
+      <Tile span={8} tone={states[station] === "block" ? "rejected" : "plain"} className="tile-detail" label="Detalle de la estación">
+        <StationDetail station={station} state={states[station]} trip={trip} trips={trips} snap={snap} data={data} />
+      </Tile>
+
+      <Tile span={4} title="En este run" className="tile-stats">
+        <Stat value={trips.length} label={trips.length === 1 ? "llamada al modelo" : "llamadas al modelo"} />
+        <Stat value={scanned} label="textos revisados por Vigil" note={warnings > 0 ? `${warnings} con advertencia` : undefined} />
+        <Stat
+          value={redacted ?? "sin dato"}
+          label="datos enmascarados por Occludra"
+          note={redacted === null ? "En live hace falta PROM_URL." : undefined}
+        />
+      </Tile>
+    </div>
   );
 }
-
-function FlowHead({ snap, runName }: { snap: Snapshot; runName: string | null }) {
-  const run = runName ? snap.runs[runName] : undefined;
-  if (!run) return null;
-  const scoring = run.status?.scoring;
-  return (
-    <header className="flow-head">
-      <h2>{run.spec.serverRef}</h2>
-      <p className="muted">
-        <code>{run.metadata.name}</code>
-      </p>
-      {scoring && <RiskTag risk={scoring.riskCategory} />}
-      {run.status?.currentAgent && <p className="flow-now">Ahora: {run.status.currentAgent}</p>}
-    </header>
-  );
-}
-

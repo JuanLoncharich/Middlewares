@@ -1,4 +1,4 @@
-import { RiskTag } from "../components/Tags.tsx";
+import { RunHeadTile, Stat, Tile, VerdictTile } from "../components/Bento.tsx";
 import { PHASE_LABEL, ROLE_LABEL, clock, seconds } from "../components/format.ts";
 import type { Snapshot } from "../data/source.ts";
 import { useNow, usePhaseTimes, useRun } from "../data/useRun.ts";
@@ -28,7 +28,7 @@ const LANE_LABEL: Record<LaneStatus, string> = {
 };
 
 export function LifecycleView({ snap, runName }: { snap: Snapshot; runName: string | null }) {
-  const { run, report, trips } = useRun(snap, runName);
+  const { run, server, report, trips } = useRun(snap, runName);
   const phase = run?.status?.phase ?? "Pending";
   const terminal = isTerminal(phase);
   const now = useNow(snap.now, !terminal);
@@ -68,61 +68,75 @@ export function LifecycleView({ snap, runName }: { snap: Snapshot; runName: stri
   });
   const failed = lanes.filter((l) => l.state === "failed");
 
-  return (
-    <section className="view lifecycle" aria-label="Ciclo de vida del run">
-      <header className="run-head">
-        <div>
-          <h2>{run.spec.serverRef}</h2>
-          <p className="muted">
-            <code>{run.metadata.name}</code>
-            {status.retries ? `, reintentado ${status.retries} ${status.retries === 1 ? "vez" : "veces"}` : ""}
-          </p>
-        </div>
-        {status.scoring && (
-          <div className="run-verdict">
-            <span className="big">{status.finalScore ?? 0}</span>
-            <RiskTag risk={status.scoring.riskCategory} />
-          </div>
-        )}
-      </header>
+  const okCount = lanes.filter((l) => l.state === "ok").length;
+  const elapsed = Math.max(end - start, 0);
 
-      <ol className="phases">
-        {MAIN_PHASES.map((p, i) => {
-          const state = terminal || i < reached ? "done" : i === reached ? "now" : "todo";
-          return (
-            <li key={p} className={`phase phase-${state}`} aria-current={state === "now" ? "step" : undefined}>
-              <span className="phase-num">{i + 1}</span>
-              <span className="phase-name">{PHASE_LABEL[p]}</span>
-              <span className="phase-time">{times[p] ? clock(times[p]) : ""}</span>
-              <span className="phase-note">{PHASE_NOTES[p]}</span>
-            </li>
-          );
-        })}
-        <li className={`phase phase-end ${terminal ? `phase-${phase.toLowerCase()}` : "phase-todo"}`}>
-          <span className="phase-num">5</span>
-          <span className="phase-name">{terminal ? PHASE_LABEL[phase] : "Completado o fallido"}</span>
-          <span className="phase-time">{terminal ? clock(status.completionTime) : ""}</span>
-          <span className="phase-note">{terminal ? PHASE_NOTES[phase] : "Lo decide el evaluator al terminar."}</span>
-        </li>
-      </ol>
+  return (
+    <div className="bento view" aria-label="Ciclo de vida del run">
+      <RunHeadTile run={run} server={server} />
+      <VerdictTile run={run} />
+
+      <Tile span={4} className="tile-stat">
+        <Stat value={seconds(elapsed)} label={terminal ? "duró el run" : "lleva el run"} />
+      </Tile>
+      <Tile span={4} className="tile-stat" tone={failed.length > 0 ? "warn" : "plain"}>
+        <Stat value={`${okCount} de ${lanes.length}`} label="agentes terminaron bien" note={failed.length > 0 ? `${failed.length} ${failed.length === 1 ? "falló" : "fallaron"}` : undefined} />
+      </Tile>
+      <Tile span={4} className="tile-stat">
+        <Stat
+          value={status.retries ?? 0}
+          label={status.retries === 1 ? "reintento del Job" : "reintentos del Job"}
+          note="Solo por fallas de infraestructura, máximo 2."
+        />
+      </Tile>
+
+      <Tile span={12} title="Fases">
+        <ol className="phases">
+          {MAIN_PHASES.map((p, i) => {
+            const state = terminal || i < reached ? "done" : i === reached ? "now" : "todo";
+            return (
+              <li key={p} className={`phase phase-${state}`} aria-current={state === "now" ? "step" : undefined}>
+                <span className="phase-num">{i + 1}</span>
+                <span className="phase-name">{PHASE_LABEL[p]}</span>
+                <span className="phase-time">{times[p] ? clock(times[p]) : ""}</span>
+                <span className="phase-note">{PHASE_NOTES[p]}</span>
+              </li>
+            );
+          })}
+          <li className={`phase phase-end ${terminal ? `phase-${phase.toLowerCase()}` : "phase-todo"}`}>
+            <span className="phase-num">5</span>
+            <span className="phase-name">{terminal ? PHASE_LABEL[phase] : "Completado o fallido"}</span>
+            <span className="phase-time">{terminal ? clock(status.completionTime) : ""}</span>
+            <span className="phase-note">{terminal ? PHASE_NOTES[phase] : "Lo decide el evaluator al terminar."}</span>
+          </li>
+        </ol>
+      </Tile>
 
       {degraded && (
-        <p className="banner banner-warn" role="status">
-          Run degradado: {failed.length} de {lanes.length} agentes {failed.length === 1 ? "falló" : "fallaron"} y el resto siguió. El puntaje es más conservador.
-          <span className="banner-raw">{message}</span>
-        </p>
+        <Tile span={12} tone="warn" className="tile-banner" label="Run degradado">
+          <p className="banner-lead" role="status">
+            Run degradado: {failed.length} de {lanes.length} agentes {failed.length === 1 ? "falló" : "fallaron"} y el resto siguió. El puntaje es más
+            conservador.
+          </p>
+          <p className="banner-raw">{message}</p>
+        </Tile>
       )}
       {vigilCut && (
-        <p className="banner banner-block" role="status">
-          Vigil cortó la evaluación: el contenido del servidor intentó manipular a los agentes. Ningún modelo llegó a verlo.
-        </p>
+        <Tile span={12} tone="rejected" className="tile-banner" label="Corte de Vigil">
+          <p className="banner-lead" role="status">
+            Vigil cortó la evaluación: el contenido del servidor intentó manipular a los agentes. Ningún modelo llegó a verlo.
+          </p>
+        </Tile>
       )}
       {phase === "Failed" && !vigilCut && message && (
-        <p className="banner banner-block" role="status">
-          {message}
-        </p>
+        <Tile span={12} tone="rejected" className="tile-banner" label="Run fallido">
+          <p className="banner-lead" role="status">
+            {message}
+          </p>
+        </Tile>
       )}
 
+      <Tile span={12} title="Agentes">
       <div className="lanes" role="table" aria-label="Agentes">
         <div className="lane lane-head" role="row">
           <span role="columnheader">Agente</span>
@@ -152,8 +166,9 @@ export function LifecycleView({ snap, runName }: { snap: Snapshot; runName: stri
         })}
       </div>
 
-      {!terminal && message && <p className="muted small run-message">Último mensaje del evaluator: {message}</p>}
-    </section>
+        {!terminal && message && <p className="muted small run-message">Último mensaje del evaluator: {message}</p>}
+      </Tile>
+    </div>
   );
 }
 

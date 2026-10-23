@@ -41,6 +41,10 @@ KUBECONFIG=$PWD/test/.fake-kubeconfig npm run live
 | `1` a `4` | Flujo del prompt, Ciclo de vida, Servidores, Terminal |
 | `espacio` | Pausar o reanudar la demo |
 
+El selector Claro/Oscuro de la barra superior cambia el tema y lo recuerda en
+el navegador; sin elección, sigue el tema del sistema. Para proyectar conviene
+el claro.
+
 La barra de la demo elige el escenario, la velocidad (1×, 2×, 4×) y permite
 saltar al veredicto. Cada escenario dura menos de un minuto a 1×.
 
@@ -55,6 +59,9 @@ saltar al veredicto. Cada escenario dura menos de un minuto a 1×.
 cron.
 
 ## Vistas
+
+Cada vista es una grilla Bento de 12 columnas: el tamaño de cada mosaico
+marca su importancia y el veredicto es el único mosaico de color sólido.
 
 - **Flujo del prompt.** Cada llamada al modelo recorre las estaciones Servidor
   MCP → Vigil → Prompt → Occludra → NetBird → Modelo → Agente → Síntesis →

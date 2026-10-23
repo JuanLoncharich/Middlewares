@@ -64,7 +64,7 @@
 
 .trip-on {
   border-color: var(--ink);
-  background: #fff;
+  background: var(--surface-strong);
 }
 
 /* Pipeline. Stations alternate with conduit segments. */
@@ -146,7 +146,7 @@
 
 .station-pass {
   border-color: var(--cleared);
-  background: #fff;
+  background: var(--surface-strong);
   color: var(--ink);
 }
 
@@ -166,7 +166,7 @@
 
 .station-fail {
   border: 3px solid var(--rejected);
-  background: #fff;
+  background: var(--surface-strong);
   color: var(--rejected);
 }
 
@@ -211,9 +211,9 @@
 .lamp-idle .lamp-bulb { background: var(--rule); }
 .station-active .lamp-idle .lamp-bulb { animation: pulse 0.9s ease-in-out infinite; background: var(--quarantine); }
 .lamp-pass .lamp-bulb { background: var(--cleared); }
-.lamp-warn .lamp-bulb { background: var(--quarantine); box-shadow: 0 0 0 3px rgb(217 154 11 / 0.3); }
+.lamp-warn .lamp-bulb { background: var(--quarantine); box-shadow: 0 0 0 3px var(--glow-warn); }
 .lamp-block { color: var(--rejected); }
-.lamp-block .lamp-bulb { background: var(--rejected); box-shadow: 0 0 0 4px rgb(179 38 30 / 0.3); }
+.lamp-block .lamp-bulb { background: var(--rejected); box-shadow: 0 0 0 4px var(--glow-block); }
 
 /* Conduit segments. */
 .seg {
@@ -283,7 +283,7 @@
   margin: 0 0 var(--space-3);
   padding: var(--space-2) var(--space-3);
   background: var(--rejected);
-  color: #fff;
+  color: var(--on-accent);
   font-size: var(--step-0);
   border-radius: var(--radius-tag);
   max-width: 80ch;
@@ -437,7 +437,7 @@
 .excerpt blockquote {
   margin: 0;
   padding: var(--space-2);
-  background: #fff;
+  background: var(--surface-strong);
   border: 1px dashed var(--rejected);
   font-family: var(--font-mono);
   font-size: 0.9rem;

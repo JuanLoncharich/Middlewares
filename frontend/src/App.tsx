@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ReplayBar } from "./components/ReplayBar.tsx";
+import { type Theme, applyTheme, initialTheme } from "./components/theme.ts";
 import { DemoSource } from "./data/demo/replay.ts";
 import { useReplay, useSnapshot } from "./data/hooks.ts";
 import { LiveSource } from "./data/live.ts";
@@ -11,6 +12,7 @@ import { ServerDetail } from "./views/ServerDetail.tsx";
 import { TerminalView } from "./views/TerminalView.tsx";
 import { ServersView } from "./views/ServersView.tsx";
 import "./styles/app.css";
+import "./styles/bento.css";
 
 type ViewId = "flow" | "lifecycle" | "servers" | "terminal";
 
@@ -43,6 +45,9 @@ export function App() {
   const [view, setView] = useState<ViewId>("flow");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [openServer, setOpenServer] = useState<string | null>(null);
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+
+  useEffect(() => applyTheme(theme), [theme]);
 
   useEffect(() => {
     source.start();
@@ -116,6 +121,20 @@ export function App() {
             ))}
           </select>
         </label>
+        <div className="theme-toggle" role="radiogroup" aria-label="Tema">
+          {(["light", "dark"] as Theme[]).map((t) => (
+            <button
+              key={t}
+              type="button"
+              role="radio"
+              aria-checked={theme === t}
+              className={`theme ${theme === t ? "theme-on" : ""}`}
+              onClick={() => setTheme(t)}
+            >
+              {t === "light" ? "Claro" : "Oscuro"}
+            </button>
+          ))}
+        </div>
         <div className="mode-toggle" role="radiogroup" aria-label="Fuente de datos">
           {(["demo", "live"] as Mode[]).map((m) => (
             <button
@@ -145,7 +164,7 @@ export function App() {
         {view === "flow" && <FlowView snap={snap} runName={selectedRun} />}
         {view === "lifecycle" && <LifecycleView snap={snap} runName={selectedRun} />}
         {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
-        {view === "terminal" && <TerminalView snap={snap} runName={selectedRun} mode={mode} />}
+        {view === "terminal" && <TerminalView snap={snap} runName={selectedRun} mode={mode} theme={theme} />}
       </main>
 
       {openServer && (
