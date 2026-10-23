@@ -8,15 +8,17 @@ import { isTerminal } from "./model/crd.ts";
 import { FlowView } from "./views/FlowView.tsx";
 import { LifecycleView } from "./views/LifecycleView.tsx";
 import { ServerDetail } from "./views/ServerDetail.tsx";
+import { TerminalView } from "./views/TerminalView.tsx";
 import { ServersView } from "./views/ServersView.tsx";
 import "./styles/app.css";
 
-type ViewId = "flow" | "lifecycle" | "servers";
+type ViewId = "flow" | "lifecycle" | "servers" | "terminal";
 
 const VIEWS: { id: ViewId; label: string; key: string }[] = [
   { id: "flow", label: "Flujo del prompt", key: "1" },
   { id: "lifecycle", label: "Ciclo de vida", key: "2" },
   { id: "servers", label: "Servidores", key: "3" },
+  { id: "terminal", label: "Terminal", key: "4" },
 ];
 
 function initialMode(): Mode {
@@ -143,6 +145,7 @@ export function App() {
         {view === "flow" && <FlowView snap={snap} runName={selectedRun} />}
         {view === "lifecycle" && <LifecycleView snap={snap} runName={selectedRun} />}
         {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
+        {view === "terminal" && <TerminalView snap={snap} runName={selectedRun} mode={mode} />}
       </main>
 
       {openServer && (

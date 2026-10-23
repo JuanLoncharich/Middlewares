@@ -63,7 +63,10 @@ function formatValue(v: unknown): string {
 
 /** One terminal row: time, level, component, message, key=value fields. */
 export function formatForTerminal(line: LogLine): string {
-  const time = line.ts.slice(11, 23);
+  const d = new Date(line.ts);
+  const time = Number.isNaN(d.getTime())
+    ? line.ts
+    : `${d.toLocaleTimeString("es-AR", { hour12: false })}.${String(d.getMilliseconds()).padStart(3, "0")}`;
   const level = line.level.toUpperCase().padEnd(5);
   const fields = extraFields(line)
     .map(([k, v]) => `${DIM}${k}=${RESET}${formatValue(v)}`)

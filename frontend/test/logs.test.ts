@@ -27,7 +27,7 @@ describe("evaluator log lines", () => {
 
   it("formats a terminal row with the time, level and fields", () => {
     const row = formatForTerminal(parseLogLine(RAW[0]!)!);
-    expect(row).toContain("14:02:11.120");
+    expect(row).toMatch(/\d\d:\d\d:11\.120/);
     expect(row).toContain("agent start");
     expect(row).toContain("kind=");
   });
