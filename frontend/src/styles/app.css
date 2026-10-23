@@ -4,6 +4,7 @@
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto auto 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .topbar {
@@ -548,7 +549,12 @@
 
 @media (max-width: 900px) {
   .topbar { flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); }
-  .tabs { order: 3; flex-basis: 100%; overflow-x: auto; }
+  .tabs { order: 3; flex-basis: 100%; min-width: 0; overflow-x: auto; }
+  .tab { white-space: nowrap; }
+  .run-picker { flex: 1 1 6rem; min-width: 0; }
+  .run-picker span { display: none; }
+  .run-picker select { width: 100%; min-width: 0; }
+  .stage, .view, .flow-head code { min-width: 0; overflow-wrap: anywhere; }
   .stage { padding: var(--space-3) var(--space-2); }
   .servers { grid-template-columns: 1fr; gap: var(--space-4); }
   .column + .column { border-left: 0; padding-left: 0; }

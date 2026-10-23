@@ -139,10 +139,13 @@ export class Script {
       this.wait(400).log("stdio transport connected", { generation: 1 }, "info", "evaluator.stdio");
       this.connected = true;
     }
+    // As in the runner: the advertised surface is scanned before fuzzing or probing starts.
+    const [firstScan, ...laterScans] = plan.scans ?? [];
+    if (firstScan) this.scan(firstScan);
     for (const note of plan.notes ?? []) {
       this.wait(note.after).log(note.msg, note.fields ?? {}, note.level ?? "info", note.component);
     }
-    for (const scan of plan.scans ?? []) this.scan(scan);
+    for (const scan of laterScans) this.scan(scan);
     const used = this.t - started;
     this.wait(Math.max(plan.ms - used, 500));
     const durationMs = this.t - started;

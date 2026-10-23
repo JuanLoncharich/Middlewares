@@ -189,7 +189,7 @@ function enrich(trips: Trip[], report: EvaluationReport): void {
       if (rec.error) trip.error ??= rec.error;
     }
     for (const scan of trip.scans) {
-      scan.warningRecords = gate.warnings.filter((w) => w.source === scan.source);
+      if (scan.status === "warn") scan.warningRecords = gate.warnings.filter((w) => w.source === scan.source);
       if (scan.status === "block" || scan.confidence !== undefined) {
         scan.detection = gate.detections.find((d) => d.source === scan.source);
       }

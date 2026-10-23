@@ -30,6 +30,7 @@ export function lamps(trip: Trip, vigil: StationState): Record<string, Lamp> {
     else out[s.id] = "pass";
   }
   for (const scan of trip.scans) {
+    if (scan.status === "pass") continue;
     const hit = scannersOf(scan);
     for (const id of hit) {
       const level: Lamp = scan.status === "block" ? "block" : "warn";
@@ -44,6 +45,13 @@ function scannersOf(scan: VigilScan): string[] {
   if (scan.scanners.length > 0) return scan.scanners;
   return [...new Set((scan.warningRecords ?? []).flatMap((w) => w.scanners))];
 }
+
+const VERDICT_WORD: Partial<Record<StationState, string>> = {
+  pass: "aprobado",
+  warn: "aprobado con reservas",
+  block: "rechazado",
+  fail: "fallido",
+};
 
 const TRIP_WORD: Record<Trip["status"], string> = {
   running: "en curso",
@@ -178,7 +186,7 @@ export function FlowView({ snap, runName }: { snap: Snapshot; runName: string | 
                       {run.status.finalScore ?? 0} <small>{RISK_LABEL[run.status.scoring.riskCategory]}</small>
                     </span>
                   )}
-                  <span className="station-state">{STATE_WORD[st]}</span>
+                  <span className="station-state">{(s.id === "verdict" && VERDICT_WORD[st]) || STATE_WORD[st]}</span>
                 </button>
                 {st === "active" && <span className="packet packet-here" aria-hidden="true" />}
               </div>
