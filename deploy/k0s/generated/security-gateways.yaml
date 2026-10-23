@@ -762,3 +762,36 @@ spec:
     ports:
     - protocol: TCP
       port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: occludra-from-ui-chat
+  namespace: security-gateways
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: occludra
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-eval-ui
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: opencode-chat
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-eval-ui
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: mcp-eval-ui
+    ports:
+    - protocol: TCP
+      port: 8081

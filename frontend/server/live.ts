@@ -5,7 +5,10 @@
 //
 // Env: KUBECONFIG (or in-cluster), NAMESPACE (mcp-evals), PORT (8787),
 // HOST (127.0.0.1), PROM_URL (optional, for Occludra redaction counts),
-// NODE_ENV=production to also serve the built UI from dist/.
+// NODE_ENV=production to also serve the built UI from dist/, and the chat's
+// CHAT_URL / CHAT_MODEL / OCCLUDRA_INSPECT_URL (see chat.ts). The chat is the
+// one route that sends something: a question to the tool-less OpenCode
+// server. Nothing here writes to the cluster.
 import * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
@@ -18,6 +21,7 @@ import type { ClientMessage, ServerMessage } from "../src/data/live.ts";
 import { API_VERSION, LABEL_RUN, type MCPEvaluationRun, isTerminal } from "../src/model/crd.ts";
 import { type LogLine, parseLogLine } from "../src/model/logs.ts";
 import type { EvaluationReport } from "../src/model/report.ts";
+import { chatEnabled, handleChat } from "./chat.ts";
 import { isSameOrigin } from "./origin.ts";
 
 const NAMESPACE = process.env["NAMESPACE"] ?? "mcp-evals";
@@ -351,6 +355,10 @@ const server = createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/plain" }).end("ok");
     return;
   }
+  if (req.url === "/api/chat") {
+    void handleChat(req, res);
+    return;
+  }
   if (PRODUCTION) {
     serveStatic(req, res);
     return;
@@ -379,5 +387,5 @@ if (PROM_URL) {
 }
 
 server.listen(PORT, HOST, () => {
-  log("listening", { url: `http://${HOST}:${PORT}`, namespace: NAMESPACE, context: kc.getCurrentContext(), prometheus: PROM_URL || "off" });
+  log("listening", { url: `http://${HOST}:${PORT}`, namespace: NAMESPACE, context: kc.getCurrentContext(), prometheus: PROM_URL || "off", chat: chatEnabled ? "on" : "off" });
 });

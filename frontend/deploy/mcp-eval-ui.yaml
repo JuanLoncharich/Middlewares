@@ -91,6 +91,14 @@ spec:
             # Occludra redaction counts; remove to hide them.
             - name: PROM_URL
               value: http://prometheus.observability.svc.cluster.local:9090
+            # The chat (ui-chat.yaml); deploy.sh leaves these empty with
+            # DEPLOY_UI_CHAT=0, which turns the chat off.
+            - name: CHAT_URL
+              value: "__CHAT_URL__"
+            - name: CHAT_MODEL
+              value: "__CHAT_MODEL__"
+            - name: OCCLUDRA_INSPECT_URL
+              value: "__OCCLUDRA_INSPECT_URL__"
           readinessProbe:
             httpGet:
               path: /healthz

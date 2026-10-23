@@ -6,22 +6,25 @@ import { DemoSource } from "./data/demo/replay.ts";
 import { useReplay, useSnapshot } from "./data/hooks.ts";
 import { LiveSource } from "./data/live.ts";
 import type { Mode, Snapshot } from "./data/source.ts";
-import { isTerminal } from "./model/crd.ts";
-import { FlowView } from "./views/FlowView.tsx";
-import { LifecycleView } from "./views/LifecycleView.tsx";
+import { type MCPEvaluationRun, isTerminal } from "./model/crd.ts";
+import { AnalysisView } from "./views/AnalysisView.tsx";
+import { ChatView } from "./views/ChatView.tsx";
 import { ServerDetail } from "./views/ServerDetail.tsx";
 import { TerminalView } from "./views/TerminalView.tsx";
 import { ServersView } from "./views/ServersView.tsx";
 import "./styles/app.css";
 import "./styles/bento.css";
+import "./styles/analysis.css";
+import "./styles/chat.css";
+import "./styles/chrome.css";
 
-type ViewId = "flow" | "lifecycle" | "servers" | "terminal";
+type ViewId = "analysis" | "chat" | "servers" | "terminal";
 
 const VIEWS: { id: ViewId; label: string; key: string }[] = [
-  { id: "flow", label: "Flujo del prompt", key: "1" },
-  { id: "lifecycle", label: "Ciclo de vida", key: "2" },
+  { id: "analysis", label: "Análisis", key: "1" },
+  { id: "chat", label: "Chat", key: "2" },
   { id: "servers", label: "Servidores", key: "3" },
-  { id: "terminal", label: "Terminal", key: "4" },
+  { id: "terminal", label: "Registro técnico", key: "4" },
 ];
 
 function initialMode(): Mode {
@@ -36,6 +39,12 @@ function pickLiveRun(snap: Snapshot): string | null {
   return (runs.find((r) => !isTerminal(r.status?.phase)) ?? runs[0])?.metadata.name ?? null;
 }
 
+function runLabel(r: MCPEvaluationRun): string {
+  const at = r.metadata.creationTimestamp ? new Date(r.metadata.creationTimestamp) : null;
+  const when = at ? at.toLocaleString("es-AR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  return `${r.spec.serverRef}${when ? `, ${when}` : ""}`;
+}
+
 export function App() {
   const demo = useMemo(() => new DemoSource(), []);
   const live = useMemo(() => new LiveSource(), []);
@@ -43,10 +52,14 @@ export function App() {
   const source = mode === "demo" ? demo : live;
   const snap = useSnapshot(source);
   const replay = useReplay(mode === "demo" ? demo : null);
-  const [view, setView] = useState<ViewId>("flow");
+  const [view, setView] = useState<ViewId>("analysis");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [openServer, setOpenServer] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [termOpened, setTermOpened] = useState(false);
+  useEffect(() => {
+    if (view === "terminal") setTermOpened(true);
+  }, [view]);
 
   useEffect(() => applyTheme(theme), [theme]);
 
@@ -115,12 +128,12 @@ export function App() {
           ))}
         </nav>
         <label className="run-picker">
-          <span>Run</span>
+          <span>Análisis de</span>
           <select value={selectedRun ?? ""} onChange={(e) => setSelectedRun(e.target.value || null)}>
-            {runOptions.length === 0 && <option value="">Sin runs</option>}
+            {runOptions.length === 0 && <option value="">Todavía no hay análisis</option>}
             {runOptions.map((r) => (
               <option key={r.metadata.name} value={r.metadata.name}>
-                {r.metadata.name}
+                {runLabel(r)}
               </option>
             ))}
           </select>
@@ -165,10 +178,19 @@ export function App() {
       )}
 
       <main className="stage">
-        {view === "flow" && <FlowView snap={snap} runName={selectedRun} />}
-        {view === "lifecycle" && <LifecycleView snap={snap} runName={selectedRun} />}
+        {view === "analysis" && <AnalysisView snap={snap} runName={selectedRun} />}
+        {/* Kept mounted so switching views does not lose the conversation. */}
+        <div hidden={view !== "chat"}>
+          <ChatView mode={mode} />
+        </div>
         {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
-        {view === "terminal" && <TerminalView snap={snap} runName={selectedRun} mode={mode} theme={theme} />}
+        {/* Kept mounted once opened: disposing xterm with writes still queued
+            throws inside xterm ("reading 'dimensions'"). */}
+        {termOpened && (
+          <div hidden={view !== "terminal"}>
+            <TerminalView snap={snap} runName={selectedRun} mode={mode} theme={theme} />
+          </div>
+        )}
       </main>
 
       {openServer && (
@@ -180,7 +202,7 @@ export function App() {
           onShowRun={(run) => {
             setSelectedRun(run);
             setOpenServer(null);
-            setView("lifecycle");
+            setView("analysis");
           }}
         />
       )}
