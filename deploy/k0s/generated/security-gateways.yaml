@@ -12,25 +12,29 @@ metadata:
 data:
   policy.yaml: "# Occludra egress policy.\n# Every field value in /v1/chat/completions requests is matched against\n# these\
     \ detectors before the request leaves the cluster.\nversion: 1\ndefault_action: redact        # redact | block | allow\n\
-    redaction_token: \"[REDACTED]\"\ndetectors:\n  - name: email\n    type: regex\n    pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\
-    .[A-Za-z]{2,}'\n    action: redact\n  - name: us-ssn\n    type: regex\n    pattern: '\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b'\n\
-    \    action: redact\n  - name: phone-intl\n    type: regex\n    pattern: '(\\+?[0-9][0-9()\\-\\s]{7,}[0-9])'\n    action:\
-    \ redact\n  - name: iban\n    type: regex\n    pattern: '\\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\\b'\n    action: redact\n\
-    \  - name: api-key\n    # Sk-..., AKIA..., ghp_..., xox..., and generic high-entropy\n    # assignment-style secrets commonly\
-    \ leaked by MCP tool output.\n    type: regex\n    pattern: '(sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|xox[bpars]-[A-Za-z0-9-]{10,}|-----BEGIN\
+    redaction_token: \"[REDACTED]\"\ndetectors:\n  # Order matters: each detector rewrites the text the next one sees, so\n\
+    \  # credentials go first. With phone-intl first, the digit run inside\n  # \"ghp_1234567890abc...\" was masked as a phone\
+    \ number, the api-key\n  # pattern no longer matched, and the rest of the token reached the model\n  # (found through\
+    \ the UI chat, 2026-10-23; pinned by policy_test.go).\n  - name: api-key\n    # Sk-..., AKIA..., ghp_..., xox..., and\
+    \ generic high-entropy\n    # assignment-style secrets commonly leaked by MCP tool output.\n    type: regex\n    pattern:\
+    \ '(sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|xox[bpars]-[A-Za-z0-9-]{10,}|-----BEGIN\
     \ [A-Z ]*PRIVATE KEY-----)'\n    action: redact\n  - name: bearer-token\n    type: regex\n    pattern: '(?i)\\b(bearer|authorization)[:=\
     \ ]+[A-Za-z0-9._~+/=-]{16,}'\n    action: redact\n  - name: password-context\n    # Natural-language secret disclosure:\
     \ \"the password is X\", \"passwd:\n    # X\". Catches high-entropy strings no keyword-prefix detector sees.\n    type:\
     \ regex\n    pattern: '(?i)\\b(pass ?words?|passphrases?|passcodes?|passwd)\\b\\s*(?:is|are|:|=)\\s*\\S{6,}'\n    action:\
     \ redact\n  - name: secret-assignment\n    # Assignment-style disclosures of generic secrets: \"api key = X\",\n    #\
     \ \"secret: X\" (egress twin of vigil's credential-harvest pattern).\n    type: regex\n    pattern: '(?i)\\b(api[_ -]?keys?|secrets?|tokens?|credentials?)\\\
-    b\\s*(?:is|are|:|=)\\s*\\S{8,}'\n    action: redact\n  - name: person-name-context\n    # Person names introduced by a\
-    \ relationship role: \"customer, Richard\n    # Philips\". Bare names stay out of scope (too many false positives);\n\
-    \    # the role word is the PII signal.\n    type: regex\n    pattern: '(?i)\\b(customers?|clients?|patients?|employees?|subscribers?|beneficiaries?)\\\
-    s*,?\\s+(?:mr\\.?|mrs\\.?|ms\\.?|dr\\.?)?\\s*[A-Z][a-z]+\\s+[A-Z][a-z]+'\n    action: redact\n  - name: large-amount\n\
-    \    # Financial magnitudes: 6+ digit bare amounts (\"1300201\") and\n    # comma-grouped amounts (\"1,300,201\"). Order\
-    \ ids can collide; a\n    # security egress defaults to redact.\n    type: regex\n    pattern: '\\b[0-9]{6,}\\b|\\b[0-9]{1,3}(,[0-9]{3})+\\\
-    b(\\.[0-9]{2})?'\n    action: redact\n  - name: currency-amount\n    type: regex\n    pattern: '(?:\\$|\u20AC|\xA3|USD|EUR)\\\
+    b\\s*(?:is|are|:|=)\\s*\\S{8,}'\n    action: redact\n  - name: email\n    type: regex\n    pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\
+    .[A-Za-z]{2,}'\n    action: redact\n  - name: us-ssn\n    type: regex\n    pattern: '\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b'\n\
+    \    action: redact\n  - name: iban\n    type: regex\n    pattern: '\\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\\b'\n    action:\
+    \ redact\n  - name: phone-intl\n    type: regex\n    pattern: '(\\+?[0-9][0-9()\\-\\s]{7,}[0-9])'\n    action: redact\n\
+    \  - name: person-name-context\n    # Person names introduced by a relationship role: \"customer, Richard\n    # Philips\"\
+    . Bare names stay out of scope (too many false positives);\n    # the role word is the PII signal.\n    type: regex\n\
+    \    pattern: '(?i)\\b(customers?|clients?|patients?|employees?|subscribers?|beneficiaries?)\\s*,?\\s+(?:mr\\.?|mrs\\\
+    .?|ms\\.?|dr\\.?)?\\s*[A-Z][a-z]+\\s+[A-Z][a-z]+'\n    action: redact\n  - name: large-amount\n    # Financial magnitudes:\
+    \ 6+ digit bare amounts (\"1300201\") and\n    # comma-grouped amounts (\"1,300,201\"). Order ids can collide; a\n   \
+    \ # security egress defaults to redact.\n    type: regex\n    pattern: '\\b[0-9]{6,}\\b|\\b[0-9]{1,3}(,[0-9]{3})+\\b(\\\
+    .[0-9]{2})?'\n    action: redact\n  - name: currency-amount\n    type: regex\n    pattern: '(?:\\$|\u20AC|\xA3|USD|EUR)\\\
     s?[0-9][0-9,]*'\n    action: redact\nmodels:\n  # Model allowlist: requests for anything not listed are rejected with\n\
     \  # 403 before any upstream connection is attempted. NOTE: OpenCode\n  # addresses the upstream with the BARE model id\
     \ (the `provider/`\n  # prefix exists only inside agent specs), so patterns match bare ids.\n  allow:\n    - \"^lfm2\\\
@@ -100,9 +104,14 @@ spec:
         - name: http
           containerPort: 8080
           protocol: TCP
+        - name: inspect
+          containerPort: 8081
+          protocol: TCP
         env:
         - name: OCCLUDRA_LISTEN
           value: 0.0.0.0:8080
+        - name: OCCLUDRA_INSPECT_LISTEN
+          value: 0.0.0.0:8081
         - name: OCCLUDRA_POLICY_FILE
           value: /conf/policy.yaml
         - name: OCCLUDRA_UPSTREAM_BASE_URL
@@ -194,6 +203,10 @@ spec:
   - name: http
     port: 8080
     targetPort: http
+    protocol: TCP
+  - name: inspect
+    port: 8081
+    targetPort: inspect
     protocol: TCP
 ---
 apiVersion: policy/v1
