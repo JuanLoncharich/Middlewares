@@ -114,6 +114,23 @@ ConfigMap `<run>-report`. El flujo del prompt se deriva igual en los dos modos
 - **Repositorios de la demo.** Son ficticios, salvo `filesystem-mcp`, que es el
   sample del repo.
 
+## Desplegarlo en el cluster (opcional)
+
+```bash
+docker build -t $IMG_REGISTRY/mcp-eval-ui:$TAG frontend && docker push $IMG_REGISTRY/mcp-eval-ui:$TAG
+sed "s|ghcr.io/security-eval/mcp-eval-ui:latest|$IMG_REGISTRY/mcp-eval-ui:$TAG|" frontend/deploy/mcp-eval-ui.yaml | kubectl apply -f -
+kubectl -n mcp-eval-ui port-forward svc/mcp-eval-ui 8787:80     # http://localhost:8787/?mode=live
+```
+
+El manifest crea el namespace `mcp-eval-ui` (PodSecurity `restricted`), un
+Role de solo lectura en `mcp-evals`, el Deployment (no-root, filesystem raíz
+de solo lectura) y una NetworkPolicy sin ingress, con salida solo a DNS, al
+API server y a Prometheus. Para que lleguen los conteos de Occludra, la
+NetworkPolicy `observability-isolation` tiene que aceptar tráfico desde
+`mcp-eval-ui` al puerto 9090; hoy solo acepta pods de su propio namespace.
+
+`deploy.sh` no lo instala todavía.
+
 ## Desarrollo
 
 ```bash
