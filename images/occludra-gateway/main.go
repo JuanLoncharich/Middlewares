@@ -152,6 +152,7 @@ type gateway struct {
 	fallbackKey  string
 	client       *http.Client
 	inflight     *inflightLimiter
+	journal      *journal
 }
 
 // currentPolicy loads the policy file on demand. ConfigMap volume updates
@@ -229,6 +230,7 @@ func main() {
 		fallbackBase: fallbackBase,
 		fallbackKey:  fallbackKey,
 		inflight:     newInflightLimiter(envInt("OCCLUDRA_MAX_INFLIGHT", 64)),
+		journal:      &journal{},
 		client: &http.Client{
 			// SSE completions legitimately stream for minutes; the timeout
 			// bounds the WHOLE request including body read, so it stays
@@ -276,6 +278,22 @@ func main() {
 			_ = server.Close()
 		}
 	}()
+
+	// Request journal (journal.go) on its own port, so it can be granted to
+	// the UI without granting inference. Off unless configured.
+	if inspectAddr := strings.TrimSpace(os.Getenv("OCCLUDRA_INSPECT_LISTEN")); inspectAddr != "" {
+		inspect := &http.Server{Addr: inspectAddr, Handler: g.journal.inspectHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Printf("request journal listening on %s", inspectAddr)
+			if err := inspect.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("request journal stopped: %v", err)
+			}
+		}()
+		go func() {
+			<-shutdownCtx.Done()
+			_ = inspect.Close()
+		}()
+	}
 
 	addr := server.Addr
 	log.Printf("occludra gateway listening on %s → upstream %s (policy %s, %d detectors)",
@@ -336,6 +354,32 @@ func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	stats := &requestStats{redactions: map[string]int{}}
 	policy := g.currentPolicy(nil)
 
+	requestBytes := 0
+	if client := clientOf(r); client != "" && g.journal != nil {
+		started := time.Now()
+		cw := &countingWriter{ResponseWriter: w}
+		w = cw
+		defer func() {
+			status := cw.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			g.journal.add(journalEntry{
+				At:            started.UTC(),
+				Client:        client,
+				Model:         stats.model,
+				Redactions:    stats.redactions,
+				BlockedBy:     stats.blockedBy,
+				Status:        status,
+				Upstream:      g.upstreamBase.Host,
+				ServedBy:      cw.Header().Get(upstreamHeader),
+				DurationMs:    time.Since(started).Milliseconds(),
+				RequestBytes:  requestBytes,
+				ResponseBytes: cw.bytes,
+			})
+		}()
+	}
+
 	// Backpressure before reading the body: at saturation answer 503 +
 	// Retry-After (evaluator and OpenCode clients retry with backoff)
 	// instead of buffering unlimited concurrent request bodies and SSE
@@ -353,6 +397,7 @@ func (g *gateway) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("body too large or unreadable: %v", err), http.StatusRequestEntityTooLarge)
 		return
 	}
+	requestBytes = len(body)
 
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -519,7 +564,7 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 			return
 		}
 		for name, values := range r.Header {
-			if isHopByHop(name) || strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "traceparent") || strings.EqualFold(name, "tracestate") || strings.EqualFold(name, "baggage") || strings.HasPrefix(strings.ToLower(name), "x-mcp-") {
+			if isHopByHop(name) || strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "traceparent") || strings.EqualFold(name, "tracestate") || strings.EqualFold(name, "baggage") || strings.EqualFold(name, clientHeader) || strings.HasPrefix(strings.ToLower(name), "x-mcp-") {
 				continue
 			}
 			for _, v := range values {
@@ -576,6 +621,7 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request, body []byte, con
 	}
 	defer resp.Body.Close()
 	log.Printf("served via upstream %s (status %d)", servedBy, resp.StatusCode)
+	w.Header().Set(upstreamHeader, servedBy)
 
 	isInference := markerApplies(incoming)
 	isSSE := strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
