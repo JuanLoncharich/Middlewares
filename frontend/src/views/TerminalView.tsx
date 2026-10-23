@@ -11,20 +11,20 @@ import { formatForTerminal } from "../model/logs.ts";
 
 // Mirrors the tokens in styles/tokens.css; xterm needs literal colours.
 const THEME = {
-  background: "#132238",
-  foreground: "#e6ecef",
-  cursor: "#132238",
-  selectionBackground: "#5a6b80",
-  black: "#132238",
-  red: "#ff8a80",
-  green: "#7fd8c4",
-  yellow: "#f2c14e",
-  blue: "#9cc3ff",
-  magenta: "#e3a6ff",
-  cyan: "#8fd3ff",
-  white: "#e6ecef",
-  brightBlack: "#8a9bb0",
-  brightRed: "#ff8a80",
+  background: "#1a1a18",
+  foreground: "#f4f4f0",
+  cursor: "#1a1a18",
+  selectionBackground: "#3c3c36",
+  black: "#1a1a18",
+  red: "#f0614f",
+  green: "#9fe1cb",
+  yellow: "#f7a396",
+  blue: "#c9c9c0",
+  magenta: "#f7a396",
+  cyan: "#9fe1cb",
+  white: "#f4f4f0",
+  brightBlack: "#8b8b82",
+  brightRed: "#f58676",
 };
 
 interface Props {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Logo } from "./components/Logo.tsx";
 import { ReplayBar } from "./components/ReplayBar.tsx";
 import { type Theme, applyTheme, initialTheme } from "./components/theme.ts";
 import { DemoSource } from "./data/demo/replay.ts";
@@ -96,7 +97,10 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <p className="brand">MCP Eval</p>
+        <p className="brand">
+          <Logo className="brand-logo" />
+          <span className="brand-name">MCP Eval</span>
+        </p>
         <nav className="tabs" aria-label="Vistas">
           {VIEWS.map((v) => (
             <button

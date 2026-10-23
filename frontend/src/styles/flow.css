@@ -17,7 +17,7 @@
 .flow-now {
   margin-left: auto !important;
   font-weight: 700;
-  color: var(--quarantine-ink);
+  color: var(--progress-ink);
 }
 
 .flow-waiting {
@@ -54,13 +54,13 @@
   cursor: pointer;
 }
 
-.trip-num { grid-area: num; font-size: var(--step-2); font-weight: 800; font-variation-settings: "wdth" 70; line-height: 1; align-self: center; }
+.trip-num { grid-area: num; font-size: var(--step-2); font-weight: 800; line-height: 1; align-self: center; }
 .trip-name { grid-area: name; font-weight: 700; font-size: var(--step--1); }
 .trip-state { grid-area: state; font-size: 0.85rem; color: var(--steel); }
 
-.trip-ok .trip-state { color: var(--cleared); }
-.trip-failed .trip-state, .trip-blocked .trip-state { color: var(--rejected); font-weight: 700; }
-.trip-running .trip-state { color: var(--quarantine-ink); font-weight: 700; }
+.trip-ok .trip-state { color: var(--cleared-text); }
+.trip-failed .trip-state, .trip-blocked .trip-state { color: var(--rejected-text); font-weight: 700; }
+.trip-running .trip-state { color: var(--progress-ink); font-weight: 700; }
 
 .trip-on {
   border-color: var(--ink);
@@ -108,7 +108,6 @@
 .station-name {
   font-size: var(--step-1);
   font-weight: 800;
-  font-variation-settings: "wdth" 78;
   line-height: 1.05;
   color: inherit;
   overflow-wrap: anywhere;
@@ -128,19 +127,17 @@
 .station-verdict {
   font-size: var(--step-3);
   font-weight: 800;
-  font-variation-settings: "wdth" 70;
   line-height: 1;
 }
 
 .station-verdict small {
   display: block;
   font-size: var(--step--1);
-  font-variation-settings: "wdth" 100;
 }
 
 .station-active {
-  border: 3px solid var(--quarantine);
-  background: var(--warning-wash);
+  border: 3px solid var(--progress);
+  background: var(--progress-wash);
   color: var(--ink);
 }
 
@@ -150,24 +147,24 @@
   color: var(--ink);
 }
 
-.station-pass .station-state { color: var(--cleared); }
+.station-pass .station-state { color: var(--cleared-text); }
 
 .station-warn {
-  border: 3px solid var(--quarantine);
-  background: var(--warning-wash);
-  color: var(--quarantine-ink);
+  border: 3px solid var(--warn);
+  background: var(--warn-wash);
+  color: var(--warn-text);
 }
 
 .station-block {
   border: 4px solid var(--rejected);
   background: var(--rejected-wash);
-  color: var(--rejected);
+  color: var(--rejected-text);
 }
 
 .station-fail {
   border: 3px solid var(--rejected);
   background: var(--surface-strong);
-  color: var(--rejected);
+  color: var(--rejected-text);
 }
 
 .station-off {
@@ -209,10 +206,10 @@
 .lamp-off { color: var(--steel); }
 .lamp-off .lamp-bulb { background: transparent; box-shadow: inset 0 0 0 2px var(--rule); }
 .lamp-idle .lamp-bulb { background: var(--rule); }
-.station-active .lamp-idle .lamp-bulb { animation: pulse 0.9s ease-in-out infinite; background: var(--quarantine); }
+.station-active .lamp-idle .lamp-bulb { animation: pulse 0.9s ease-in-out infinite; background: var(--progress); }
 .lamp-pass .lamp-bulb { background: var(--cleared); }
-.lamp-warn .lamp-bulb { background: var(--quarantine); box-shadow: 0 0 0 3px var(--glow-warn); }
-.lamp-block { color: var(--rejected); }
+.lamp-warn .lamp-bulb { background: var(--warn); box-shadow: 0 0 0 3px var(--glow-warn); }
+.lamp-block { color: var(--rejected-text); }
 .lamp-block .lamp-bulb { background: var(--rejected); box-shadow: 0 0 0 4px var(--glow-block); }
 
 /* Conduit segments. */
@@ -225,9 +222,9 @@
 }
 
 .seg-done { background: var(--cleared); }
-.seg-done.seg-warn { background: var(--quarantine); }
+.seg-done.seg-warn { background: var(--warn); }
 .seg-done.seg-fail, .seg-done.seg-block { background: var(--rejected); }
-.seg-moving { background: var(--quarantine); }
+.seg-moving { background: var(--progress); }
 .seg-off {
   background: repeating-linear-gradient(90deg, var(--rule) 0 6px, transparent 6px 12px);
 }
@@ -275,7 +272,7 @@
   transform: translateX(-50%) rotate(-8deg);
   font-weight: 800;
   font-size: var(--step--1);
-  color: var(--rejected);
+  color: var(--rejected-text);
   white-space: nowrap;
 }
 
@@ -295,7 +292,7 @@
   width: 1.3rem;
   height: 1.3rem;
   border-radius: 4px;
-  background: var(--quarantine);
+  background: var(--progress);
   border: 3px solid var(--ink);
   pointer-events: none;
 }
@@ -346,12 +343,11 @@
 
 .detail-head h3 {
   font-size: var(--step-2);
-  font-variation-settings: "wdth" 80;
 }
 
 .detail-head p { margin: var(--space-1) 0 0; font-size: var(--step--1); }
 
-.detail-block .detail-head h3 { color: var(--rejected); }
+.detail-block .detail-head h3 { color: var(--rejected-text); }
 
 .detail-lead {
   margin: 0 0 var(--space-2);
@@ -383,7 +379,7 @@
   padding-left: var(--space-2);
 }
 
-.scan-warn { border-left-color: var(--quarantine); }
+.scan-warn { border-left-color: var(--warn); }
 .scan-block { border-left-color: var(--rejected); }
 .scan-unavailable { border-left-color: var(--steel); }
 
@@ -395,8 +391,8 @@
   margin: 0 0 var(--space-1);
 }
 
-.scan-block .scan-head span { color: var(--rejected); font-weight: 700; }
-.scan-warn .scan-head span { color: var(--quarantine-ink); font-weight: 700; }
+.scan-block .scan-head span { color: var(--rejected-text); font-weight: 700; }
+.scan-warn .scan-head span { color: var(--warn-text); font-weight: 700; }
 
 .votes, .redactions {
   border-collapse: collapse;
@@ -410,8 +406,8 @@
   border-bottom: 1px solid var(--rule);
 }
 
-.votes .vote-hit td:last-child { font-weight: 700; color: var(--rejected); }
-.scan-warn .votes .vote-hit td:last-child { color: var(--quarantine-ink); }
+.votes .vote-hit td:last-child { font-weight: 700; color: var(--rejected-text); }
+.scan-warn .votes .vote-hit td:last-child { color: var(--warn-text); }
 
 .redactions .num { font-weight: 700; font-variant-numeric: tabular-nums; }
 
@@ -473,7 +469,7 @@
 .error-text {
   font-family: var(--font-mono);
   font-size: 0.9rem;
-  color: var(--rejected);
+  color: var(--rejected-text);
 }
 
 @media (max-width: 1100px) {

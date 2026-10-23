@@ -29,7 +29,7 @@
 .tab-on { background: var(--ink); color: var(--paper); }
 
 .live-open { background: var(--cleared-wash); }
-.live-connecting { background: var(--warning-wash); }
+.live-connecting { background: var(--progress-wash); }
 .live-error { background: var(--rejected-wash); }
 
 .theme-toggle {
@@ -95,8 +95,8 @@
 }
 
 /* Tinted tiles: state without shouting. */
-.tile-evaluating { border: 2px solid var(--quarantine); }
-.tile-warn { background: var(--warning-wash); border-color: var(--quarantine); }
+.tile-evaluating { border: 2px solid var(--progress); }
+.tile-warn { background: var(--warn-wash); border-color: var(--warn); }
 .tile-rejected { background: var(--rejected-wash); border-color: var(--rejected); }
 .tile-approved { background: var(--cleared-wash); border-color: var(--cleared); }
 
@@ -124,7 +124,6 @@
 
 .head-server {
   font-size: var(--step-4);
-  font-variation-settings: "wdth" 78;
   overflow-wrap: anywhere;
 }
 
@@ -140,7 +139,7 @@
 .flow-now {
   margin: 0 !important;
   font-weight: 700;
-  color: var(--quarantine-ink);
+  color: var(--progress-ink);
 }
 
 /* The verdict tile is the only solid fill on a page. */
@@ -154,21 +153,20 @@
 
 .tile-verdict.tile-approved { background: var(--cleared); color: var(--on-accent); }
 .tile-verdict.tile-rejected { background: var(--rejected); color: var(--on-accent); }
-.tile-verdict.tile-warn { background: var(--quarantine); color: var(--on-warn); }
+.tile-verdict.tile-warn { background: var(--warn); color: var(--on-warn); }
 .tile-verdict.tile-evaluating {
-  background: var(--warning-wash);
-  border: 2px solid var(--quarantine);
+  background: var(--progress-wash);
+  border: 2px solid var(--progress);
   color: var(--ink);
 }
 
-.tile-verdict.tile-evaluating .verdict-word { color: var(--quarantine-ink); }
+.tile-verdict.tile-evaluating .verdict-word { color: var(--progress-ink); }
 .verdict-of { font-size: 0.45em; opacity: 0.7; }
 
 .verdict-big {
   margin: auto 0 0;
   font-size: clamp(3.5rem, 6vw, 5.5rem);
   font-weight: 800;
-  font-variation-settings: "wdth" 66;
   line-height: 0.9;
   font-variant-numeric: tabular-nums;
 }
@@ -177,7 +175,6 @@
   margin: var(--space-1) 0 0;
   font-size: var(--step-1);
   font-weight: 800;
-  font-variation-settings: "wdth" 85;
 }
 
 .verdict-note {
@@ -194,7 +191,6 @@
   margin: 0;
   font-size: var(--step-4);
   font-weight: 800;
-  font-variation-settings: "wdth" 70;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -265,8 +261,8 @@
   font-weight: 700;
 }
 
-.tile-warn.tile-banner .banner-lead { color: var(--quarantine-ink); }
-.tile-rejected.tile-banner .banner-lead { color: var(--rejected); }
+.tile-warn.tile-banner .banner-lead { color: var(--warn-text); }
+.tile-rejected.tile-banner .banner-lead { color: var(--rejected-text); }
 
 .tile-banner .banner-raw {
   margin: var(--space-1) 0 0;
@@ -312,7 +308,6 @@
   margin: 0 0 var(--space-1);
   font-size: var(--step-1);
   font-weight: 800;
-  font-variation-settings: "wdth" 80;
   overflow-wrap: anywhere;
 }
 
@@ -338,4 +333,92 @@
   .bento > .tile { grid-column: span 12; }
   .head-server { font-size: var(--step-3); }
   .column + .column { padding-left: var(--space-3); }
+}
+
+/* --- brand ----------------------------------------------------------------- */
+
+h1, h2, h3,
+.brand-name,
+.head-server,
+.station-name,
+.ticket-name,
+.phase-name,
+.side-strong,
+.verdict-word,
+.flow-waiting-title,
+.terminal-head h2,
+.detail-head h3,
+.drawer-head h2 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* Big numbers are display type; small figures and identifiers are data. */
+.verdict-big,
+.stat-value,
+.ticket-score,
+.big,
+.station-verdict,
+.station-num,
+.phase-num,
+.trip-num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+.count,
+.phase-time,
+.history .num,
+.redactions .num {
+  font-family: var(--font-mono);
+}
+
+.verdict-big, .stat-value, .ticket-score, .big { font-weight: 700; }
+
+.topbar .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.brand-logo { width: 2.6rem; height: 2.6rem; flex: none; }
+
+.brand-name {
+  font-size: var(--step-1);
+  font-weight: 700;
+  word-spacing: 0;
+}
+
+/* Caution is approved with reservations: coral outline, not a coral fill. */
+.tile-verdict.tile-warn {
+  background: var(--warn-wash);
+  border: 3px solid var(--warn);
+  color: var(--ink);
+}
+
+.tile-verdict.tile-warn .verdict-word { color: var(--warn-text); }
+
+.station-pass {
+  background: var(--cleared-wash);
+  border: 2px solid var(--cleared-text);
+}
+
+.lamp-warn .lamp-bulb {
+  background: transparent;
+  box-shadow: inset 0 0 0 3px var(--warn), 0 0 0 3px var(--glow-warn);
+}
+
+.packet {
+  background: var(--cleared);
+  border-color: var(--progress);
+}
+
+.seg-done { background: var(--cleared-text); }
+
+.station-name {
+  font-size: clamp(1.05rem, 1.3vw, 1.5rem);
+  overflow-wrap: normal;
+  word-break: keep-all;
+  hyphens: none;
 }
