@@ -10,7 +10,7 @@ import * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
@@ -332,7 +332,8 @@ function serveStatic(req: IncomingMessage, res: ServerResponse): void {
   const url = new URL(req.url ?? "/", "http://x");
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, "");
   let file = resolve(join(DIST, rel));
-  if (!file.startsWith(DIST)) {
+  // DIST + sep: a bare prefix check would also accept a sibling like dist-old/.
+  if (file !== DIST && !file.startsWith(DIST + sep)) {
     res.writeHead(403).end();
     return;
   }
