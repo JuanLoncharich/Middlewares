@@ -8,4 +8,6 @@ resources:
 - mcp-eval-system.yaml
 - mcp-eval-ui.yaml
 - mcp-evals.yaml
+- metallb-system.yaml
 - security-gateways.yaml
+- traefik.yaml

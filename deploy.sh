@@ -43,6 +43,14 @@
 #   DEPLOY_UI_CHAT=0   leave out the UI chat (frontend/deploy/ui-chat.yaml): a tool-less OpenCode
 #                      server whose only provider is Occludra, plus the policies that let the UI
 #                      reach it and read Occludra's request journal. Default: same as DEPLOY_UI.
+#   DEPLOY_INGRESS=1   expose the platform on one fixed IP: MetalLB (L2) hands out
+#                      INGRESS_IP_RANGE, Traefik takes INGRESS_IP (default: the range's first
+#                      address) and serves HTTPS with a self-signed default certificate; with
+#                      DEPLOY_UI=1 the UI is published at https://$INGRESS_IP/ behind basic auth.
+#                      The Secrets (certificate, htpasswd) come from hack/gitops/secrets.sh.
+#                      Default 0; on for the k0s cluster.
+#   INGRESS_IP_RANGE   addresses MetalLB may announce, e.g. 10.66.51.11-10.66.51.20
+#                      (required with DEPLOY_INGRESS=1; must be routed to the nodes' L2 segment)
 #   ---- security layers (Vigil / Occludra / NetBird) ----
 #   DEPLOY_SECURITY_GATEWAYS=0   skip the security-gateways namespace (default: deploy it)
 #   MESH_ENFORCE=false           legacy mode: strip the NetBird sidecars and let the evaluator
@@ -130,6 +138,11 @@ TRIGGER="${TRIGGER:-1}"
 DEPLOY_SECURITY_GATEWAYS="${DEPLOY_SECURITY_GATEWAYS:-1}"
 DEPLOY_UI="${DEPLOY_UI:-0}"
 DEPLOY_UI_CHAT="${DEPLOY_UI_CHAT:-$DEPLOY_UI}"
+DEPLOY_INGRESS="${DEPLOY_INGRESS:-0}"
+if [ "$DEPLOY_INGRESS" = "1" ]; then
+  : "${INGRESS_IP_RANGE:?set INGRESS_IP_RANGE, e.g. 10.66.51.11-10.66.51.20}"
+  INGRESS_IP="${INGRESS_IP:-${INGRESS_IP_RANGE%%-*}}"
+fi
 MESH_ENFORCE="${MESH_ENFORCE:-true}"
 AUTOSCALE_METRICS="${AUTOSCALE_METRICS:-0}"
 DEPLOY_AUTOSCALER="${DEPLOY_AUTOSCALER:-0}"
@@ -626,6 +639,34 @@ POLICY
     printf '      ports:\n        - {protocol: TCP, port: %s}\n' "$ui_api_port"
   } | kubectl apply -f -
   kubectl -n mcp-eval-ui rollout status deploy/mcp-eval-ui --timeout=180s
+fi
+
+# ---------------------------------------------------------------------------
+# Ingress layer: MetalLB gives Traefik one fixed IP from INGRESS_IP_RANGE;
+# Traefik terminates HTTPS and routes by path. Charts are vendored
+# (manifests/{metallb,traefik}/chart, see their VENDORED.md) and rendered with
+# helm template, like Chroma, so Flux applies plain YAML.
+# ---------------------------------------------------------------------------
+if [ "$DEPLOY_INGRESS" = "1" ]; then
+  log "Deploying the ingress layer (MetalLB $INGRESS_IP_RANGE, Traefik on $INGRESS_IP)"
+  kubectl apply -f manifests/ingress/namespaces.yaml
+  helm template metallb manifests/metallb/chart -n metallb-system \
+    -f manifests/metallb/values-mcp-eval.yaml | kubectl apply -n metallb-system -f -
+  # The pool is validated by the controller's webhook: wait for it on a live cluster.
+  kubectl -n metallb-system rollout status deploy/metallb-controller --timeout=180s
+  sed "s|__INGRESS_IP_RANGE__|$INGRESS_IP_RANGE|g" manifests/ingress/metallb-config.yaml | kubectl apply -f -
+  # Only Traefik's own CRDs (IngressRoute, Middleware, TLSStore...); the chart
+  # also ships Traefik Hub and Gateway API CRDs, which this cluster does not use.
+  for crd in manifests/traefik/chart/crds/traefik.io_*.yaml; do kubectl apply --server-side -f "$crd"; done
+  helm template traefik manifests/traefik/chart -n traefik \
+    -f manifests/traefik/values-mcp-eval.yaml \
+    --set-string 'service.annotations.metallb\.io/address-pool=mcp-eval' \
+    --set-string "service.annotations.metallb\\.io/loadBalancerIPs=$INGRESS_IP" \
+    | kubectl apply -n traefik -f -
+  kubectl -n traefik rollout status deploy/traefik --timeout=180s
+  if [ "$DEPLOY_UI" = "1" ]; then
+    kubectl apply -f manifests/ingress/ui-ingress.yaml
+  fi
 fi
 
 if [ "$WORKSTATION_NODEPORT" = "1" ]; then

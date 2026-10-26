@@ -1,0 +1,28 @@
+# What MetalLB may hand out and where it may announce it. deploy.sh replaces
+# __INGRESS_IP_RANGE__ (INGRESS_IP_RANGE, e.g. 10.66.51.11-10.66.51.20).
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: mcp-eval
+  namespace: metallb-system
+spec:
+  addresses:
+    - __INGRESS_IP_RANGE__
+  # Services get an address only when they ask for one by annotation, so a
+  # stray type: LoadBalancer cannot take an IP from the pool.
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: mcp-eval
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - mcp-eval
+  # Only the OpenStack VMs share the L2 segment with the router. The GPU PC
+  # joins over ZeroTier: an ARP answer from it would never reach the router.
+  nodeSelectors:
+    - matchExpressions:
+        - key: security.eval.io/gpu
+          operator: DoesNotExist
