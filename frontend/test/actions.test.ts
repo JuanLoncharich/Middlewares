@@ -1,7 +1,7 @@
 import { type AddressInfo } from "node:net";
 import { type Server, createServer } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { type ServerStore, handleAction } from "../server/actions.ts";
+import { type ServerStore, handleAction, mergePatchBody } from "../server/actions.ts";
 import type { MCPServer } from "../src/model/crd.ts";
 import { LABEL_FLUX, LABEL_MANAGED_BY, MANAGED_BY_UI, MAX_UI_SERVERS } from "../src/model/serverForm.ts";
 
@@ -103,5 +103,18 @@ describe("server actions", () => {
     expect((await req("DELETE", "/api/servers/mine", undefined, "https://evil.example")).status).toBe(403);
     expect((await req("POST", "/api/servers/nope/evaluate")).status).toBe(404);
     expect(calls).toHaveLength(0);
+  });
+
+  it("keeps the server's name when a patch carries metadata", () => {
+    const body = mergePatchBody("security.eval.io/v1alpha1", "MCPServer", "mcp-evals", "mine", {
+      metadata: { annotations: { "security.eval.io/trigger-now": "true" } },
+    });
+    expect(body.metadata).toEqual({ annotations: { "security.eval.io/trigger-now": "true" }, name: "mine", namespace: "mcp-evals" });
+    expect(mergePatchBody("v", "K", "ns", "x", { spec: { active: false } })).toEqual({
+      apiVersion: "v",
+      kind: "K",
+      spec: { active: false },
+      metadata: { name: "x", namespace: "ns" },
+    });
   });
 });
