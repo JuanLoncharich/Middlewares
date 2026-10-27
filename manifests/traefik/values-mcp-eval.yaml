@@ -1,0 +1,61 @@
+# Traefik: the single HTTP(S) entry point of the platform. MetalLB gives its
+# Service one fixed IP (deploy.sh sets INGRESS_IP); routes are plain
+# Kubernetes Ingress objects, and Traefik middlewares add what the apps
+# lack (basic auth for the UI).
+
+deployment:
+  replicas: 1
+
+# Ingress objects with ingressClassName: traefik. Not the cluster default, so
+# nothing gets exposed by accident.
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik
+
+providers:
+  kubernetesCRD:
+    enabled: true
+    # Each route uses middlewares from its own namespace only.
+    allowCrossNamespace: false
+  kubernetesIngress:
+    enabled: true
+
+ports:
+  web:
+    # Plain HTTP only redirects to HTTPS.
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    http:
+      tls:
+        enabled: true
+
+# Default certificate for every TLS route: self-signed, created by
+# hack/gitops/secrets.sh (Secret traefik/traefik-default-cert, never in git).
+tlsStore:
+  default:
+    defaultCertificate:
+      secretName: traefik-default-cert
+
+# The dashboard stays internal (no IngressRoute).
+ingressRoute:
+  dashboard:
+    enabled: false
+
+service:
+  spec:
+    type: LoadBalancer
+    # Cluster: any node can receive the traffic and forward it to Traefik.
+    externalTrafficPolicy: Cluster
+
+resources:
+  requests: {cpu: 20m, memory: 64Mi}
+  limits: {memory: 256Mi}
+
+accessLog:
+  enabled: true

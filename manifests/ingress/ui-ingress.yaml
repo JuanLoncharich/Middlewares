@@ -1,0 +1,61 @@
+# The UI behind Traefik: https://<INGRESS_IP>/ with a username and password.
+# Lives here, not in frontend/deploy/, because it is the platform's entry
+# point; the UI itself is unchanged. Applied with DEPLOY_INGRESS=1 and
+# DEPLOY_UI=1. The Secret ui-basic-auth (htpasswd lines) is created by
+# hack/gitops/secrets.sh and never goes to git.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ui-basic-auth
+  namespace: mcp-eval-ui
+spec:
+  basicAuth:
+    secret: ui-basic-auth
+    realm: MCP Eval
+    # The UI does not need the credentials; do not pass them on.
+    removeHeader: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-eval-ui
+  namespace: mcp-eval-ui
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: mcp-eval-ui-ui-basic-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-eval-ui
+                port:
+                  number: 80
+---
+# The UI's own policy (frontend/deploy/mcp-eval-ui.yaml) allows no ingress;
+# this adds exactly Traefik -> UI on the container port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-eval-ui-from-traefik
+  namespace: mcp-eval-ui
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-eval-ui
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - { protocol: TCP, port: 8787 }

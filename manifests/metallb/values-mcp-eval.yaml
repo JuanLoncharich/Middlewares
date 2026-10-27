@@ -1,0 +1,31 @@
+# MetalLB for the k0s cluster: Layer-2 mode only. The IP pool and the
+# L2Advertisement live in manifests/ingress/metallb-config.yaml (rendered by
+# deploy.sh with INGRESS_IP_RANGE); this file only sizes the components.
+#
+# L2 mode: the speaker on one node answers ARP for each service IP, and
+# another node takes over if it dies. It works on OpenStack here because the
+# MD and MD_ingress subnets share one network and every node port allows
+# 10.66.0.0/16 as an extra address (allowed-address-pairs).
+
+# BGP is not used; skip the FRR backend and its subchart.
+frrk8s:
+  enabled: false
+
+crds:
+  enabled: true
+  # The validating webhook is served by the controller. With Fail, Flux's
+  # first apply of the IPAddressPool is rejected until the controller is up;
+  # Ignore lets it through and the next reconcile is clean either way.
+  validationFailurePolicy: Ignore
+
+controller:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}
+
+speaker:
+  frr:
+    enabled: false
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}

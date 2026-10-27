@@ -11,6 +11,16 @@
 #   chroma/chroma-auth                           random reader/writer tokens
 #   security-gateways/chroma-reader              copy of the reader token, for Vigil
 #   chroma/minio-credentials                     the fixed MinIO profile from manifests/chroma/minio.yaml
+#   metallb-system/metallb-webhook-cert          with DEPLOY_INGRESS=1: empty; MetalLB's controller fills
+#                                                it with its webhook certificate (the chart ships it empty,
+#                                                but render.sh drops every Secret)
+#   traefik/traefik-default-cert                 with DEPLOY_INGRESS=1: self-signed certificate for
+#                                                INGRESS_IP (2 years); a copy of the public part goes to
+#                                                ~/.config/mcp-eval/ingress-cert.pem, to trust it in a browser
+#   mcp-eval-ui/ui-basic-auth                    with DEPLOY_INGRESS=1 and DEPLOY_UI=1: htpasswd line for
+#                                                the UI. Login in ~/.config/mcp-eval/ui-login (user:password,
+#                                                0600), generated once (UI_USER, default "mcp"); delete
+#                                                that file and the Secret to rotate it.
 # Key values travel through pipes only: never on argv, never printed.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -18,6 +28,8 @@ cd "$(dirname "$0")/../.."
 dir="${1:?usage: secrets.sh <cluster dir, e.g. deploy/k0s>}"
 k() { kubectl ${CONTEXT:+--context "$CONTEXT"} "$@"; }
 LLM_PROVIDER="$(. "$dir/render.env"; echo "${LLM_PROVIDER:-zen}")"
+read -r DEPLOY_INGRESS DEPLOY_UI INGRESS_IP < <(. "$dir/render.env"
+  range="${INGRESS_IP_RANGE:-}"; echo "${DEPLOY_INGRESS:-0} ${DEPLOY_UI:-0} ${INGRESS_IP:-${range%%-*}}")
 
 for ns in chroma security-gateways mcp-evals; do
   k create namespace "$ns" --dry-run=client -o yaml | k apply -f - >/dev/null
@@ -78,4 +90,43 @@ for d in yaml.safe_load_all(open("manifests/chroma/minio.yaml")):
     if d and d["kind"] == "Secret":
         print(yaml.safe_dump(d))' | k apply -f - >/dev/null
   echo "minio-credentials written"
+fi
+
+if [ "$DEPLOY_INGRESS" = "1" ]; then
+  conf="$HOME/.config/mcp-eval"
+  mkdir -p "$conf" && chmod 700 "$conf"
+  k apply -f manifests/ingress/namespaces.yaml >/dev/null
+  k create namespace mcp-eval-ui --dry-run=client -o yaml | k apply -f - >/dev/null
+  if ! k -n metallb-system get secret metallb-webhook-cert >/dev/null 2>&1; then
+    k -n metallb-system create secret generic metallb-webhook-cert --dry-run=client -o yaml | k apply -f - >/dev/null
+    echo "metallb-webhook-cert created (empty; MetalLB fills it)"
+  fi
+  if ! k -n traefik get secret traefik-default-cert >/dev/null 2>&1; then
+    work="$(mktemp -d)"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 730 \
+      -keyout "$work/tls.key" -out "$work/tls.crt" -subj "/CN=MCP Eval ($INGRESS_IP)" \
+      -addext "subjectAltName=IP:$INGRESS_IP" -addext "basicConstraints=critical,CA:TRUE" 2>/dev/null
+    k -n traefik create secret tls traefik-default-cert --cert="$work/tls.crt" --key="$work/tls.key" \
+      --dry-run=client -o yaml | k apply -f - >/dev/null
+    cp "$work/tls.crt" "$conf/ingress-cert.pem"
+    rm -rf "$work"
+    echo "traefik-default-cert generated for $INGRESS_IP (public part: $conf/ingress-cert.pem)"
+  fi
+  if [ "$DEPLOY_UI" = "1" ] && ! k -n mcp-eval-ui get secret ui-basic-auth >/dev/null 2>&1; then
+    login="$conf/ui-login"
+    if [ ! -s "$login" ]; then
+      ( umask 077; printf '%s:%s\n' "${UI_USER:-mcp}" "$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')" > "$login" )
+    fi
+    user="$(cut -d: -f1 "$login")"
+    # bcrypt via mkpasswd (whois package) or htpasswd (apache-tools); the
+    # password goes through stdin only.
+    if command -v htpasswd >/dev/null; then
+      hash="$(cut -d: -f2- "$login" | htpasswd -niB "$user" | cut -d: -f2-)"
+    else
+      hash="$(cut -d: -f2- "$login" | mkpasswd -m bcrypt -R 10 -s)"
+    fi
+    printf '%s:%s\n' "$user" "$hash" | k -n mcp-eval-ui create secret generic ui-basic-auth \
+      --from-file=users=/dev/stdin --dry-run=client -o yaml | k apply -f - >/dev/null
+    echo "ui-basic-auth written (login in $login)"
+  fi
 fi

@@ -1,0 +1,16 @@
+# Namespaces for the ingress layer (deploy.sh, DEPLOY_INGRESS=1).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+  labels:
+    # The speaker needs host networking and NET_RAW to answer ARP for the
+    # service IPs; that only fits the privileged profile.
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+  labels:
+    pod-security.kubernetes.io/enforce: restricted

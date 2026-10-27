@@ -728,6 +728,34 @@ score 47, Caution); DLP round-2 all-green (`dlp-test-results/run2/`): api-key,
 password, customer+amount all `[REDACTED]` before the LLM; both
 "Forget…"/"Ignore…" phrasings blocked by Vigil at confidence 1.0.
 
+### 11.1 Ingress layer (`DEPLOY_INGRESS=1`, on for k0s)
+
+One fixed entry point for everything HTTP: `https://10.66.51.11/`.
+
+- **MetalLB** (`metallb-system`, chart vendored in `manifests/metallb/chart`,
+  L2 mode only, no FRR/BGP). `IPAddressPool mcp-eval` = `INGRESS_IP_RANGE`
+  (`10.66.51.11-10.66.51.20` on k0s, OpenStack subnet `MD_ingress`) with
+  `autoAssign: false`: only Services that ask by annotation get an address.
+  One speaker answers ARP for each address; another takes over if its node
+  dies. Works on OpenStack because `MD` and `MD_ingress` share one network
+  and every node port allows `10.66.0.0/16` as an allowed-address-pair.
+  `L2Advertisement` excludes nodes labelled `security.eval.io/gpu` (the GPU
+  PC is on ZeroTier, not on the router's L2 segment).
+- **Traefik** (`traefik`, chart vendored in `manifests/traefik/chart`, one
+  replica, PodSecurity `restricted`): Service `LoadBalancer` pinned to
+  `INGRESS_IP`; `:80` only redirects to `:443`; TLS with a self-signed default
+  certificate (`TLSStore default` → Secret `traefik-default-cert`, IP SAN
+  `INGRESS_IP`, 2 years). Routes are plain `Ingress` objects with
+  `ingressClassName: traefik` (not the cluster default). Dashboard not exposed.
+- **UI route** (`manifests/ingress/ui-ingress.yaml`): `Ingress` `/` →
+  `mcp-eval-ui:80` with `Middleware ui-basic-auth` (htpasswd in Secret
+  `ui-basic-auth`, header stripped before the UI), plus NetworkPolicy
+  `mcp-eval-ui-from-traefik` (Traefik pods → UI pod `:8787` only).
+- Secrets (`traefik-default-cert`, `ui-basic-auth`, the empty
+  `metallb-webhook-cert` MetalLB fills itself) come from
+  `hack/gitops/secrets.sh`; the login is kept in `~/.config/mcp-eval/ui-login`
+  and the certificate's public part in `~/.config/mcp-eval/ingress-cert.pem`.
+
 ## 12. References
 
 - Vigil-LLM (upstream project & scanner/vector-DB architecture):

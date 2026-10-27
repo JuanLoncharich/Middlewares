@@ -373,3 +373,17 @@ Decisions made before this log existed are not back-filled here.
   the token reached the model (also OpenAI, AWS and Bearer shapes).
   `policy_test.go` pins it.
 - **Who decided:** Claude (bug fix); flagged to Juan.
+
+### 2026-10-26 — Expose the platform with MetalLB + Traefik on 10.66.51.11
+- **Decision:** MetalLB in L2 mode announces `10.66.51.11-20` (OpenStack
+  subnet `MD_ingress`); Traefik takes `.11` as the single HTTPS entry point
+  with a self-signed certificate; the UI sits behind basic auth.
+- **Reason:** port-forward needs a kubeconfig and drops whenever the API
+  server does; NodePort ties the address to one node and has nowhere to put
+  a login. One IP for the whole platform keeps the other nine free.
+- **Alternatives:** NGINX Gateway Fabric (more setup for the same result;
+  ingress-nginx itself is retired); MetalLB alone with the UI as a
+  `LoadBalancer` (no auth, one IP per service); plain HTTP (password in clear).
+- **Who decided:** Juan (MetalLB + Traefik, basic auth, self-signed TLS);
+  Claude (chart versions, `autoAssign: false`, excluding the GPU node from
+  L2 announcements).
