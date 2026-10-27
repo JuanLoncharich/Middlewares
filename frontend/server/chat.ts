@@ -24,6 +24,22 @@ const SESSION_ID = /^ses_[A-Za-z0-9]{8,64}$/;
 
 export const chatEnabled = CHAT_URL !== "";
 
+// "Preguntale al análisis": a question tied to a run starts its session with
+// that run's data (src/model/askContext.ts). live.ts provides the lookup.
+const RUN_NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
+const MAX_SESSIONS = 200;
+let runContext: (run: string) => string | null = () => null;
+const sessionRun = new Map<string, string>();
+
+export function setRunContext(lookup: (run: string) => string | null): void {
+  runContext = lookup;
+}
+
+function rememberSession(session: string, run: string): void {
+  sessionRun.set(session, run);
+  if (sessionRun.size > MAX_SESSIONS) sessionRun.delete(sessionRun.keys().next().value!);
+}
+
 // The model is one GPU: one message at a time, for everyone.
 let busy = false;
 
@@ -102,7 +118,7 @@ export async function handleChat(req: IncomingMessage, res: ServerResponse): Pro
   if (!isSameOrigin(req.headers.origin, req.headers.host)) return send(res, 403, { error: "Origen no permitido." });
   if (!/^application\/json\b/.test(req.headers["content-type"] ?? "")) return send(res, 415, { error: "Mandá JSON." });
 
-  let input: { session?: unknown; text?: unknown };
+  let input: { session?: unknown; text?: unknown; run?: unknown };
   try {
     input = JSON.parse(await readBody(req)) as typeof input;
   } catch {
@@ -110,7 +126,17 @@ export async function handleChat(req: IncomingMessage, res: ServerResponse): Pro
   }
   const text = typeof input.text === "string" ? input.text.trim() : "";
   if (!text || text.length > MAX_TEXT) return send(res, 400, { error: `Escribí entre 1 y ${MAX_TEXT} caracteres.` });
-  const requested = typeof input.session === "string" && SESSION_ID.test(input.session) ? input.session : null;
+  let requested = typeof input.session === "string" && SESSION_ID.test(input.session) ? input.session : null;
+  const run = typeof input.run === "string" && RUN_NAME.test(input.run) ? input.run : null;
+  let context: string | null = null;
+  if (run) {
+    // A session belongs to one run; asking about another run starts over.
+    if (requested && sessionRun.get(requested) !== run) requested = null;
+    if (!requested) {
+      context = runContext(run);
+      if (!context) return send(res, 404, { error: "No encuentro ese análisis." });
+    }
+  }
 
   if (busy) return send(res, 429, { error: "El modelo está respondiendo otra pregunta. Probá en unos segundos." });
   busy = true;
@@ -118,12 +144,14 @@ export async function handleChat(req: IncomingMessage, res: ServerResponse): Pro
   try {
     const cursor = await journalCursor();
     const session = requested ?? (await newSession());
+    if (run) rememberSession(session, run);
+    const prompt = context ? `${context}\n\nPregunta: ${text}` : text;
     const [providerID, ...rest] = CHAT_MODEL.split("/");
     const modelID = rest.join("/");
     const answerRes = await fetch(`${CHAT_URL}/session/${session}/message`, {
       method: "POST",
       headers: opencodeHeaders(),
-      body: JSON.stringify({ model: { providerID, modelID }, tools: {}, parts: [{ type: "text", text }] }),
+      body: JSON.stringify({ model: { providerID, modelID }, tools: {}, parts: [{ type: "text", text: prompt }] }),
       signal: AbortSignal.timeout(ANSWER_TIMEOUT_MS),
     });
     if (answerRes.status === 404 && requested) {

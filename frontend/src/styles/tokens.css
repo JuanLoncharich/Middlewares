@@ -1,151 +1,114 @@
 /*
- * MCP Eval brand: four colours plus amber for "use with care", two typefaces.
- *   #1A1A18 ink, #F0614F coral, #9FE1CB mint, #F4F4F0 paper, #E9A23B amber
- *   IBM Plex Sans for everything people read (an engineering-report voice),
- *   JetBrains Mono only for things copied verbatim: code, logs, server text.
- * Meaning: ink is "in progress" (the sandbox), mint is approved, coral is
- * rejected; a coral outline or wash is a warning, solid coral is a block.
- * Coral and mint fail contrast as text on paper, so text uses the darker
- * *-text variants; fills carry ink text.
+ * MCP Eval v2 — a checkpoint, not a dashboard. Quiet neutrals carry the
+ * interface; colour is reserved for two jobs: the one action colour (blue)
+ * and the four verdicts. IBM Plex Sans for reading, Plex Mono only for text
+ * copied verbatim (code, server output, logs).
  */
 :root {
   color-scheme: light;
 
-  --page: #f4f4f0;
-  --paper: #ecece6;
-  --paper-raised: #fbfbf8;    /* tile surface */
-  --surface-strong: #ffffff;
-  --ink: #1a1a18;
-  --steel: #5c5c55;
-  --rule: #d6d6cf;
-  --on-accent: #1a1a18;       /* text on a coral or mint fill */
+  --canvas: #f4f5f3;
+  --surface: #ffffff;
+  --surface-2: #eef0ed;
+  --ink: #16201b;
+  --muted: #5d6a63;
+  --faint: #8c978f;
+  --line: #dde2de;
+  --line-strong: #c3cbc6;
 
-  --progress: #1a1a18;        /* in progress */
-  --progress-ink: #1a1a18;
-  --progress-wash: #e4e4dd;
+  --action: #1f4fd1;
+  --action-ink: #ffffff;
+  --action-wash: #e8eefc;
 
-  --cleared: #9fe1cb;
-  --cleared-text: #1d6e55;
-  --cleared-wash: #def4ec;
+  --safe: #157a4a;
+  --safe-wash: #e2f2e9;
+  --caution: #a86400;
+  --caution-wash: #fbf0dc;
+  --untrusted: #c2410c;
+  --untrusted-wash: #fde9df;
+  --malicious: #a1123a;
+  --malicious-wash: #fbe4ea;
 
-  --rejected: #f0614f;
-  --rejected-text: #b5382a;
-  --rejected-wash: #fde3de;
+  --terminal-bg: #141b17;
+  --terminal-fg: #e9eee9;
+  --backdrop: rgb(22 32 27 / 0.45);
 
-  --warn: #f0614f;
-  --warn-text: #b5382a;
-  --warn-wash: #fdeeea;
-
-  --caution: #e9a23b;
-  --caution-text: #8a5a0b;
-  --caution-wash: #fbeed6;
-
-  --glow-warn: rgb(240 97 79 / 0.25);
-  --glow-block: rgb(240 97 79 / 0.4);
-  --backdrop: rgb(26 26 24 / 0.4);
-
-  --terminal-bg: #1a1a18;
-  --terminal-fg: #f4f4f0;
-
-  --logo-tile: #1a1a18;
-  --logo-mark: #f4f4f0;
-
-  --font-display: "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, sans-serif;
   --font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
-  /* Modular scale, ratio 1.25 from an 18px body: long explanations stay
-     readable on a laptop and still carry on a projector. */
-  --step--1: 0.9375rem;
-  --step-0: 1.125rem;
-  --step-1: 1.406rem;
-  --step-2: 1.758rem;
-  --step-3: 2.197rem;
-  --step-4: 2.747rem;
+  /* 1.2 scale from a 16px body. */
+  --t-xs: 0.8125rem;
+  --t-sm: 0.875rem;
+  --t-md: 1rem;
+  --t-lg: 1.2rem;
+  --t-xl: 1.44rem;
+  --t-2xl: 1.728rem;
+  --t-3xl: 2.488rem;
 
-  --space-1: 0.375rem;
-  --space-2: 0.75rem;
-  --space-3: 1.25rem;
-  --space-4: 2rem;
-  --space-5: 3.25rem;
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+  --s7: 3rem;
 
-  --bento-gap: 14px;
-  --radius-tile: 22px;      /* bento tiles, same as the logo's */
-  --radius-station: 14px;   /* inspection posts inside a tile */
-  --radius-tag: 6px;        /* small status tags */
-
+  --radius: 8px;
+  --radius-lg: 12px;
+  --rail: 15rem;
   --ease: cubic-bezier(0.3, 0.7, 0.2, 1);
 }
 
-/* Dark: the brand's ink becomes the page; paper becomes the ink. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --page: #1a1a18;
-    --paper: #24241f;
-    --paper-raised: #212120;
-    --surface-strong: #2e2e29;
-    --ink: #f4f4f0;
-    --steel: #aeaea4;
-    --rule: #3c3c36;
-    --on-accent: #1a1a18;
-    --progress: #f4f4f0;
-    --progress-ink: #f4f4f0;
-    --progress-wash: #34342e;
-    --cleared: #9fe1cb;
-    --cleared-text: #9fe1cb;
-    --cleared-wash: #1f3a31;
-    --rejected: #f0614f;
-    --rejected-text: #f58676;
-    --rejected-wash: #3d2420;
-    --warn: #f0614f;
-    --warn-text: #f58676;
-    --warn-wash: #2f2220;
-    --caution: #e9a23b;
-    --caution-text: #f0bd6a;
-    --caution-wash: #33291a;
-    --glow-warn: rgb(240 97 79 / 0.3);
-    --glow-block: rgb(240 97 79 / 0.45);
+    --canvas: #121816;
+    --surface: #1a211e;
+    --surface-2: #222a26;
+    --ink: #e8ede9;
+    --muted: #a3b0a8;
+    --faint: #75827a;
+    --line: #2d3732;
+    --line-strong: #3f4b45;
+    --action: #7d9cff;
+    --action-ink: #0f1a3a;
+    --action-wash: #1f2a4a;
+    --safe: #5cc794;
+    --safe-wash: #183126;
+    --caution: #e6a94a;
+    --caution-wash: #33281a;
+    --untrusted: #f08a5d;
+    --untrusted-wash: #3a2219;
+    --malicious: #f2729a;
+    --malicious-wash: #3a1a25;
+    --terminal-bg: #0c110f;
     --backdrop: rgb(0 0 0 / 0.6);
-    --terminal-bg: #121211;
-    --terminal-fg: #f4f4f0;
-    --logo-tile: #f4f4f0;
-    --logo-mark: #1a1a18;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #1a1a18;
-  --paper: #24241f;
-  --paper-raised: #212120;
-  --surface-strong: #2e2e29;
-  --ink: #f4f4f0;
-  --steel: #aeaea4;
-  --rule: #3c3c36;
-  --on-accent: #1a1a18;
-  --progress: #f4f4f0;
-  --progress-ink: #f4f4f0;
-  --progress-wash: #34342e;
-  --cleared: #9fe1cb;
-  --cleared-text: #9fe1cb;
-  --cleared-wash: #1f3a31;
-  --rejected: #f0614f;
-  --rejected-text: #f58676;
-  --rejected-wash: #3d2420;
-  --warn: #f0614f;
-  --warn-text: #f58676;
-  --warn-wash: #2f2220;
-  --caution: #e9a23b;
-  --caution-text: #f0bd6a;
-  --caution-wash: #33291a;
-  --glow-warn: rgb(240 97 79 / 0.3);
-  --glow-block: rgb(240 97 79 / 0.45);
+  --canvas: #121816;
+  --surface: #1a211e;
+  --surface-2: #222a26;
+  --ink: #e8ede9;
+  --muted: #a3b0a8;
+  --faint: #75827a;
+  --line: #2d3732;
+  --line-strong: #3f4b45;
+  --action: #7d9cff;
+  --action-ink: #0f1a3a;
+  --action-wash: #1f2a4a;
+  --safe: #5cc794;
+  --safe-wash: #183126;
+  --caution: #e6a94a;
+  --caution-wash: #33281a;
+  --untrusted: #f08a5d;
+  --untrusted-wash: #3a2219;
+  --malicious: #f2729a;
+  --malicious-wash: #3a1a25;
+  --terminal-bg: #0c110f;
   --backdrop: rgb(0 0 0 / 0.6);
-  --terminal-bg: #121211;
-  --terminal-fg: #f4f4f0;
-  --logo-tile: #f4f4f0;
-  --logo-mark: #1a1a18;
 }
 
 @media (prefers-reduced-motion: reduce) {

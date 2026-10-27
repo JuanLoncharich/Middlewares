@@ -1,6 +1,8 @@
-# Optional: the demo/live UI inside the cluster. Read-only by construction:
-# the ServiceAccount can watch the eval CRs, read report ConfigMaps and the
-# evaluator's log in mcp-evals, and nothing else (no exec, no Secrets).
+# Optional: the demo/live UI inside the cluster. The ServiceAccount can watch
+# the eval CRs, read report ConfigMaps and the evaluator's log in mcp-evals,
+# and create, pause (patch) and delete MCPServers there: the "Evaluar un
+# servidor" form and the server actions (server/actions.ts). Nothing else: no
+# exec, no Secrets, no runs, no other namespaces.
 # Applied by deploy.sh when DEPLOY_UI=1 (on for the k0s cluster, so Flux
 # syncs it): the image placeholder becomes $IMG_REGISTRY/mcp-eval-ui:$IMG_TAG, built by
 # .github/workflows/images.yml, and the API-server egress is a separate
@@ -31,6 +33,11 @@ rules:
   - apiGroups: ["security.eval.io"]
     resources: ["mcpservers", "mcpevaluationruns", "opencodeagents"]
     verbs: ["get", "list", "watch"]
+  # The form and the server actions. Servers that come from git are refused
+  # in server/actions.ts (Flux would undo the change anyway).
+  - apiGroups: ["security.eval.io"]
+    resources: ["mcpservers"]
+    verbs: ["create", "patch", "delete"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get"]

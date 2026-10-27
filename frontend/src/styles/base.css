@@ -1,34 +1,138 @@
-html {
-  font-size: 16px;
-}
+/* Reset and the few primitives every page uses: buttons, fields, verdict badges. */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { font-size: 16px; }
 
 body {
   margin: 0;
-  background: var(--page);
+  background: var(--canvas);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: var(--step-0);
-  line-height: 1.45;
+  font-size: var(--t-md);
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
-h1, h2, h3 {
-  margin: 0;
-  line-height: 1.1;
-  font-weight: 700;
+h1, h2, h3, p { margin: 0; }
+h1, h2, h3 { line-height: 1.2; font-weight: 600; letter-spacing: -0.01em; }
+
+a { color: var(--action); }
+button { font: inherit; color: inherit; }
+
+code, kbd, pre { font-family: var(--font-mono); font-size: 0.875em; }
+
+:focus-visible { outline: 2px solid var(--action); outline-offset: 2px; }
+
+[hidden] { display: none !important; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
 }
 
-button {
+.muted { color: var(--muted); }
+
+/* --- buttons ------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0.5rem 0.95rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.btn:hover:not(:disabled) { border-color: var(--ink); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn-primary {
+  background: var(--action);
+  border-color: var(--action);
+  color: var(--action-ink);
+}
+.btn-primary:hover:not(:disabled) { border-color: var(--action); filter: brightness(1.08); }
+
+.btn-danger { color: var(--malicious); }
+.btn-danger:hover:not(:disabled) { border-color: var(--malicious); }
+.btn-danger-solid { background: var(--malicious); border-color: var(--malicious); color: var(--surface); }
+
+.btn-ghost { border-color: transparent; background: transparent; }
+.btn-ghost:hover:not(:disabled) { border-color: var(--line-strong); }
+
+/* --- fields ------------------------------------------------------------- */
+
+.field { display: grid; gap: var(--s1); }
+.field label, .field legend { font-size: var(--t-sm); font-weight: 600; }
+.field .hint { font-size: var(--t-xs); color: var(--muted); }
+.field .error { font-size: var(--t-xs); color: var(--malicious); }
+
+.input, .select, .textarea {
+  width: 100%;
   font: inherit;
-  color: inherit;
+  font-size: var(--t-sm);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.7rem;
+}
+.input:focus-visible, .select:focus-visible, .textarea:focus-visible { outline-offset: 0; }
+.input[aria-invalid="true"] { border-color: var(--malicious); }
+
+/* --- verdicts ----------------------------------------------------------- */
+
+.verdict {
+  --v: var(--muted);
+  --v-wash: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: var(--v-wash);
+  color: var(--v);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.verdict::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--v);
+}
+.v-safe { --v: var(--safe); --v-wash: var(--safe-wash); }
+.v-caution { --v: var(--caution); --v-wash: var(--caution-wash); }
+.v-untrusted { --v: var(--untrusted); --v-wash: var(--untrusted-wash); }
+.v-malicious { --v: var(--malicious); --v-wash: var(--malicious-wash); }
+.v-running { --v: var(--action); --v-wash: var(--action-wash); }
+.v-running::before { animation: pulse 1.4s ease-in-out infinite; }
+.v-error, .v-none, .v-paused { --v: var(--muted); --v-wash: var(--surface-2); }
+
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+/* --- surfaces ----------------------------------------------------------- */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
 }
 
-:focus-visible {
-  outline: 3px solid var(--progress);
-  outline-offset: 3px;
+.notice {
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius);
+  background: var(--caution-wash);
+  font-size: var(--t-sm);
 }
-
-code, kbd, pre {
-  font-family: var(--font-mono);
-  font-size: 0.85em;
-}
+.notice-error { background: var(--malicious-wash); color: var(--malicious); }

@@ -21,7 +21,10 @@ import type { ClientMessage, ServerMessage } from "../src/data/live.ts";
 import { API_VERSION, LABEL_RUN, type MCPEvaluationRun, isTerminal } from "../src/model/crd.ts";
 import { type LogLine, parseLogLine } from "../src/model/logs.ts";
 import type { EvaluationReport } from "../src/model/report.ts";
-import { chatEnabled, handleChat } from "./chat.ts";
+import { buildAskContext } from "../src/model/askContext.ts";
+import type { MCPServer } from "../src/model/crd.ts";
+import { handleAction, isActionRoute } from "./actions.ts";
+import { chatEnabled, handleChat, setRunContext } from "./chat.ts";
 import { isSameOrigin } from "./origin.ts";
 
 const NAMESPACE = process.env["NAMESPACE"] ?? "mcp-evals";
@@ -306,6 +309,34 @@ async function pollPrometheus(): Promise<void> {
   }
 }
 
+// --- actions and the analysis chat -----------------------------------------------
+
+const objects = k8s.KubernetesObjectApi.makeApiClient(kc);
+const ref = (name: string) => ({ apiVersion: API_VERSION, kind: "MCPServer", metadata: { name, namespace: NAMESPACE } });
+
+const serverStore = {
+  namespace: NAMESPACE,
+  servers: () => [...store.servers.values()] as unknown as MCPServer[],
+  agentNames: () => [...store.agents.keys()],
+  create: async (server: MCPServer) => {
+    await objects.create(server as unknown as k8s.KubernetesObject, undefined, undefined, "mcp-eval-ui");
+  },
+  patch: async (name: string, patch: Record<string, unknown>) => {
+    await objects.patch({ ...ref(name), ...patch } as k8s.KubernetesObject, undefined, undefined, "mcp-eval-ui", undefined, k8s.PatchStrategy.MergePatch);
+  },
+  remove: async (name: string) => {
+    // Background: the runs (owned by the server) are garbage-collected after it.
+    await objects.delete(ref(name), undefined, undefined, undefined, undefined, "Background");
+  },
+};
+
+setRunContext((name) => {
+  const run = store.runs.get(name) as MCPEvaluationRun | undefined;
+  if (!run) return null;
+  const server = store.servers.get(run.spec.serverRef) as MCPServer | undefined;
+  return buildAskContext(run, server, reports.get(name));
+});
+
 // --- http ----------------------------------------------------------------------
 
 const TYPES: Record<string, string> = {
@@ -357,6 +388,10 @@ const server = createServer((req, res) => {
   }
   if (req.url === "/api/chat") {
     void handleChat(req, res);
+    return;
+  }
+  if (isActionRoute(req.url)) {
+    void handleAction(req, res, serverStore);
     return;
   }
   if (PRODUCTION) {
