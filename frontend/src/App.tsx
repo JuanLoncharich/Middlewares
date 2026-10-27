@@ -1,48 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "./components/Logo.tsx";
 import { ReplayBar } from "./components/ReplayBar.tsx";
 import { type Theme, applyTheme, initialTheme } from "./components/theme.ts";
 import { DemoSource } from "./data/demo/replay.ts";
 import { useReplay, useSnapshot } from "./data/hooks.ts";
 import { LiveSource } from "./data/live.ts";
-import type { Mode, Snapshot } from "./data/source.ts";
-import { type MCPEvaluationRun, isTerminal } from "./model/crd.ts";
-import { AnalysisView } from "./views/AnalysisView.tsx";
-import { ChatView } from "./views/ChatView.tsx";
-import { ServerDetail } from "./views/ServerDetail.tsx";
-import { TerminalView } from "./views/TerminalView.tsx";
-import { ServersView } from "./views/ServersView.tsx";
-import "./styles/app.css";
-import "./styles/bento.css";
-import "./styles/analysis.css";
+import type { Mode } from "./data/source.ts";
+import { go, href, useRoute } from "./router.ts";
+import { HowItWorks } from "./views/HowItWorks.tsx";
+import { NewServerSheet } from "./views/NewServerSheet.tsx";
+import { ServerPage } from "./views/ServerPage.tsx";
+import { ServersPage } from "./views/ServersPage.tsx";
+import "./styles/shell.css";
+import "./styles/pages.css";
+import "./styles/story.css";
 import "./styles/chat.css";
-import "./styles/chrome.css";
 
-type ViewId = "analysis" | "chat" | "servers" | "terminal";
-
-const VIEWS: { id: ViewId; label: string; key: string }[] = [
-  { id: "analysis", label: "Análisis", key: "1" },
-  { id: "chat", label: "Chat", key: "2" },
-  { id: "servers", label: "Servidores", key: "3" },
-  { id: "terminal", label: "Registro técnico", key: "4" },
-];
-
+/** Live by default where the UI is deployed; the demo replay for `npm run demo`. */
 function initialMode(): Mode {
-  return new URLSearchParams(location.search).get("mode") === "live" ? "live" : "demo";
-}
-
-/** In live mode, follow the newest in-flight run, else the newest run. */
-function pickLiveRun(snap: Snapshot): string | null {
-  const runs = Object.values(snap.runs).sort((a, b) =>
-    (b.metadata.creationTimestamp ?? "").localeCompare(a.metadata.creationTimestamp ?? ""),
-  );
-  return (runs.find((r) => !isTerminal(r.status?.phase)) ?? runs[0])?.metadata.name ?? null;
-}
-
-function runLabel(r: MCPEvaluationRun): string {
-  const at = r.metadata.creationTimestamp ? new Date(r.metadata.creationTimestamp) : null;
-  const when = at ? at.toLocaleString("es-AR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
-  return `${r.spec.serverRef}${when ? `, ${when}` : ""}`;
+  const asked = new URLSearchParams(location.search).get("mode");
+  if (asked === "live" || asked === "demo") return asked;
+  return import.meta.env.MODE === "development" ? "demo" : "live";
 }
 
 export function App() {
@@ -52,14 +30,9 @@ export function App() {
   const source = mode === "demo" ? demo : live;
   const snap = useSnapshot(source);
   const replay = useReplay(mode === "demo" ? demo : null);
-  const [view, setView] = useState<ViewId>("analysis");
-  const [selectedRun, setSelectedRun] = useState<string | null>(null);
-  const [openServer, setOpenServer] = useState<string | null>(null);
+  const route = useRoute();
   const [theme, setTheme] = useState<Theme>(initialTheme);
-  const [termOpened, setTermOpened] = useState(false);
-  useEffect(() => {
-    if (view === "terminal") setTermOpened(true);
-  }, [view]);
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => applyTheme(theme), [theme]);
 
@@ -68,141 +41,90 @@ export function App() {
     return () => source.stop();
   }, [source]);
 
-  // Demo: the selection follows the scenario being replayed.
-  const activeDemoRun = mode === "demo" ? demo.activeRun : null;
-  useEffect(() => {
-    if (activeDemoRun) setSelectedRun(activeDemoRun);
-  }, [activeDemoRun, mode]);
-
-  useEffect(() => {
-    if (mode === "live" && (!selectedRun || !snap.runs[selectedRun])) setSelectedRun(pickLiveRun(snap));
-  }, [mode, snap, selectedRun]);
-
-  useEffect(() => {
-    source.follow(selectedRun);
-  }, [source, selectedRun]);
-
   useEffect(() => {
     const url = new URL(location.href);
     url.searchParams.set("mode", mode);
     history.replaceState(null, "", url);
   }, [mode]);
 
-  // Presenter keys: 1–4 switch views, space pauses the replay.
+  // The demo replays one scenario at a time: open its server so the story is on screen.
+  const activeDemoRun = mode === "demo" ? demo.activeRun : null;
+  const demoServer = activeDemoRun ? snap.runs[activeDemoRun]?.spec.serverRef : undefined;
+  const lastDemoServer = useRef(demoServer);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && e.target.closest("input, select, textarea, dialog, .xterm")) return;
-      const v = VIEWS.find((x) => x.key === e.key);
-      if (v) setView(v.id);
-      if (e.key === " " && mode === "demo" && replay) {
-        e.preventDefault();
-        demo.setPlaying(!replay.playing);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [demo, mode, replay]);
+    // Follow a scenario switch, but never override the page someone opened by link.
+    const changed = lastDemoServer.current !== undefined && lastDemoServer.current !== demoServer;
+    lastDemoServer.current = demoServer;
+    if (changed && demoServer && route.page === "server") go({ page: "server", server: demoServer, run: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoServer]);
 
-  const runOptions = Object.values(snap.runs).sort((a, b) =>
-    (b.metadata.creationTimestamp ?? "").localeCompare(a.metadata.creationTimestamp ?? ""),
-  );
+  const conn = snap.connection;
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <p className="brand">
+    <div className="shell">
+      <aside className="rail">
+        <a className="brand" href={href({ page: "servers" })}>
           <Logo className="brand-logo" />
-          <span className="brand-name">MCP Eval</span>
-        </p>
-        <nav className="tabs" aria-label="Vistas">
-          {VIEWS.map((v) => (
-            <button
-              key={v.id}
-              type="button"
-              className={`tab ${view === v.id ? "tab-on" : ""}`}
-              aria-current={view === v.id ? "page" : undefined}
-              onClick={() => setView(v.id)}
-            >
-              {v.label}
-            </button>
-          ))}
+          <span>MCP Eval</span>
+        </a>
+        <nav className="nav" aria-label="Secciones">
+          <a href={href({ page: "servers" })} aria-current={route.page !== "how" ? "page" : undefined}>
+            Servidores
+          </a>
+          <a href={href({ page: "how" })} aria-current={route.page === "how" ? "page" : undefined}>
+            Cómo funciona
+          </a>
         </nav>
-        <label className="run-picker">
-          <span>Análisis de</span>
-          <select value={selectedRun ?? ""} onChange={(e) => setSelectedRun(e.target.value || null)}>
-            {runOptions.length === 0 && <option value="">Todavía no hay análisis</option>}
-            {runOptions.map((r) => (
-              <option key={r.metadata.name} value={r.metadata.name}>
-                {runLabel(r)}
-              </option>
+        <div className="rail-foot">
+          <p className={`conn conn-${mode === "demo" ? "demo" : conn.state}`} role="status">
+            {mode === "demo"
+              ? "Datos de demostración"
+              : conn.state === "open"
+                ? "Conectado al cluster"
+                : conn.state === "connecting"
+                  ? "Conectando…"
+                  : "Sin conexión con el cluster"}
+          </p>
+          <div className="seg" role="radiogroup" aria-label="Fuente de datos">
+            {(["live", "demo"] as Mode[]).map((m) => (
+              <button key={m} type="button" role="radio" aria-checked={mode === m} onClick={() => setMode(m)}>
+                {m === "live" ? "Cluster" : "Demo"}
+              </button>
             ))}
-          </select>
-        </label>
-        <div className="theme-toggle" role="radiogroup" aria-label="Tema">
-          {(["light", "dark"] as Theme[]).map((t) => (
-            <button
-              key={t}
-              type="button"
-              role="radio"
-              aria-checked={theme === t}
-              className={`theme ${theme === t ? "theme-on" : ""}`}
-              onClick={() => setTheme(t)}
-            >
-              {t === "light" ? "Claro" : "Oscuro"}
-            </button>
-          ))}
-        </div>
-        <div className="mode-toggle" role="radiogroup" aria-label="Fuente de datos">
-          {(["demo", "live"] as Mode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="radio"
-              aria-checked={mode === m}
-              className={`mode mode-${m} ${mode === m ? "mode-on" : ""}`}
-              onClick={() => setMode(m)}
-            >
-              {m === "demo" ? "Demo" : "Live"}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      {mode === "demo" && replay && <ReplayBar demo={demo} replay={replay} />}
-      {mode === "live" && (
-        <div className={`live-bar live-${snap.connection.state}`} role="status">
-          {snap.connection.state === "open" && "Conectado al cluster. Los datos llegan con watch sobre los CRs."}
-          {snap.connection.state === "connecting" && "Conectando con el backend live…"}
-          {snap.connection.state === "error" && snap.connection.message}
-        </div>
-      )}
-
-      <main className="stage">
-        {view === "analysis" && <AnalysisView snap={snap} runName={selectedRun} />}
-        {/* Kept mounted so switching views does not lose the conversation. */}
-        <div hidden={view !== "chat"}>
-          <ChatView mode={mode} />
-        </div>
-        {view === "servers" && <ServersView snap={snap} onOpen={setOpenServer} />}
-        {/* Kept mounted once opened: disposing xterm with writes still queued
-            throws inside xterm ("reading 'dimensions'"). */}
-        {termOpened && (
-          <div hidden={view !== "terminal"}>
-            <TerminalView snap={snap} runName={selectedRun} mode={mode} theme={theme} />
           </div>
+          <div className="seg" role="radiogroup" aria-label="Tema">
+            {(["light", "dark"] as Theme[]).map((t) => (
+              <button key={t} type="button" role="radio" aria-checked={theme === t} onClick={() => setTheme(t)}>
+                {t === "light" ? "Claro" : "Oscuro"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+
+      <main className="main">
+        {mode === "demo" && replay && <ReplayBar demo={demo} replay={replay} />}
+        {mode === "live" && conn.state === "error" && (
+          <p className="notice notice-error banner" role="alert">
+            {conn.message ?? "Se perdió la conexión con el cluster."} Reintentando…
+          </p>
         )}
+        {route.page === "servers" && <ServersPage snap={snap} onNew={() => setCreating(true)} />}
+        {route.page === "server" && (
+          <ServerPage snap={snap} source={source} mode={mode} theme={theme} name={route.server} runName={route.run} />
+        )}
+        {route.page === "how" && <HowItWorks mode={mode} />}
       </main>
 
-      {openServer && (
-        <ServerDetail
-          key={openServer}
-          snap={snap}
-          name={openServer}
-          onClose={() => setOpenServer(null)}
-          onShowRun={(run) => {
-            setSelectedRun(run);
-            setOpenServer(null);
-            setView("analysis");
+      {creating && (
+        <NewServerSheet
+          demo={mode === "demo"}
+          existing={Object.keys(snap.servers)}
+          onClose={() => setCreating(false)}
+          onCreated={(name) => {
+            setCreating(false);
+            go({ page: "server", server: name, run: null });
           }}
         />
       )}

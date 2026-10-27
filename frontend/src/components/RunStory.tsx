@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import type { Snapshot } from "../data/source.ts";
 import type { Finding } from "../model/crd.ts";
 import type { Redaction, Trip } from "../model/flow.ts";
@@ -7,7 +6,6 @@ import {
   type Step,
   type StepState,
   type Verdict,
-  buildStory,
   friendlyDuration,
   friendlyModel,
 } from "../model/story.ts";
@@ -23,94 +21,33 @@ const STATE_LABEL: Record<StepState, string> = {
   unknown: "Sin datos",
 };
 
-export function AnalysisView({ snap, runName }: { snap: Snapshot; runName: string | null }) {
-  const story = useMemo(() => buildStory(snap, runName), [snap, runName]);
-  if (!story) {
-    return (
-      <div className="an-empty">
-        <h1>Todavía no hay análisis para mostrar</h1>
-        <p>
-          Cuando la plataforma evalúe un servidor, acá vas a ver cada paso: qué se revisó, qué se encontró y por qué se
-          decidió el veredicto.
-        </p>
-      </div>
-    );
-  }
-  const { run, steps, findings, verdict } = story;
-  const server = snap.servers[run.spec.serverRef];
-  const done = steps.filter((s) => s.state !== "pending" && s.state !== "running").length;
-
+/** The steps of one run, top to bottom. */
+export function StepList({ steps, snap }: { steps: Step[]; snap: Snapshot }) {
   return (
-    <div className="an">
-      <header className="an-head">
-        <div className="an-title">
-          <p className="an-question">¿Es seguro conectar este servidor a un agente de IA?</p>
-          <h1>{run.spec.serverRef}</h1>
-          {server && (
-            <p className="an-repo">
-              {server.spec.repositoryUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "")}
-              {server.spec.ref ? ` (rama ${server.spec.ref})` : ""}
-            </p>
-          )}
-          <p className="an-answer">{verdict.answer}</p>
-        </div>
-        <Seal verdict={verdict} progress={`${done} de ${steps.length} pasos`} />
-      </header>
-
-      <div className="an-body">
-        <ol className="an-steps" aria-label="Pasos del análisis">
-          {steps.map((step, i) => (
-            <StepItem key={step.id} step={step} n={i + 1} snap={snap} />
-          ))}
-        </ol>
-
-        <aside className="an-aside">
-          <section className="an-help">
-            <h2>Cómo leer esto</h2>
-            <p>
-              Cada paso es una revisión distinta. Los primeros miran el servidor desde afuera; los últimos lo usan como lo
-              haría una IA. Si un paso encuentra algo grave, puede cortar todo.
-            </p>
-            <p>
-              <strong>Seguridad</strong> mide si el servidor intenta engañar, robar datos o hacer cosas que no dice.
-              <strong> Robustez</strong> mide si funciona bien cuando recibe pedidos raros.
-            </p>
-          </section>
-          <section className="an-glossary">
-            <h2>Palabras que aparecen</h2>
-            <dl>
-              <dt>Servidor MCP</dt>
-              <dd>Un programa que le da herramientas a una IA: leer archivos, buscar issues, ver el clima.</dd>
-              <dt>Instrucciones escondidas</dt>
-              <dd>Texto que el servidor le muestra a la IA para que haga algo que el usuario no pidió.</dd>
-              <dt>Vigil</dt>
-              <dd>Nuestro detector de esas instrucciones. Revisa el texto antes de que lo vea un modelo.</dd>
-              <dt>Occludra</dt>
-              <dd>La puerta de salida hacia el modelo. Tapa emails, tokens y contraseñas antes de mandar nada.</dd>
-              <dt>NetBird</dt>
-              <dd>Un túnel cifrado. Es el único camino por el que la caja aislada puede hablar con el resto.</dd>
-              <dt>LFM 2.5</dt>
-              <dd>El modelo de lenguaje que usan los agentes. Corre en la GPU de la PC, no en la nube.</dd>
-            </dl>
-          </section>
-        </aside>
-      </div>
-
-      {findings.length > 0 && (
-        <section className="an-findings" aria-labelledby="an-findings-title">
-          <h2 id="an-findings-title">Qué habría que arreglar</h2>
-          <ul>
-            {findings.map((f, i) => (
-              <FindingItem key={i} finding={f} snap={snap} />
-            ))}
-          </ul>
-        </section>
-      )}
-    </div>
+    <ol className="steps" aria-label="Pasos del análisis">
+      {steps.map((step, i) => (
+        <StepItem key={step.id} step={step} n={i + 1} snap={snap} />
+      ))}
+    </ol>
   );
 }
 
-function Seal({ verdict, progress }: { verdict: Verdict; progress: string }) {
+/** What the run found, worst first, with how to fix each. */
+export function Findings({ findings, snap }: { findings: Finding[]; snap: Snapshot }) {
+  if (findings.length === 0) return null;
+  return (
+    <section className="findings" aria-labelledby="findings-title">
+      <h2 id="findings-title">Qué habría que arreglar</h2>
+      <ul>
+        {findings.map((f, i) => (
+          <FindingItem key={i} finding={f} snap={snap} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+export function Seal({ verdict, progress }: { verdict: Verdict; progress: string }) {
   const score = verdict.safety;
   const r = 52;
   const c = 2 * Math.PI * r;

@@ -2,8 +2,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef } from "react";
-import { PhaseTag } from "../components/Tags.tsx";
-import { Tile } from "../components/Bento.tsx";
 import type { Theme } from "../components/theme.ts";
 import type { Mode, Snapshot } from "../data/source.ts";
 import { isTerminal } from "../model/crd.ts";
@@ -49,8 +47,8 @@ export function TerminalView({ snap, runName, mode, theme }: Props) {
       cursorStyle: "underline",
       convertEol: true,
       scrollback: 5000,
-      fontFamily: '"JetBrains Mono Variable", ui-monospace, monospace',
-      fontSize: 17,
+      fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+      fontSize: 13,
       lineHeight: 1.25,
       theme: THEME,
     });
@@ -108,53 +106,28 @@ export function TerminalView({ snap, runName, mode, theme }: Props) {
   }, [theme]);
 
   const following = run && !isTerminal(run.status?.phase);
-  const phase = run?.status?.phase;
 
   return (
-    <div className="bento view terminal-view" aria-label="Registro técnico">
-      <Tile span={9} rows={3} className="tile-terminal" label="Registro del evaluador">
-        <header className="terminal-head">
-          <h2>Registro del evaluador</h2>
-          <p className={`terminal-status ${following ? "terminal-status-live" : ""}`}>
-            {!runName ? "Sin run seleccionado" : following ? "Siguiendo en vivo" : `${lines.length} líneas`}
+    <section className="terminal panel" aria-label="Registro técnico">
+      <header className="terminal-head">
+        <p>
+          El registro del evaluador, tal como lo escribe: qué agente corre, qué revisa Vigil, cuánto tarda cada paso.
+          Prompts y credenciales ya vienen enmascarados.
+        </p>
+        <p className={`terminal-status ${following ? "terminal-live" : ""}`}>
+          {!runName ? "Sin análisis" : following ? "Siguiendo en vivo" : `${lines.length} líneas`}
+        </p>
+      </header>
+      <div className="terminal-frame">
+        <div ref={host} className="terminal-host" />
+        {runName && lines.length === 0 && (
+          <p className="terminal-empty">
+            {mode === "live"
+              ? "No hay líneas: el registro existe mientras corre la evaluación y hasta 10 minutos después."
+              : "El evaluador arranca cuando termina de copiar el código."}
           </p>
-        </header>
-        <div className="terminal-frame">
-          <div ref={host} className="terminal-host" />
-          {runName && lines.length === 0 && (
-            <p className="terminal-empty">
-              {mode === "live"
-                ? "Sin líneas todavía. El pod existe desde que arranca el Job y sus logs duran 10 minutos después de terminar."
-                : "El evaluator arranca cuando termina el clonado."}
-            </p>
-          )}
-        </div>
-      </Tile>
-
-      <Tile span={3} title="Run" tone={following ? "evaluating" : "plain"}>
-        {run ? (
-          <>
-            <p className="side-strong">{run.spec.serverRef}</p>
-            <p>
-              <PhaseTag phase={phase} />
-            </p>
-            {run.status?.currentAgent && <p className="small">Ahora corre {run.status.currentAgent}</p>}
-          </>
-        ) : (
-          <p className="muted">Elegí un run arriba.</p>
         )}
-      </Tile>
-      <Tile span={3} title="Qué ves">
-        <p className="small">
-          El log del contenedor <code>evaluator</code>, que maneja las sesiones de OpenCode. Es de solo lectura: no hay shell ni entrada.
-        </p>
-      </Tile>
-      <Tile span={3} title="Qué no ves">
-        <p className="small">
-          Los logs de <code>target</code> (el servidor no confiable) y de <code>cloner</code>. Tampoco prompts ni credenciales: el runner los
-          enmascara antes de escribir.
-        </p>
-      </Tile>
-    </div>
+      </div>
+    </section>
   );
 }

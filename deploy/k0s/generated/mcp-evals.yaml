@@ -847,6 +847,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - security.eval.io
+  resources:
+  - mcpservers
+  verbs:
+  - create
+  - patch
+  - delete
+- apiGroups:
   - ''
   resources:
   - configmaps

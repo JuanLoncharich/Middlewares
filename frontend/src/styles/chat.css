@@ -1,318 +1,77 @@
-/*
- * Chat: conversation on the left, the selected answer's path on the right.
- * The path reuses the analysis spine (dots carry the outcome) so the two
- * views read as one system.
- */
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-}
-
-.chat {
-  max-width: 78rem;
-  margin: 0 auto;
-  padding: var(--space-4);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 24rem;
-  gap: var(--space-5);
-  align-items: start;
-}
-
-.chat-head h1 {
-  font-size: var(--step-3);
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-
-.chat-head p {
-  margin: var(--space-2) 0 0;
-  color: var(--steel);
-  max-width: 62ch;
-}
-
-.chat-notice {
-  margin: var(--space-3) 0 0;
-  padding: var(--space-2) var(--space-3);
-  border-left: 4px solid var(--caution);
-  background: var(--caution-wash);
-  border-radius: 0 8px 8px 0;
-}
-
-.chat-log {
-  list-style: none;
-  margin: var(--space-4) 0 0;
-  padding: 0;
-  display: grid;
-  gap: var(--space-3);
-}
-
-.chat-empty p {
-  margin: 0 0 var(--space-2);
-  color: var(--steel);
-}
-
-.chat-empty ul {
-  list-style: none;
-  margin: 0 0 var(--space-2);
-  padding: 0;
-  display: grid;
-  gap: var(--space-1);
-}
-
-.chat-example {
-  text-align: left;
+/* Conversations ("preguntale al análisis" and the path demo) and the path list. */
+.convo { display: grid; gap: var(--s3); }
+.convo-log { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s3); max-height: 28rem; overflow-y: auto; }
+.convo-empty { display: grid; gap: var(--s2); }
+.convo-empty ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s1); }
+.convo-example {
   width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  background: var(--paper-raised);
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--t-sm);
   cursor: pointer;
 }
+.convo-example:hover:not(:disabled) { border-color: var(--action); color: var(--action); }
 
-.chat-example:hover:not(:disabled) {
-  border-color: var(--ink);
-}
-
-.chat-hint {
-  font-size: var(--step--1);
-}
-
-.turn {
-  display: grid;
-  gap: var(--space-1);
-}
-
+.turn { display: grid; gap: var(--s1); }
 .bubble {
   margin: 0;
-  max-width: 62ch;
-  padding: var(--space-2) var(--space-3);
-  border-radius: 14px;
+  max-width: 90%;
+  padding: var(--s2) var(--s3);
+  border-radius: 12px;
+  font-size: var(--t-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-
-.bubble-you {
-  justify-self: end;
-  background: var(--ink);
-  color: var(--page);
-  border-bottom-right-radius: 4px;
-}
-
+.bubble-you { justify-self: end; background: var(--ink); color: var(--surface); border-bottom-right-radius: 4px; }
 .bubble-model {
   justify-self: start;
   text-align: left;
   font: inherit;
+  font-size: var(--t-sm);
   color: var(--ink);
-  background: var(--paper-raised);
-  border: 1px solid var(--rule);
+  background: var(--surface-2);
+  border: 1px solid transparent;
   border-bottom-left-radius: 4px;
   cursor: pointer;
 }
+.turn-on .bubble-model { border-color: var(--action); }
+.bubble-wait { color: var(--muted); }
+.bubble-error { color: var(--malicious); }
 
-.turn-on .bubble-model {
-  border-color: var(--ink);
-  box-shadow: 0 0 0 1px var(--ink);
-}
+.convo-form { display: grid; gap: var(--s2); }
+.convo-form .textarea { resize: vertical; min-height: 3rem; }
+.convo-actions { display: flex; gap: var(--s2); }
 
-.bubble-wait {
-  color: var(--steel);
-}
+.ask { padding: var(--s4); display: grid; gap: var(--s3); }
+.ask h2 { font-size: var(--t-lg); }
+.ask-lede { font-size: var(--t-sm); }
+.ask-note { font-size: var(--t-xs); color: var(--muted); padding-top: var(--s2); border-top: 1px solid var(--line); }
 
-.bubble-error {
-  color: var(--rejected-text);
-}
-
-.chat-form {
-  position: sticky;
-  bottom: 0;
-  margin-top: var(--space-4);
-  padding: var(--space-2) 0 var(--space-3);
-  background: var(--page);
-  display: grid;
-  gap: var(--space-2);
-}
-
-.chat-form textarea {
-  font: inherit;
-  color: var(--ink);
-  background: var(--paper-raised);
-  border: 1px solid var(--rule);
-  border-radius: 12px;
-  padding: var(--space-2) var(--space-3);
-  resize: vertical;
-  min-height: 3.2rem;
-}
-
-.chat-form textarea:focus-visible {
-  outline: 3px solid var(--progress);
-  outline-offset: 1px;
-}
-
-.chat-actions {
-  display: flex;
-  gap: var(--space-2);
-}
-
-.chat-send,
-.chat-restart {
-  font-weight: 600;
-  padding: 0.5rem 1.2rem;
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.chat-send {
-  border: 0;
-  background: var(--ink);
-  color: var(--page);
-}
-
-.chat-restart {
-  border: 1px solid var(--rule);
-  background: transparent;
-}
-
-.chat-send:disabled,
-.chat-restart:disabled,
-.chat-example:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* --- path ------------------------------------------------------------------ */
-
-.chat-path {
-  position: sticky;
-  top: 5rem;
-  padding: var(--space-3);
-  background: var(--paper-raised);
-  border: 1px solid var(--rule);
-  border-radius: 12px;
-}
-
-.chat-path h2 {
-  font-size: var(--step-1);
-  font-weight: 600;
-  margin-bottom: var(--space-3);
-}
-
-.chat-path-empty,
-.chat-path-note {
-  color: var(--steel);
-  font-size: var(--step--1);
-  margin: 0;
-}
-
-.chat-path-note {
-  margin-top: var(--space-3);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--rule);
-}
-
-.path {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
+/* Path of one answer. */
+.path { list-style: none; margin: 0; padding: 0; }
 .hop {
-  --dot: var(--rule);
+  --dot: var(--line-strong);
   position: relative;
   display: grid;
-  grid-template-columns: 1rem minmax(0, 1fr);
-  gap: var(--space-2);
-  padding-bottom: var(--space-3);
+  grid-template-columns: 0.9rem minmax(0, 1fr);
+  gap: var(--s3);
+  padding-bottom: var(--s4);
 }
-
-.hop::before {
-  content: "";
-  position: absolute;
-  left: calc(0.5rem - 1px);
-  top: 1.1rem;
-  bottom: 0.1rem;
-  width: 2px;
-  background: var(--rule);
-}
-
-.hop:last-of-type::before {
-  display: none;
-}
-
-.hop-ok { --dot: var(--cleared); }
+.hop::before { content: ""; position: absolute; left: calc(0.45rem - 1px); top: 1rem; bottom: 0; width: 2px; background: var(--line); }
+.hop:last-of-type::before { display: none; }
+.hop-ok { --dot: var(--safe); }
 .hop-warn { --dot: var(--caution); }
-.hop-fail { --dot: var(--rejected); }
-.hop-wait { --dot: var(--ink); }
-
-.hop-dot {
-  width: 1rem;
-  height: 1rem;
-  margin-top: 0.2rem;
-  border-radius: 50%;
-  background: var(--dot);
-}
-
-.hop-skip .hop-dot {
-  background: transparent;
-  border: 2px dashed var(--rule);
-}
-
-.hop-wait .hop-dot {
-  animation: hop-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes hop-pulse {
-  50% { opacity: 0.35; }
-}
-
-.hop-title {
-  margin: 0;
-  font-weight: 600;
-}
-
-.hop-text {
-  margin: 0.1rem 0 0;
-  font-size: var(--step--1);
-  color: var(--steel);
-}
-
-.hop-detail {
-  margin: 0.2rem 0 0;
-  font-size: var(--step--1);
-  font-variant-numeric: tabular-nums;
-}
-
-.hop-skip .hop-title,
-.hop-skip .hop-text {
-  opacity: 0.6;
-}
-
-.path-error {
-  color: var(--rejected-text);
-  font-size: var(--step--1);
-}
-
-@media (max-width: 960px) {
-  .chat {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .chat-path {
-    position: static;
-  }
-}
-
-@media (max-width: 640px) {
-  .chat {
-    padding: var(--space-3) 16px;
-  }
-
-  .chat-head h1 {
-    font-size: var(--step-2);
-  }
-}
+.hop-fail { --dot: var(--malicious); }
+.hop-wait { --dot: var(--action); }
+.hop-dot { width: 0.9rem; height: 0.9rem; margin-top: 0.25rem; border-radius: 50%; background: var(--dot); }
+.hop-skip .hop-dot { background: transparent; border: 2px dashed var(--line-strong); }
+.hop-wait .hop-dot { animation: pulse 1.2s ease-in-out infinite; }
+.hop-title { font-weight: 600; font-size: var(--t-sm); }
+.hop-text { margin-top: 0.1rem; font-size: var(--t-xs); color: var(--muted); }
+.hop-detail { margin-top: 0.15rem; font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.hop-skip .hop-title, .hop-skip .hop-text { opacity: 0.6; }
+.path-error { color: var(--malicious); font-size: var(--t-xs); }

@@ -41,7 +41,8 @@ let base = "";
 beforeAll(async () => {
   process.env["CHAT_URL"] = await listen(opencode);
   process.env["OCCLUDRA_INSPECT_URL"] = await listen(occludra);
-  const { handleChat } = await import("../server/chat.ts");
+  const { handleChat, setRunContext } = await import("../server/chat.ts");
+  setRunContext((run) => (run === "weather-run-1" ? "<datos>veredicto Malicious</datos>" : null));
   ui = createServer((req, res) => void handleChat(req, res));
   base = await listen(ui);
 });
@@ -87,5 +88,15 @@ describe("POST /api/chat", () => {
     seen.length = 0;
     await post({ text: "hola", session: "../../etc" });
     expect(seen[0]?.path).toBe("/session"); // ignored, a new one is created
+  });
+
+  it("opens a run's session with its data, then asks plainly", async () => {
+    seen.length = 0;
+    const first = (await (await post({ text: "¿por qué?", run: "weather-run-1" })).json()) as ChatReply;
+    await post({ text: "¿y ahora?", run: "weather-run-1", session: first.session });
+    const messages = seen.filter((s) => s.path.endsWith("/message")).map((s) => (s.body as { parts: { text: string }[] }).parts[0]!.text);
+    expect(messages[0]).toBe("<datos>veredicto Malicious</datos>\n\nPregunta: ¿por qué?");
+    expect(messages[1]).toBe("¿y ahora?");
+    expect((await post({ text: "hola", run: "no-such-run" })).status).toBe(404);
   });
 });

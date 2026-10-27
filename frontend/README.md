@@ -1,9 +1,10 @@
 # mcp-eval-ui
 
-Frontend para presentar mcp-eval-operator en vivo: un servidor MCP entra, se
-evalúa en un sandbox y sale un veredicto. Funciona sin cluster (modo demo) o
-leyendo los CRs reales (modo live). El toggle Demo/Live está arriba a la
-derecha.
+La interfaz de la plataforma: agregás el repositorio de un servidor MCP, la
+plataforma lo evalúa en una caja aislada y te dice, en lenguaje llano, si es
+seguro conectarlo a un agente de IA y por qué. Funciona con el cluster (modo
+Cluster, el de siempre cuando está desplegada) o con datos de demostración
+(modo Demo, el de `npm run demo`). El selector está abajo a la izquierda.
 
 ## Levantarlo
 
@@ -36,12 +37,7 @@ KUBECONFIG=$PWD/test/.fake-kubeconfig npm run live
 
 ## Para presentar
 
-| Tecla | Acción |
-|---|---|
-| `1` a `4` | Análisis, Chat, Servidores, Registro técnico |
-| `espacio` | Pausar o reanudar la demo |
-
-El selector Claro/Oscuro de la barra superior cambia el tema y lo recuerda en
+El selector Claro/Oscuro de la barra lateral cambia el tema y lo recuerda en
 el navegador; sin elección, sigue el tema del sistema. Para proyectar conviene
 el claro.
 
@@ -58,23 +54,29 @@ saltar al veredicto. Cada escenario dura menos de un minuto a 1×.
 `calendar-mcp` corre de fondo y vuelve a empezar solo, como si lo disparara su
 cron.
 
-## Vistas
+## Pantallas
 
-- **Análisis.** Un run contado de arriba abajo, para alguien que nunca oyó
-  hablar de MCP: cada paso (caja aislada, auditor estático, Vigil, fuzzer,
-  sonda, síntesis) dice qué hace, qué encontró en este run y qué concluyó.
-  El detalle técnico de cada paso (la respuesta JSON del agente, el modelo y
-  el camino de la consulta por Occludra y NetBird hasta el LFM) queda en un
-  desplegable. Arriba, el sello con el veredicto y una frase que responde
-  "¿lo puedo conectar?"; al final, qué habría que arreglar.
-- **Servidores.** Columnas En evaluación, Aprobados y Rechazados. El detalle
-  incluye spec, veredicto, hallazgos e historial.
-- **Registro técnico.** El log del contenedor `evaluator`, en solo lectura.
+- **Servidores** (`#/`). La lista, con el veredicto de cada uno, cuándo se
+  evaluó y cada cuánto se repite. "Evaluar un servidor" abre el formulario:
+  repositorio, nombre (se completa solo), rama, carpeta, cómo se conecta
+  (stdio o SSE) y frecuencia. Al guardarlo se crea el `MCPServer` y la primera
+  evaluación arranca enseguida.
+- **Un servidor** (`#/servidores/<nombre>[/<run>]`). El sello con el
+  veredicto, el historial de evaluaciones y dos pestañas: "Qué pasó" (cada
+  paso del análisis en lenguaje llano, con el detalle técnico desplegable, y
+  qué habría que arreglar) y "Registro técnico" (el log del evaluador). A la
+  derecha, "Preguntale al análisis": un chat cuyo modelo tiene delante los
+  resultados de esa evaluación. Acciones: evaluar ahora, pausar o reanudar y
+  borrar. Los servidores que vienen de git (Flux) se pueden evaluar, pero no
+  pausar ni borrar desde acá: Flux los volvería a poner.
+- **Cómo funciona** (`#/como-funciona`). Las cinco piezas de la plataforma y
+  "Probá el camino hasta el modelo": un chat que muestra por dónde pasa cada
+  respuesta y qué tapa Occludra.
 
-La historia sale de `buildStory` (`src/model/story.ts`): primero la respuesta
-estructurada de cada agente en `status.agentResults` (vive con el CR, así que
-sirve también para runs viejos), después el report y, mientras el Job existe,
-los logs.
+La historia de cada análisis sale de `buildStory` (`src/model/story.ts`):
+primero la respuesta estructurada de cada agente en `status.agentResults`
+(vive con el CR, así que sirve también para runs viejos), después el report y,
+mientras el Job existe, los logs.
 
 ## Cómo se arma
 
@@ -96,21 +98,38 @@ ConfigMap `<run>-report`. El flujo del prompt se deriva igual en los dos modos
 
 ## Qué sale del cluster y qué no
 
-- El backend usa permisos de solo lectura: `get/list/watch` de los tres CRDs,
-  `get` de ConfigMaps, `get/list` de pods y `get` de `pods/log`. No tiene
-  `pods/exec` ni acceso a Secrets.
-- La única ruta que manda algo es `POST /api/chat`: una pregunta al OpenCode
-  del chat (abajo). Chequea `Origin` igual que el WebSocket.
+- El backend lee: `get/list/watch` de los tres CRDs, `get` de ConfigMaps,
+  `get/list` de pods y `get` de `pods/log`. Escribe solo `MCPServer` en
+  `mcp-evals` (`create`, `patch`, `delete`), para el formulario y las acciones
+  (`server/actions.ts`). No tiene `pods/exec` ni acceso a Secrets.
+- Rutas que escriben: `POST /api/servers` (crear), `POST
+  /api/servers/<n>/evaluate`, `POST /api/servers/<n>/pause` y `DELETE
+  /api/servers/<n>`, más `POST /api/chat`. Todas exigen un `Origin` igual al
+  `Host`: el navegador manda la contraseña de Traefik a cualquier sitio que
+  apunte acá, y sin ese chequeo otra página podría actuar en tu nombre.
+- El formulario valida en el navegador y otra vez en el servidor
+  (`src/model/serverForm.ts`): solo repositorios `https://`, nombres DNS de
+  hasta 40 caracteres, carpetas sin `..`, y como mucho 20 servidores creados
+  desde la UI.
 - La terminal no tiene stdin. Solo muestra el contenedor `evaluator`; los
   logs de `target` (el servidor no confiable) y de `cloner` nunca se leen.
 - El runner enmascara prompts, payloads y credenciales antes de escribir cada
   línea, así que la terminal no expone evidencia.
 
-## El chat
+## Los chats
 
-La vista Chat le pregunta al modelo por el mismo camino que usan los agentes y
-muestra, para cada respuesta, por dónde pasó: servidor de la UI → OpenCode →
+Los dos usan el mismo camino que los agentes: servidor de la UI → OpenCode →
 Occludra (qué tapó) → la PC por ZeroTier → LFM en la GPU → vuelta.
+
+- **Preguntale al análisis** manda `run` en `POST /api/chat`. La primera
+  pregunta de cada sesión lleva los datos de esa evaluación
+  (`src/model/askContext.ts`): veredicto, hallazgos, detecciones de Vigil y la
+  respuesta de cada agente, recortados para entrar en 32K tokens. El texto que
+  viene del servidor evaluado va entre `<datos>` y marcado como datos, no
+  instrucciones; como el modelo no tiene herramientas, lo peor que puede hacer
+  un texto envenenado es confundir una respuesta.
+- **Probá el camino** (en Cómo funciona) es el chat sin contexto, para ver el
+  recorrido.
 
 - `frontend/deploy/ui-chat.yaml`: un Deployment `opencode-chat` (imagen del
   runner, `opencode serve`) con todas las herramientas denegadas, sin token de

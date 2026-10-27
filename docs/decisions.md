@@ -387,3 +387,18 @@ Decisions made before this log existed are not back-filled here.
 - **Who decided:** Juan (MetalLB + Traefik, basic auth, self-signed TLS);
   Claude (chart versions, `autoAssign: false`, excluding the GPU node from
   L2 announcements).
+
+### 2026-10-27 — UI v2: add, pause and delete servers from the UI
+- **Decision:** full redesign of the UI, built by us (no longer the
+  teammate's): servers list as the home page, an "Evaluar un servidor" form
+  that creates the `MCPServer`, per-server actions (evaluate now, pause,
+  delete), "Preguntale al análisis" (a chat with the run's results as
+  context) and a "Cómo funciona" page holding the path demo. The UI's Role
+  gains `create`/`patch`/`delete` on `mcpservers` in `mcp-evals` only.
+- **Reason:** without a form the platform could only be used with kubectl;
+  the old chat showed the architecture but answered nothing about a run.
+- **Alternatives:** create-only permissions (safer: whoever has the Traefik
+  password could not delete history); keep the UI read-only.
+- **Who decided:** Juan (redesign, option B permissions, owning the front);
+  Claude (git-managed servers cannot be paused/deleted from the UI, a cap of
+  20 UI-created servers, same-origin check on every write route).
