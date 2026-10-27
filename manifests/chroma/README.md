@@ -117,3 +117,11 @@ and the query node use about 170–190 MiB each; everything else uses under
   the cluster network, timing attacks are not a practical concern here.
 - MinIO and Postgres still use the chart's fixed in-namespace credentials.
   Only pods in `chroma` can reach them (NetworkPolicy).
+
+### CPU requests (2026-10-27)
+
+Every Chroma component requests 50m of CPU (limits unchanged). Measured on
+k0s with `kubectl top`: the 13 pods together used ~40m while requesting
+1.9 CPU, which left the two 2-vCPU workers with no room for an evaluation
+pod (750m) — runs failed with "stuck Pending". Requests only reserve
+scheduling room; a busy component can still burst up to its limit.
