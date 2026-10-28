@@ -23,7 +23,7 @@ import { type LogLine, parseLogLine } from "../src/model/logs.ts";
 import type { EvaluationReport } from "../src/model/report.ts";
 import { buildAskContext } from "../src/model/askContext.ts";
 import type { MCPServer } from "../src/model/crd.ts";
-import { handleAction, isActionRoute } from "./actions.ts";
+import { handleAction, isActionRoute, mergePatchBody } from "./actions.ts";
 import { chatEnabled, handleChat, setRunContext } from "./chat.ts";
 import { isSameOrigin } from "./origin.ts";
 
@@ -322,7 +322,8 @@ const serverStore = {
     await objects.create(server as unknown as k8s.KubernetesObject, undefined, undefined, "mcp-eval-ui");
   },
   patch: async (name: string, patch: Record<string, unknown>) => {
-    await objects.patch({ ...ref(name), ...patch } as k8s.KubernetesObject, undefined, undefined, "mcp-eval-ui", undefined, k8s.PatchStrategy.MergePatch);
+    const body = mergePatchBody(API_VERSION, "MCPServer", NAMESPACE, name, patch);
+    await objects.patch(body as k8s.KubernetesObject, undefined, undefined, "mcp-eval-ui", undefined, k8s.PatchStrategy.MergePatch);
   },
   remove: async (name: string) => {
     // Background: the runs (owned by the server) are garbage-collected after it.
@@ -374,6 +375,9 @@ function serveStatic(req: IncomingMessage, res: ServerResponse): void {
   }
   if (!existsSync(file) || statSync(file).isDirectory()) file = join(DIST, "index.html");
   res.writeHead(200, {
+    // Hashed assets can be cached; index.html must be revalidated so a new
+    // deploy shows up on the next load.
+    "cache-control": file.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable",
     "content-type": TYPES[extname(file)] ?? "application/octet-stream",
     "x-content-type-options": "nosniff",
     "content-security-policy": CSP,

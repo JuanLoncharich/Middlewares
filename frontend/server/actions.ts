@@ -40,6 +40,21 @@ export interface ServerStore {
 }
 
 const MAX_BODY = 8 * 1024;
+
+/**
+ * The object a merge patch is sent as: the target's identity plus the patch.
+ * The patch's own metadata (annotations) merges into the identity instead of
+ * replacing it, or the API server would get a patch with no name.
+ */
+export function mergePatchBody(apiVersion: string, kind: string, namespace: string, name: string, patch: Record<string, unknown>) {
+  const { metadata, ...rest } = patch;
+  return {
+    apiVersion,
+    kind,
+    ...rest,
+    metadata: { ...(metadata as Record<string, unknown> | undefined), name, namespace },
+  };
+}
 const NAME = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 
 function send(res: ServerResponse, status: number, body: unknown): void {
