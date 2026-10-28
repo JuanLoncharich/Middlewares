@@ -69,7 +69,7 @@ sysdb:
       cpu: '1000m'
       memory: '512Mi'
     requests:
-      cpu: '100m'
+      cpu: '50m'
       memory: '128Mi'
 
 # --------------------------------------------------- SysDB migration (Job)
@@ -99,7 +99,7 @@ rustSysdbService:
       cpu: '500m'
       memory: '384Mi'
     requests:
-      cpu: '100m'
+      cpu: '50m'
       memory: '128Mi'
 
 # ------------------------------------------------- Frontend (REST gateway)
@@ -121,7 +121,7 @@ rustFrontendService:
       cpu: '1000m'
       memory: '1Gi'
     requests:
-      cpu: '250m'
+      cpu: '50m'
       memory: '256Mi'
 
 # ------------------------------------------------------------ Log Service
@@ -139,7 +139,7 @@ rustLogService:
       cpu: '500m'
       memory: '768Mi'
     requests:
-      cpu: '200m'
+      cpu: '50m'
       memory: '256Mi'
 
 # ------------------------------------------------------------- Query nodes
@@ -162,7 +162,7 @@ queryService:
       cpu: '1000m'
       memory: '1Gi'
     requests:
-      cpu: '200m'
+      cpu: '50m'
       memory: '384Mi'
 
 # --------------------------------------------------------------- Compactors
@@ -187,7 +187,7 @@ compactionService:
       cpu: '1000m'
       memory: '1536Mi'
     requests:
-      cpu: '200m'
+      cpu: '50m'
       memory: '1Gi'
 
 # ----------------------------------------------------- Work queue + consumer
@@ -204,7 +204,7 @@ workQueueService:
       cpu: '500m'
       memory: '512Mi'
     requests:
-      cpu: '100m'
+      cpu: '50m'
       memory: '128Mi'
 
 fnConsumer:
@@ -220,7 +220,7 @@ fnConsumer:
       cpu: '500m'
       memory: '768Mi'
     requests:
-      cpu: '100m'
+      cpu: '50m'
       memory: '192Mi'
 
 # --------------------------------------------------------- Garbage collector
@@ -239,7 +239,7 @@ garbageCollector:
       cpu: '500m'
       memory: '1Gi'
     requests:
-      cpu: '100m'
+      cpu: '50m'
       memory: '256Mi'
 
 # --------------------------------------------------------------------------

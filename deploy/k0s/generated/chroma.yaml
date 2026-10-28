@@ -238,7 +238,7 @@ spec:
           mountPath: /storage
         resources:
           requests:
-            cpu: 250m
+            cpu: 50m
             memory: 640Mi
           limits:
             cpu: '1'
@@ -354,7 +354,7 @@ spec:
           mountPath: /docker-entrypoint-initdb.d
         resources:
           requests:
-            cpu: 250m
+            cpu: 50m
             memory: 256Mi
           limits:
             cpu: '1'
@@ -2139,7 +2139,7 @@ spec:
             cpu: 500m
             memory: 768Mi
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 192Mi
         volumeMounts:
         - mountPath: /config/
@@ -2198,7 +2198,7 @@ spec:
             cpu: 1000m
             memory: 1Gi
           requests:
-            cpu: 250m
+            cpu: 50m
             memory: 256Mi
         volumeMounts:
         - mountPath: /config/
@@ -2245,7 +2245,7 @@ spec:
             cpu: 500m
             memory: 384Mi
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 128Mi
         volumeMounts:
         - mountPath: /config/
@@ -2303,7 +2303,7 @@ spec:
             cpu: 1000m
             memory: 512Mi
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 128Mi
       serviceAccountName: sysdb-serviceaccount
 ---
@@ -2351,7 +2351,7 @@ spec:
             cpu: 1000m
             memory: 1536Mi
           requests:
-            cpu: 200m
+            cpu: 50m
             memory: 1Gi
         volumeMounts:
         - mountPath: /config/
@@ -2418,7 +2418,7 @@ spec:
             cpu: 500m
             memory: 1Gi
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 256Mi
         volumeMounts:
         - mountPath: /config/
@@ -2513,7 +2513,7 @@ spec:
             cpu: 1000m
             memory: 1Gi
           requests:
-            cpu: 200m
+            cpu: 50m
             memory: 384Mi
         volumeMounts:
         - mountPath: /config/
@@ -2578,7 +2578,7 @@ spec:
             cpu: 500m
             memory: 768Mi
           requests:
-            cpu: 200m
+            cpu: 50m
             memory: 256Mi
         volumeMounts:
         - mountPath: /config/
@@ -2641,7 +2641,7 @@ spec:
             cpu: 500m
             memory: 512Mi
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 128Mi
         volumeMounts:
         - mountPath: /config/

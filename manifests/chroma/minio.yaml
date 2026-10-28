@@ -108,7 +108,7 @@ spec:
               mountPath: /storage
           resources:
             requests:
-              cpu: 250m
+              cpu: 50m
               memory: 640Mi   # measured ~650Mi holding the corpus
             limits:
               cpu: "1"
