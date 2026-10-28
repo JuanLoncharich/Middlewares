@@ -1,7 +1,11 @@
 # NVIDIA device plugin — advertises nvidia.com/gpu on the GPU node only.
 # Not the full GPU Operator: one DaemonSet, pinned to the labelled node, so
 # the rest of the cluster never sees it.
-# k0s keeps the kubelet root under /var/lib/k0s/kubelet (not /var/lib/kubelet).
+# k0s keeps the kubelet root under /var/lib/k0s/kubelet, but the kubelet's
+# device-plugin registration socket is fixed at /var/lib/kubelet/device-plugins
+# (it does not follow --root-dir). Mounting the k0s path left the plugin
+# unable to register ("context deadline exceeded") and nvidia.com/gpu was
+# never advertised (2026-10-27, k0s v1.35.4).
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -54,4 +58,4 @@ spec:
       volumes:
         - name: device-plugins
           hostPath:
-            path: /var/lib/k0s/kubelet/device-plugins
+            path: /var/lib/kubelet/device-plugins
