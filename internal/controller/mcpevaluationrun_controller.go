@@ -101,16 +101,27 @@ const (
 	// flake). Evaluation-verdict failures are never retried.
 	maxJobRetries int32 = 2
 
-	// stuckPendingAfter is how long a pod may sit Pending without any
-	// container starting before the controller treats it as an infrastructure
-	// fault and retries the Job instead of burning the whole deadline.
-	stuckPendingAfter = 5 * time.Minute
-
 	// runReconcileWorkers bounds how many run reconciles execute in parallel
 	// (one run's reconcile does several API-server round-trips; the default
 	// single worker would serialize the whole platform under load).
 	runReconcileWorkers = 8
 )
+
+// stuckPendingAfter is how long a pod may sit Pending without any container
+// starting before the controller treats it as an infrastructure fault and
+// retries the Job instead of burning the whole deadline. STUCK_PENDING_AFTER
+// (a Go duration, e.g. "15m") raises it on clusters whose control plane is
+// slow to create pod sandboxes.
+var stuckPendingAfter = durationFromEnv("STUCK_PENDING_AFTER", 5*time.Minute)
+
+// durationFromEnv parses the named env var as a positive Go duration and
+// falls back to def when it is unset or invalid.
+func durationFromEnv(name string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv(name))); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
 
 // ImageConfig carries the images, secrets and security-layer wiring injected
 // into evaluation Jobs.
