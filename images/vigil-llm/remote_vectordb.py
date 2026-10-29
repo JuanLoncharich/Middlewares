@@ -67,6 +67,7 @@ import math
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Callable, Dict, List, Optional
@@ -370,7 +371,23 @@ class RemoteVectorDB:
             self._ids.clear()
             raise
 
+    # Back-off between attempts for transient Chroma failures (5xx, timeouts,
+    # DNS/connect errors). A slow control plane makes these brief and
+    # frequent; failing the whole scan on the first one fails evaluations.
+    _RETRY_DELAYS_S = (2, 5, 10)
+
     def _request(self, method: str, url: str, payload: Optional[dict] = None):
+        for delay in self._RETRY_DELAYS_S:
+            try:
+                return self._request_once(method, url, payload)
+            except RemoteVectorDBError as err:
+                if not getattr(err, "transient", False):
+                    raise
+                logger.warning(f"remote vectordb: {err}; retrying in {delay}s")
+                time.sleep(delay)
+        return self._request_once(method, url, payload)
+
+    def _request_once(self, method: str, url: str, payload: Optional[dict] = None):
         data = json.dumps(payload).encode() if payload is not None else None
         headers = dict(self._auth)
         if data:
@@ -381,9 +398,13 @@ class RemoteVectorDB:
                 body = resp.read()
         except urllib.error.HTTPError as err:
             detail = err.read()[:200].decode(errors="replace")
-            raise RemoteVectorDBError(f"{method} {url}: HTTP {err.code} {detail}") from err
+            e = RemoteVectorDBError(f"{method} {url}: HTTP {err.code} {detail}")
+            e.transient = err.code >= 500 or err.code == 429
+            raise e from err
         except (urllib.error.URLError, OSError, TimeoutError) as err:
-            raise RemoteVectorDBError(f"{method} {url}: {err}") from err
+            e = RemoteVectorDBError(f"{method} {url}: {err}")
+            e.transient = True
+            raise e from err
         try:
             return json.loads(body)
         except ValueError as err:
