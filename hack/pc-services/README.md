@@ -55,6 +55,31 @@ minutes), both under `~/.cache/mcp-eval/pc-services/`.
    - `local-llm.key` — the LLM's API key (also in Occludra's Secret);
    - `vigil-api-token` — Vigil's token (also in Secret `vigil-remote-token`).
 
+## Memory
+
+The PC has 14 GiB of RAM and a zram swap, and `systemd-oomd` watches it:
+when RAM **and** swap pass 90 % it SIGKILLs the cgroup using the most swap.
+A container killed that way shows `Exited (137)` with `OOMKilled=false`
+(that flag means only the kernel's OOM killer) and nothing in `dmesg`. To check:
+`journalctl --since today | grep systemd-oomd`.
+
+On 2026-11-10 that cgroup was the LLM, twice: its weights and KV are in
+VRAM, but llama.cpp also keeps prompt states in host RAM (`--cache-ram`,
+default 8192 MiB, plus 32 context checkpoints per slot). Long agent prompts
+(30k tokens) grew it to ~5 GiB in swap, and Vigil's start-up peak (3.5 GiB
+while it loads its models, ~0.7 GiB after) tipped the PC over. The LLM now
+runs with `LLM_CACHE_RAM=1024` and `LLM_CTX_CHECKPOINTS=8` (`pc.conf`).
+
+Measured with Gemma 4 12B, 12 different 25k-token prompts:
+
+| service | RAM | VRAM |
+|---|---|---|
+| llm | 1.1–2.8 GiB resident + ≤1 GiB swap | ~11 GiB |
+| vigil | ~0.7 GiB (3.5 GiB peak at start) | — |
+| chroma | ~0.25 GiB (0.7 GiB peak) | — |
+
+Anything else heavy on the PC (a kind cluster, Plato) eats into this margin.
+
 ## The corpus lives on the PC
 
 Vigil compares every text with a corpus of known injections kept in Chroma.

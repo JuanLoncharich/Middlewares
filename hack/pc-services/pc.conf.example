@@ -20,6 +20,11 @@ LLM_MODEL="${LLM_MODEL:-$HOME/AI/models/gemma-4-12b-it/gemma-4-12b-it-UD-Q4_K_XL
 LLM_MODEL_ALIAS="${LLM_MODEL_ALIAS:-gemma-4-12b-it}"   # = LLM_MODEL in deploy/k0s/render.env
 LLM_CTX="${LLM_CTX:-65536}"
 LLM_REASONING_BUDGET="${LLM_REASONING_BUDGET:-0}"
+# Host RAM llama.cpp may use for prompt states (MiB) and context checkpoints
+# per slot. llama.cpp's defaults (8192 / 32) filled this 14 GiB PC and
+# systemd-oomd killed the LLM; see README.md "Memory".
+LLM_CACHE_RAM="${LLM_CACHE_RAM:-1024}"
+LLM_CTX_CHECKPOINTS="${LLM_CTX_CHECKPOINTS:-8}"
 
 # --- Vigil -----------------------------------------------------------------
 # Default: the image CI built for the commit deploy/k0s/render.env names.

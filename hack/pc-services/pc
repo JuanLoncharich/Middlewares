@@ -50,7 +50,7 @@ setup_env() {
   [ -f "$LLM_MODEL" ] || die "model not found: $LLM_MODEL"
   ip -4 -o addr | grep -q " $PC_IP/" || die "PC_IP $PC_IP is not an address of this machine (ZeroTier down?)"
   dir="$(cd "$(dirname "$LLM_MODEL")" && pwd)"; file="$(basename "$LLM_MODEL")"
-  export PC_IP LLM_PORT VIGIL_PORT LLM_CTX LLM_REASONING_BUDGET LLM_MODEL_ALIAS
+  export PC_IP LLM_PORT VIGIL_PORT LLM_CTX LLM_REASONING_BUDGET LLM_MODEL_ALIAS LLM_CACHE_RAM LLM_CTX_CHECKPOINTS
   export LLM_MODEL_DIR="$dir" LLM_MODEL_FILE="$file"
   export VIGIL_IMAGE="${VIGIL_IMAGE:-$(default_vigil_image)}"
   export PC_UID PC_GID

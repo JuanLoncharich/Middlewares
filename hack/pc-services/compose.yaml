@@ -51,6 +51,15 @@ services:
       - auto
       - --reasoning-budget
       - "${LLM_REASONING_BUDGET:-0}"
+      # Host-RAM caps. The weights and KV live in VRAM, but llama.cpp also
+      # keeps prompt states in RAM: --cache-ram defaults to 8192 MiB, plus up
+      # to 32 context checkpoints per slot (Gemma's SWA layers). With 30k-token
+      # prompts that grew to several GiB, the 14 GiB PC filled up and
+      # systemd-oomd SIGKILLed this container (Exited 137, OOMKilled=false).
+      - --cache-ram
+      - "${LLM_CACHE_RAM:-1024}"
+      - --ctx-checkpoints
+      - "${LLM_CTX_CHECKPOINTS:-8}"
       - --jinja
       - --no-webui
     deploy:
